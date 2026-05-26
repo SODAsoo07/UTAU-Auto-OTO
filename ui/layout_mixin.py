@@ -19,11 +19,7 @@ from ui.i18n import t
 
 EN_CVVC_UI_ENABLED = False
 NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
-NO_MFA_SSL_SLOT_LABEL = "MFA-Free SSL 슬롯 어댑터(실험)"
-NO_MFA_MANUAL_ANCHOR_LABEL = "Manual OTO anchor scorer(실험)"
-NO_MFA_TUNED_LABEL = "No-MFA (학습 모델)"
-NO_MFA_CHECKPOINT_TUNE_D_LABEL = "tune_d (default)"
-NO_MFA_CHECKPOINT_AUTO_LABEL = "auto (latest checkpoint)"
+HSMM_OTO_LABEL = "HSMM OTO"
 
 
 class LayoutMixin:
@@ -380,7 +376,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["MFA", "전용(시퀀스)"],
+            values=[HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -389,7 +385,7 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text=t("(기본은 MFA입니다. 필요 시 자동 설치됩니다.)"),
+            text=t("(기본은 HSMM OTO입니다. MFA는 선택한 경우에만 설치 여부를 확인합니다.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
@@ -412,23 +408,6 @@ class LayoutMixin:
             text_color=PALETTE.neutral_text,
         )
         self.no_mfa_oto_mode_hint_label.pack(side="left", fill="x", expand=True)
-        self.row_no_mfa_checkpoint = build_form_row(form_body)
-        build_left_label(self.row_no_mfa_checkpoint, "No-MFA checkpoint:").pack(side="left")
-        self.no_mfa_checkpoint_menu = ctk.CTkOptionMenu(
-            self.row_no_mfa_checkpoint,
-            values=self._no_mfa_checkpoint_choice_options(),
-            variable=self.no_mfa_checkpoint_choice_var,
-            width=320,
-            command=lambda _v: self._on_no_mfa_checkpoint_choice_change(),
-        )
-        _style_blue_menu(self.no_mfa_checkpoint_menu)
-        self.no_mfa_checkpoint_menu.pack(side="left", padx=(6, 8))
-        self.no_mfa_checkpoint_hint_label = ctk.CTkLabel(
-            self.row_no_mfa_checkpoint,
-            text="Default is tune_d; you can pick another checkpoint.",
-            text_color=PALETTE.neutral_text,
-        )
-        self.no_mfa_checkpoint_hint_label.pack(side="left", fill="x", expand=True)
         # Boundary scorer checkpoint picker. Discovered model files appear as
         # additional options; "자동 (auto)" defers to the resolver's default
         # (mtime-newest non-experimental). Hidden together with the device row
@@ -1188,7 +1167,7 @@ class LayoutMixin:
             if hasattr(self, "ja_alias_style_menu"):
                 self.ja_alias_style_menu.configure(state="disabled")
             if hasattr(self, "aligner_var"):
-                self.aligner_var.set("MFA")
+                self.aligner_var.set(HSMM_OTO_LABEL)
         current_code = normalize_auto_format_value(self._get_language(), self.auto_format_var.get())
         self._set_auto_format_from_code(current_code, self._get_language())
         if hasattr(self, "_apply_recommended_ml_model_defaults"):
@@ -1306,106 +1285,14 @@ class LayoutMixin:
         raw = str(value or "").strip().lower()
         if raw in {"crnn", "oto_crnn", "oto-crnn", "crnn_oto", "crnn-oto"}:
             return "remap"
-        if raw in {"mfa_free", "mfa-free", "ssl_slot", "ssl-slot", "mfa_free_ssl_slot"}:
-            return "mfa_free_ssl_slot"
-        if raw in {"manual_oto_anchor", "manual_anchor", "manual-anchor", "manual_oto_anchor_scorer"}:
-            return "manual_oto_anchor"
         if raw in {"remap", "base_remap", "base"}:
             return "remap"
         text = str(value or "").strip()
-        if text == NO_MFA_SSL_SLOT_LABEL:
-            return "mfa_free_ssl_slot"
-        if text == NO_MFA_MANUAL_ANCHOR_LABEL:
-            return "manual_oto_anchor"
         if text == "CRNN OTO 예측기(실험)":
             return "remap"
         if text in {"베이스 OTO 재매핑 + 보정", NO_MFA_REMAP_LABEL}:
             return "remap"
         return "remap"
-
-    def _list_no_mfa_checkpoint_choices(self) -> list[dict[str, str]]:
-        candidates: list[dict[str, str]] = []
-        seen_paths: set[str] = set()
-        roots: list[str] = []
-        for base in (
-            str(getattr(self, "app_dir", "") or "").strip(),
-            os.getcwd(),
-        ):
-            if not base:
-                continue
-            root = os.path.abspath(os.path.join(base, "ml_workspace", "mfa_free_oto"))
-            if root not in roots and os.path.isdir(root):
-                roots.append(root)
-        for root in roots:
-            for dirpath, _dirnames, filenames in os.walk(root):
-                for name in filenames:
-                    if not str(name).lower().endswith(".pt"):
-                        continue
-                    full_path = os.path.abspath(os.path.join(dirpath, name))
-                    key = os.path.normcase(full_path)
-                    if key in seen_paths:
-                        continue
-                    seen_paths.add(key)
-                    label = f"{name} ({os.path.basename(dirpath)})"
-                    candidates.append({"code": f"path:{full_path}", "label": label, "path": full_path})
-        candidates.sort(key=lambda item: str(item.get("label", "")).lower())
-        return candidates
-
-    def _no_mfa_checkpoint_choice_options(self) -> list[str]:
-        labels = [NO_MFA_CHECKPOINT_TUNE_D_LABEL, NO_MFA_CHECKPOINT_AUTO_LABEL]
-        for item in self._list_no_mfa_checkpoint_choices():
-            label = str(item.get("label", "")).strip()
-            if label and label not in labels:
-                labels.append(label)
-        return labels
-
-    def _no_mfa_checkpoint_label_to_code(self, label: object) -> str:
-        text = str(label or "").strip()
-        if not text or text == NO_MFA_CHECKPOINT_TUNE_D_LABEL:
-            return "tune_d"
-        if text == NO_MFA_CHECKPOINT_AUTO_LABEL:
-            return "auto"
-        for item in self._list_no_mfa_checkpoint_choices():
-            if str(item.get("label", "")) == text:
-                return str(item.get("code", "tune_d") or "tune_d")
-        return "tune_d"
-
-    def _no_mfa_checkpoint_code_to_label(self, code: object) -> str:
-        text = str(code or "").strip()
-        if not text or text.lower() == "tune_d":
-            return NO_MFA_CHECKPOINT_TUNE_D_LABEL
-        if text.lower() == "auto":
-            return NO_MFA_CHECKPOINT_AUTO_LABEL
-        for item in self._list_no_mfa_checkpoint_choices():
-            if str(item.get("code", "")) == text:
-                return str(item.get("label", NO_MFA_CHECKPOINT_TUNE_D_LABEL) or NO_MFA_CHECKPOINT_TUNE_D_LABEL)
-        return NO_MFA_CHECKPOINT_TUNE_D_LABEL
-
-    def _set_no_mfa_checkpoint_choice_from_code(self, code: object) -> str:
-        label = self._no_mfa_checkpoint_code_to_label(code)
-        if hasattr(self, "no_mfa_checkpoint_choice_var"):
-            try:
-                self.no_mfa_checkpoint_choice_var.set(label)
-            except Exception:
-                pass
-        return self._no_mfa_checkpoint_label_to_code(label)
-
-    def _get_no_mfa_checkpoint_choice_code(self) -> str:
-        if not hasattr(self, "no_mfa_checkpoint_choice_var"):
-            return "tune_d"
-        try:
-            current = self.no_mfa_checkpoint_choice_var.get()
-        except Exception:
-            current = ""
-        return self._no_mfa_checkpoint_label_to_code(current)
-
-    def _on_no_mfa_checkpoint_choice_change(self):
-        self._set_no_mfa_checkpoint_choice_from_code(
-            self.no_mfa_checkpoint_choice_var.get()
-            if hasattr(self, "no_mfa_checkpoint_choice_var")
-            else "tune_d"
-        )
-        self._save_config()
 
     @staticmethod
     def _normalize_oto_crnn_engine_code(value):
@@ -1628,12 +1515,7 @@ class LayoutMixin:
 
     def _set_no_mfa_oto_mode_from_code(self, code):
         normalized = self._normalize_no_mfa_oto_mode_code(code)
-        if normalized == "mfa_free_ssl_slot":
-            label = NO_MFA_SSL_SLOT_LABEL
-        elif normalized == "manual_oto_anchor":
-            label = NO_MFA_MANUAL_ANCHOR_LABEL
-        else:
-            label = NO_MFA_REMAP_LABEL
+        label = NO_MFA_REMAP_LABEL
         if hasattr(self, "no_mfa_oto_mode_var"):
             try:
                 self.no_mfa_oto_mode_var.set(label)
@@ -1678,6 +1560,16 @@ class LayoutMixin:
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()
+        try:
+            selected = normalize_aligner_name(
+                self.aligner_var.get() if hasattr(self, "aligner_var") else "",
+                default="hsmm_oto",
+            )
+        except Exception:
+            selected = "hsmm_oto"
+        self._mfa_explicitly_selected = selected == "mfa"
+        if selected == "mfa" and hasattr(self, "_prompt_mfa_install_for_explicit_selection"):
+            self._prompt_mfa_install_for_explicit_selection()
         self._save_config()
 
     def _on_ml_route_change(self, _value=None):
@@ -1696,18 +1588,18 @@ class LayoutMixin:
             if hasattr(self, "developer_mode_enabled_var")
             else False
         )
-        options = ["MFA", "전용(시퀀스)", NO_MFA_TUNED_LABEL]
+        options = [HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"]
         lang = self._get_language()
-        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA").strip()
+        current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else HSMM_OTO_LABEL).strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
         is_kr_template_only = (lang == "korean" and fmt in {"cmpx", "c_plus_v"})
         forced_no_mfa = bool(lang == "english" or is_kr_template_only)
         if current in {"No-MFA", "No-MFA (Experimental)"}:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if forced_no_mfa:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if current not in options:
-            current = "MFA"
+            current = HSMM_OTO_LABEL
         if hasattr(self, "aligner_var"):
             self.aligner_var.set(current)
         if hasattr(self, "aligner_menu"):
@@ -1716,10 +1608,10 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        use_no_mfa_tuned = current == NO_MFA_TUNED_LABEL
-        use_no_mfa = forced_no_mfa or use_no_mfa_tuned
+        use_hsmm_oto = current == HSMM_OTO_LABEL
+        use_no_mfa = forced_no_mfa
         use_sequence = current == "전용(시퀀스)"
-        use_coarse_crnn = normalize_aligner_name(current, default="mfa") == "coarse_crnn"
+        use_coarse_crnn = normalize_aligner_name(current, default="hsmm_oto") == "coarse_crnn"
         is_cmpx_preview = (lang == "korean" and fmt == "cmpx")
         is_c_plus_v_mode = (lang == "korean" and fmt == "c_plus_v")
         limit_ml_routes_for_no_mfa = use_no_mfa and not (
@@ -1763,28 +1655,15 @@ class LayoutMixin:
             if hasattr(self, "_get_oto_crnn_engine_code")
             else "boundary_decoder"
         )
-        if use_no_mfa_tuned and no_mfa_mode_code not in {"mfa_free_ssl_slot", "manual_oto_anchor"}:
-            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("mfa_free_ssl_slot")
-        if use_no_mfa_tuned and no_mfa_mode_code == "manual_oto_anchor" and not developer_enabled:
-            no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("mfa_free_ssl_slot")
-        if no_mfa_mode_code in {"mfa_free_ssl_slot", "manual_oto_anchor"} and not developer_enabled and not use_no_mfa_tuned:
+        if no_mfa_mode_code != "remap":
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         if no_mfa_mode_code == "crnn":
             no_mfa_mode_code = self._set_no_mfa_oto_mode_from_code("remap")
         no_mfa_values = [NO_MFA_REMAP_LABEL]
-        if developer_enabled or use_no_mfa_tuned:
-            no_mfa_values.append(NO_MFA_SSL_SLOT_LABEL)
-        if developer_enabled:
-            no_mfa_values.append(NO_MFA_MANUAL_ANCHOR_LABEL)
         if hasattr(self, "no_mfa_oto_mode_menu"):
             try:
                 self.no_mfa_oto_mode_menu.configure(values=no_mfa_values)
-                if no_mfa_mode_code == "mfa_free_ssl_slot":
-                    self.no_mfa_oto_mode_menu.set(NO_MFA_SSL_SLOT_LABEL)
-                elif no_mfa_mode_code == "manual_oto_anchor":
-                    self.no_mfa_oto_mode_menu.set(NO_MFA_MANUAL_ANCHOR_LABEL)
-                else:
-                    self.no_mfa_oto_mode_menu.set(NO_MFA_REMAP_LABEL)
+                self.no_mfa_oto_mode_menu.set(NO_MFA_REMAP_LABEL)
             except Exception:
                 pass
         if hasattr(self, "oto_crnn_engine_menu"):
@@ -1800,15 +1679,10 @@ class LayoutMixin:
                 )
             except Exception:
                 pass
-        if no_mfa_mode_code == "mfa_free_ssl_slot":
-            no_mfa_mode_desc = NO_MFA_SSL_SLOT_LABEL
-        elif no_mfa_mode_code == "manual_oto_anchor":
-            no_mfa_mode_desc = NO_MFA_MANUAL_ANCHOR_LABEL
-        else:
-            no_mfa_mode_desc = NO_MFA_REMAP_LABEL
+        no_mfa_mode_desc = NO_MFA_REMAP_LABEL
         if hasattr(self, "mfa_align_profile_menu"):
             self.mfa_align_profile_menu.configure(
-                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn) else "normal"
+                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn or use_hsmm_oto) else "normal"
             )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
@@ -1823,28 +1697,6 @@ class LayoutMixin:
                         self.row_no_mfa_oto_mode.pack(**pack_kwargs)
                 else:
                     self.row_no_mfa_oto_mode.pack_forget()
-            except Exception:
-                pass
-        if hasattr(self, "row_no_mfa_checkpoint") and self.row_no_mfa_checkpoint is not None:
-            try:
-                if show_no_mfa_mode_row:
-                    if hasattr(self, "no_mfa_checkpoint_menu"):
-                        options = self._no_mfa_checkpoint_choice_options()
-                        self.no_mfa_checkpoint_menu.configure(values=options)
-                        current_label = (
-                            self.no_mfa_checkpoint_choice_var.get()
-                            if hasattr(self, "no_mfa_checkpoint_choice_var")
-                            else NO_MFA_CHECKPOINT_TUNE_D_LABEL
-                        )
-                        if current_label not in options:
-                            self._set_no_mfa_checkpoint_choice_from_code("tune_d")
-                    if not self.row_no_mfa_checkpoint.winfo_ismapped():
-                        pack_kwargs = {"fill": "x", "pady": 4}
-                        if hasattr(self, "row_align_extra") and self.row_align_extra is not None:
-                            pack_kwargs["before"] = self.row_align_extra
-                        self.row_no_mfa_checkpoint.pack(**pack_kwargs)
-                else:
-                    self.row_no_mfa_checkpoint.pack_forget()
             except Exception:
                 pass
         show_crnn_model_row = False
@@ -1950,13 +1802,15 @@ class LayoutMixin:
                     )
             elif use_sequence:
                 self.aligner_help_label.configure(text=t("(시퀀스 라벨 기반 전용 aligner baseline을 사용합니다.)"))
+            elif use_hsmm_oto:
+                self.aligner_help_label.configure(text=t("(TextGrid 없이 파일명 순서 기반 HSMM OTO를 생성합니다.)"))
             elif use_coarse_crnn:
                 self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
             else:
-                self.aligner_help_label.configure(text=t("(기본은 MFA입니다. 정렬 버튼을 누르면 필요 시 자동 설치됩니다.)"))
+                self.aligner_help_label.configure(text=t("(MFA 정렬을 사용합니다. MFA가 없으면 설치 여부를 먼저 확인합니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
             try:
-                if use_no_mfa:
+                if use_no_mfa or use_hsmm_oto:
                     self.pipeline_step_align_btn.configure(
                         state="disabled",
                         fg_color="#8E98A6",
@@ -1992,12 +1846,15 @@ class LayoutMixin:
                 if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
                     self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
+                elif use_hsmm_oto:
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (HSMM OTO)"))
+                    self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 파일명 슬롯 기반 HSMM 디코더로 oto.ini를 생성합니다."))
                 elif use_coarse_crnn:
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CRNN OTO)"))
                     self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬"))
-                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다."))
+                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 설치 여부를 먼저 확인합니다."))
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):
@@ -2030,32 +1887,6 @@ class LayoutMixin:
             try:
                 is_running = bool(getattr(self, "is_running", False))
                 self.boundary_smoke_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
-            except Exception:
-                pass
-        if hasattr(self, "mfa_free_oto_preview_btn") and self.mfa_free_oto_preview_btn is not None:
-            try:
-                is_running = bool(getattr(self, "is_running", False))
-                self.mfa_free_oto_preview_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
-            except Exception:
-                pass
-        if hasattr(self, "mfa_free_oto_preview_hint") and self.mfa_free_oto_preview_hint is not None:
-            try:
-                self.mfa_free_oto_preview_hint.configure(
-                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
-                )
-            except Exception:
-                pass
-        if hasattr(self, "manual_oto_anchor_preview_btn") and self.manual_oto_anchor_preview_btn is not None:
-            try:
-                is_running = bool(getattr(self, "is_running", False))
-                self.manual_oto_anchor_preview_btn.configure(state="normal" if (enabled and not is_running) else "disabled")
-            except Exception:
-                pass
-        if hasattr(self, "manual_oto_anchor_preview_hint") and self.manual_oto_anchor_preview_hint is not None:
-            try:
-                self.manual_oto_anchor_preview_hint.configure(
-                    text_color=PALETTE.hint_text if enabled else "#AEB7C6"
-                )
             except Exception:
                 pass
         if hasattr(self, "boundary_smoke_hint_label") and self.boundary_smoke_hint_label is not None:

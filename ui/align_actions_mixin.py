@@ -31,12 +31,12 @@ class AlignActionsMixin:
                 self._set_status(t("정렬 취소됨"))
                 return
         primary_engine_for_prompt = normalize_aligner_name(
-            self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-            default="mfa",
+            self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+            default="hsmm_oto",
         )
         if (
             wav_dir_for_prompt
-            and primary_engine_for_prompt not in {"none"}
+            and primary_engine_for_prompt in {"mfa", "sequence"}
             and lang_for_prompt != "english"
         ):
             textgrid_dir_for_prompt = os.path.join(wav_dir_for_prompt, "textgrids")
@@ -78,9 +78,13 @@ class AlignActionsMixin:
                 dict_path = os.path.join(wav_dir, dict_filename)
                 output_dir = os.path.join(wav_dir, "textgrids")
                 primary_engine = normalize_aligner_name(
-                    self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                    default="mfa",
+                    self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                    default="hsmm_oto",
                 )
+                if primary_engine == "hsmm_oto":
+                    self._append_log("ℹ HSMM OTO 모드에서는 별도 TextGrid 정렬 단계를 건너뜁니다.")
+                    self._set_status("Alignment skipped (HSMM OTO)")
+                    return
                 if hasattr(self, "_validate_alignment_input_files"):
                     needs_lab_dict = primary_engine == "mfa"
                     if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):

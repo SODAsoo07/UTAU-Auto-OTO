@@ -350,7 +350,7 @@ def _ml_same_language_borrow_only() -> bool:
 
 def _installed_model_root_for_language(language: str) -> str:
     lang = str(language).strip().lower()
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(base_dir, "models_installed", "oto_ml", lang)
 
 

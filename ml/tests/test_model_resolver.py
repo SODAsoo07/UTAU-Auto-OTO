@@ -54,6 +54,10 @@ def _make_resolver(**kwargs) -> ModelResolver:
 # ---------------------------------------------------------------------------
 
 class TestRootPaths:
+    def test_base_dir_points_to_workspace_root(self):
+        assert os.path.isdir(os.path.join(ModelResolver._BASE_DIR, "core"))
+        assert os.path.isfile(os.path.join(ModelResolver._BASE_DIR, "core", "runtime", "model_resolver.py"))
+
     def test_model_root_uses_kr_override(self):
         r = _make_resolver(kr_model_dir="/custom/kr")
         assert r.model_root("korean") == "/custom/kr"

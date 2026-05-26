@@ -138,14 +138,14 @@ class TabBuildersMixin:
             ),
             (
                 "align",
-                "2. 음성 정렬",
-                "MFA로 TextGrid를 생성합니다. MFA가 없으면 자동 설치 후 계속 진행합니다.",
+                "2. 정렬 단계",
+                "기본 HSMM OTO에서는 건너뜁니다. MFA를 선택한 경우에만 TextGrid를 생성합니다.",
                 self._run_mfa,
             ),
             (
                 "oto",
                 "3. OTO.ini 생성",
-                "TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
+                "HSMM OTO 또는 TextGrid 기반으로 OTO 파라미터를 계산해 저장합니다.",
                 self._run_oto_gen,
             ),
         ]
@@ -1611,35 +1611,6 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
-        mfa_free_preview_row = ctk.CTkFrame(aligner_frame, fg_color="transparent")
-        mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
-        self.mfa_free_oto_preview_btn = ctk.CTkButton(
-            mfa_free_preview_row,
-            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
-            width=230,
-            height=28,
-            command=lambda: self._run_mfa_free_oto_preview_from_ui(),
-        )
-        _style_primary_button(self.mfa_free_oto_preview_btn)
-        self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
-        self.manual_oto_anchor_preview_btn = ctk.CTkButton(
-            mfa_free_preview_row,
-            text=t("Manual OTO anchor 테스트"),
-            width=220,
-            height=28,
-            command=lambda: self._run_manual_oto_anchor_preview_from_ui(),
-        )
-        _style_primary_button(self.manual_oto_anchor_preview_btn)
-        self.manual_oto_anchor_preview_btn.pack(side="left", padx=(0, 10))
-        self.mfa_free_oto_preview_hint = ctk.CTkLabel(
-            mfa_free_preview_row,
-            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
-            text_color=PALETTE.hint_text,
-            wraplength=620,
-            justify="left",
-        )
-        self.mfa_free_oto_preview_hint.pack(side="left", fill="x", expand=True)
-
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(
@@ -2891,35 +2862,6 @@ class TabBuildersMixin:
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(10, 10))
-        mfa_free_preview_row = ctk.CTkFrame(aligner_frame, fg_color="transparent")
-        mfa_free_preview_row.pack(fill="x", padx=12, pady=(0, 10))
-        self.mfa_free_oto_preview_btn = ctk.CTkButton(
-            mfa_free_preview_row,
-            text=t("MFA-Free SSL 슬롯 어댑터 테스트"),
-            width=230,
-            height=28,
-            command=lambda: self._run_mfa_free_oto_preview_from_ui(),
-        )
-        _style_primary_button(self.mfa_free_oto_preview_btn)
-        self.mfa_free_oto_preview_btn.pack(side="left", padx=(0, 10))
-        self.manual_oto_anchor_preview_btn = ctk.CTkButton(
-            mfa_free_preview_row,
-            text=t("Manual OTO anchor 테스트"),
-            width=220,
-            height=28,
-            command=lambda: self._run_manual_oto_anchor_preview_from_ui(),
-        )
-        _style_primary_button(self.manual_oto_anchor_preview_btn)
-        self.manual_oto_anchor_preview_btn.pack(side="left", padx=(0, 10))
-        self.mfa_free_oto_preview_hint = ctk.CTkLabel(
-            mfa_free_preview_row,
-            text=t("현재 WAV/템플릿 기준으로 preview oto.ini, anchor JSON, overlay HTML을 생성합니다."),
-            text_color=PALETTE.hint_text,
-            wraplength=620,
-            justify="left",
-        )
-        self.mfa_free_oto_preview_hint.pack(side="left", fill="x", expand=True)
-
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(

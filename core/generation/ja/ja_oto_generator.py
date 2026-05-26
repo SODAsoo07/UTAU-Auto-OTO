@@ -9,9 +9,14 @@ import os
 import re
 import math
 import logging
-import textgrid
 from types import SimpleNamespace
 from typing import Dict
+
+try:
+    import textgrid  # type: ignore
+except Exception:  # pragma: no cover - optional until TextGrid-backed generation is invoked
+    textgrid = None
+
 from core.lab_generator import load_custom_phonemes
 from core.ja_lab_generator import (
     parse_ja_filename,
@@ -2564,10 +2569,7 @@ def generate_ja_oto(
     Returns:
         (처리된 파일 수, 전체 파일 수, 에러 목록)
     """
-    try:
-        # textgrid import is already handled at the top
-        pass
-    except ImportError:
+    if textgrid is None:
         err = "❌ textgrid 모듈이 설치되지 않았습니다. pip install textgrid 를 실행해 주세요."
         logger.error(err)
         if callback:

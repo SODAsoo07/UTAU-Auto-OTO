@@ -1322,9 +1322,8 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
-            "aligner_var": "MFA",
-            "no_mfa_oto_mode_var": "MFA-Free auto + fallback",
-            "no_mfa_checkpoint_choice_var": "tune_d (default)",
+            "aligner_var": "HSMM OTO",
+            "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
             "oto_crnn_model_choice_var": "auto",
@@ -1985,12 +1984,16 @@ class AppRuntimeMixin:
             if hasattr(self, "ml_hybrid_routing_enable_var")
             else True
         )
-        aligner_raw = (
-            str(self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA")
-            .strip()
-            .lower()
-        )
-        aligner_no_mfa = aligner_raw in {"no-mfa", "no_mfa", "none", "none-mfa", "nomfa", "no mfa"}
+        try:
+            from core.pipeline_status import normalize_aligner_name
+
+            aligner_code = normalize_aligner_name(
+                self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                default="hsmm_oto",
+            )
+        except Exception:
+            aligner_code = "hsmm_oto"
+        aligner_no_mfa = aligner_code in {"none", "hsmm_oto"}
         no_mfa_generation_mode = bool(
             aligner_no_mfa
             and lang in {"korean", "japanese"}
@@ -3357,11 +3360,6 @@ class ConfigMixin:
                 if hasattr(self, "_get_no_mfa_oto_mode_code")
                 else "remap"
             ),
-            "no_mfa_checkpoint_choice": (
-                self._get_no_mfa_checkpoint_choice_code()
-                if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
-                else "tune_d"
-            ),
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
@@ -3468,6 +3466,7 @@ class ConfigMixin:
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "developer_mode_enabled": self.developer_mode_enabled_var.get() if hasattr(self, "developer_mode_enabled_var") else False,
             "aligner": self.aligner_var.get(),
+            "mfa_explicitly_selected": bool(getattr(self, "_mfa_explicitly_selected", False)),
             "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "\uae30\ubcf8",
             "mfa_align_profile_code": self._get_mfa_align_profile_code() if hasattr(self, "_get_mfa_align_profile_code") else "default",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
@@ -3554,14 +3553,9 @@ class ConfigMixin:
                 self.no_base_oto_var.set(bool(config.get("no_base_oto", False)))
             if "no_mfa_oto_mode" in config and hasattr(self, "no_mfa_oto_mode_var"):
                 if hasattr(self, "_set_no_mfa_oto_mode_from_code"):
-                    self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot"))
+                    self._set_no_mfa_oto_mode_from_code(config.get("no_mfa_oto_mode", "remap"))
                 else:
-                    self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "mfa_free_ssl_slot") or "mfa_free_ssl_slot"))
-            if "no_mfa_checkpoint_choice" in config and hasattr(self, "no_mfa_checkpoint_choice_var"):
-                if hasattr(self, "_set_no_mfa_checkpoint_choice_from_code"):
-                    self._set_no_mfa_checkpoint_choice_from_code(config.get("no_mfa_checkpoint_choice", "tune_d"))
-                else:
-                    self.no_mfa_checkpoint_choice_var.set(str(config.get("no_mfa_checkpoint_choice", "tune_d") or "tune_d"))
+                    self.no_mfa_oto_mode_var.set(str(config.get("no_mfa_oto_mode", "remap") or "remap"))
             if "soft_bank_mode" in config and hasattr(self, "soft_bank_mode_var"):
                 self.soft_bank_mode_var.set(bool(config.get("soft_bank_mode", False)))
             if "low_rms_gain_enable" in config and hasattr(self, "low_rms_gain_enable_var"):
@@ -3652,15 +3646,19 @@ class ConfigMixin:
                 try:
                     from core.pipeline_status import normalize_aligner_name
 
-                    saved_aligner = normalize_aligner_name(config.get("aligner", "mfa"), default="mfa")
+                    saved_aligner = normalize_aligner_name(config.get("aligner", "hsmm_oto"), default="hsmm_oto")
                 except Exception:
-                    saved_aligner = "mfa"
+                    saved_aligner = "hsmm_oto"
+                self._mfa_explicitly_selected = bool(config.get("mfa_explicitly_selected", False))
+                if saved_aligner == "mfa" and not self._mfa_explicitly_selected:
+                    saved_aligner = "hsmm_oto"
                 aligner_label_map = {
-                    "none": "MFA",
+                    "none": "HSMM OTO",
                     "sequence": "전용(시퀀스)",
+                    "hsmm_oto": "HSMM OTO",
                     "mfa": "MFA",
                 }
-                self.aligner_var.set(aligner_label_map.get(saved_aligner, "MFA"))
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "HSMM OTO"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"

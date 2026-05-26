@@ -699,9 +699,10 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, dev
         f"--nofollow-import-to={','.join(_excluded_build_modules())}",
     ]
     if dev:
-        # Dev mode: ccache for incremental recompilation, no LTO, no source cleanup.
-        cmd += ["--enable-ccache", "--lto=no"]
-        print("[INFO] --dev mode: ccache enabled, LTO disabled, incremental build active.")
+        # Nuitka 4.x enables compiler caches through its cache control layer;
+        # the old --enable-ccache switch is no longer accepted.
+        cmd += ["--lto=no"]
+        print("[INFO] --dev mode: LTO disabled, incremental build output retained.")
     else:
         # Release mode: clean C source tree after build to save disk space.
         cmd.append("--remove-output")

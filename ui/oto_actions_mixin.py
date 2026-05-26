@@ -11,7 +11,6 @@ from core.kr_cmpx_preview_builder import (
 )
 from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
-    get_last_no_mfa_runtime_meta,
     resolve_no_mfa_source_oto,
 )
 from core.oto_generator import generate_oto
@@ -20,41 +19,6 @@ from core.preflight_common import collect_runtime_preflight_issues
 
 
 class OtoActionsMixin:
-    def _apply_no_mfa_checkpoint_env_from_ui(self) -> str:
-        code = (
-            self._get_no_mfa_checkpoint_choice_code()
-            if hasattr(self, "_get_no_mfa_checkpoint_choice_code")
-            else "tune_d"
-        )
-        normalized = str(code or "tune_d").strip()
-        resolved = ""
-        if normalized == "auto":
-            os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
-            return ""
-        if normalized.startswith("path:"):
-            candidate = os.path.abspath(normalized[5:])
-            if os.path.isfile(candidate):
-                resolved = candidate
-        else:
-            for base in (
-                str(getattr(self, "app_dir", "") or "").strip(),
-                os.getcwd(),
-            ):
-                if not base:
-                    continue
-                root = os.path.join(base, "ml_workspace", "mfa_free_oto")
-                if not os.path.isdir(root):
-                    continue
-                target = os.path.join(root, "world_v1_light_c4_tune_d.pt")
-                if os.path.isfile(target):
-                    resolved = os.path.abspath(target)
-                    break
-        if resolved:
-            os.environ["UTOA_MFA_FREE_OTO_CHECKPOINT"] = resolved
-            return resolved
-        os.environ.pop("UTOA_MFA_FREE_OTO_CHECKPOINT", None)
-        return ""
-
     @staticmethod
     def _recommended_format_env_preset() -> dict[str, str]:
         # Keep as conservative defaults; users can still override by explicitly setting env/UI values.
@@ -332,7 +296,7 @@ class OtoActionsMixin:
                         language=lang,
                         wav_dir=preflight_wav_dir,
                         out_path=preflight_out_path,
-                        aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
+                        aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
                         textgrid_dir=preflight_tg_folder,
                         tpl_path=preflight_tpl_path,
                         no_mfa_oto_mode=(
@@ -471,9 +435,10 @@ class OtoActionsMixin:
                         except Exception:
                             has_textgrid = False
                     aligner_engine = normalize_aligner_name(
-                        self.aligner_var.get() if hasattr(self, "aligner_var") else "mfa",
-                        default="mfa",
+                        self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
+                        default="hsmm_oto",
                     )
+                    hsmm_oto_mode = aligner_engine == "hsmm_oto"
                     no_mfa_auto_mode = (
                         aligner_engine in {"none", "coarse_crnn"}
                         and lang != "english"
@@ -486,17 +451,11 @@ class OtoActionsMixin:
                     )
                     if aligner_engine == "coarse_crnn":
                         no_mfa_mode_code = "remap"
-                    if no_mfa_mode_code == "mfa_free_ssl_slot":
-                        no_mfa_mode_text = "MFA-Free SSL 슬롯 어댑터(실험)"
-                    elif no_mfa_mode_code == "manual_oto_anchor":
-                        no_mfa_mode_text = "Manual OTO anchor scorer(실험)"
-                    else:
-                        no_mfa_mode_text = "베이스 OTO 재매핑 + 보정"
-                    selected_no_mfa_checkpoint = self._apply_no_mfa_checkpoint_env_from_ui()
-                    if selected_no_mfa_checkpoint:
-                        self._append_log(f"[No-MFA] UI checkpoint={selected_no_mfa_checkpoint}")
+                    if no_mfa_mode_code != "remap":
+                        no_mfa_mode_code = "remap"
+                    no_mfa_mode_text = "base OTO remap + correction"
                     no_mfa_source_oto = ""
-                    source_oto_required_for_no_mfa = no_mfa_mode_code != "mfa_free_ssl_slot"
+                    source_oto_required_for_no_mfa = True
                     if no_mfa_auto_mode:
                         if source_oto_required_for_no_mfa and bool(self.no_base_oto_var.get()):
                             self._append_log(f"{prefix}오류: No-MFA 자동설정 모드에서는 베이스 OTO(템플릿 ini)가 필요합니다.")
@@ -521,7 +480,7 @@ class OtoActionsMixin:
                         if no_mfa_source_oto:
                             self._append_log(f"[No-MFA] base oto: {no_mfa_source_oto}")
                         else:
-                            self._append_log("[No-MFA/MFA-Free] source oto not used; filename row plan will be used.")
+                            self._append_log("[No-MFA] source oto not used.")
                     elif lang != "english" and selected_format not in {"cmpx", "c_plus_v"} and not has_textgrid:
                         self._append_log(f"{prefix}경고: textgrids 폴더가 없습니다. 3단계 정렬/라벨 생성을 먼저 실행하세요.")
 
@@ -533,7 +492,7 @@ class OtoActionsMixin:
                             language=lang,
                             wav_dir=target_wav_dir,
                             out_path=target_out_path,
-                            aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "MFA",
+                            aligner=self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
                             textgrid_dir=tg_folder,
                             tpl_path=tpl_path,
                             no_mfa_oto_mode=no_mfa_mode_code,
@@ -660,39 +619,35 @@ class OtoActionsMixin:
                             generation_mode="remap",
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
+                    elif hsmm_oto_mode:
+                        hsmm_source_oto = ""
+                        if not bool(self.no_base_oto_var.get()):
+                            hsmm_source_oto = resolve_no_mfa_source_oto(
+                                wav_dir=target_wav_dir,
+                                source_hint=tpl_path,
+                            )
+                        _update_oto_local("HSMM OTO generation", 0.22, force=True)
+                        processed, total, errors = self._run_hsmm_oto_preview_generation(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=hsmm_source_oto,
+                            language=lang,
+                            format_type=selected_format,
+                            apply_lightgbm=enable_ml_correction,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
                     elif no_mfa_auto_mode:
-                        if no_mfa_mode_code == "mfa_free_ssl_slot":
-                            _update_oto_local("MFA-Free SSL 슬롯 어댑터 생성", 0.22, force=True)
-                            processed, total, errors = self._run_mfa_free_oto_preview_generation(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                language=lang,
-                                format_type=selected_format,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
-                        elif no_mfa_mode_code == "manual_oto_anchor":
-                            _update_oto_local("Manual OTO anchor scorer 생성", 0.22, force=True)
-                            processed, total, errors = self._run_manual_oto_anchor_preview_generation(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto,
-                                language=lang,
-                                format_type=selected_format,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
-                        else:
-                            _update_oto_local("No-MFA 자동설정 생성", 0.22, force=True)
-                            processed, total, errors = generate_no_mfa_auto_oto(
-                                wav_dir=target_wav_dir,
-                                out_path=target_out_path,
-                                source_oto_path=no_mfa_source_oto or tpl_path,
-                                alias_suffix=alias_suffix,
-                                language=lang,
-                                stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
-                                generation_mode=no_mfa_mode_code,
-                                callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
-                            )
+                        _update_oto_local("No-MFA OTO generation", 0.22, force=True)
+                        processed, total, errors = generate_no_mfa_auto_oto(
+                            wav_dir=target_wav_dir,
+                            out_path=target_out_path,
+                            source_oto_path=no_mfa_source_oto or tpl_path,
+                            alias_suffix=alias_suffix,
+                            language=lang,
+                            stats_oto_path=os.environ.get("UTOA_NO_MFA_STATS_OTO", ""),
+                            generation_mode=no_mfa_mode_code,
+                            callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
+                        )
                     elif lang == "japanese":
                         self._append_log(f"설정: 일본어 에일리어스 스타일 = {self.ja_alias_style_var.get()}")
                         _update_oto_local("일본어 OTO 생성", 0.22, force=True)

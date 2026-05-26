@@ -45,7 +45,7 @@ class ModelResolver:
     …is now centralised here.
     """
 
-    _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     def __init__(self, config: Optional[MLRuntimeConfig] = None) -> None:
         self._cfg = config  # None → lazy-fetch from process singleton on first use

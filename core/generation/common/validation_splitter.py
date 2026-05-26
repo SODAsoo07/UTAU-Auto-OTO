@@ -97,7 +97,10 @@ def classify_alias_role(alias: str) -> str:
         if _looks_vowel(left):
             return "vc"
         return "cv"
+    compact = "".join(part for part in text.split())
     if text in {"br", "breath", "sil", "pau", "sp"}:
+        return "br"
+    if compact.startswith("br") and compact[2:].isdigit():
         return "br"
     if _looks_vowel(text):
         return "v"
@@ -116,6 +119,7 @@ def validate_oto_lines(
     hsmm_local_margin_fix: float = -0.12,
     hsmm_duration_z_attention: float = 2.0,
     hsmm_duration_z_fix: float = 3.5,
+    local_refine_changed_attention_delta_ms: float = 40.0,
 ) -> tuple[ValidationRecord, ...]:
     durations = dict(wav_durations_ms or {})
     diagnostics_by_line = dict(row_diagnostics or {})
@@ -168,74 +172,99 @@ def validate_oto_lines(
         overlap_abs = offset + max(0.0, overlap)
         pre_abs = offset + max(0.0, pre)
         fixed_abs = offset + max(0.0, fixed)
+        special_zero_template = _is_special_zero_template_row(
+            wav=wav,
+            alias=alias,
+            offset=offset,
+            overlap=overlap,
+            pre=pre,
+            fixed=fixed,
+            cutoff=cutoff,
+        )
+        trusted_nonphonetic_template = bool(row_plan_context.get("source_timing_trusted", False)) and role in {
+            "br",
+            "policy_breath",
+        }
 
         fix_reasons: list[str] = []
         attention_reasons: list[str] = []
-        if offset < 0.0:
-            fix_reasons.append("fix_required.invalid_oto_order")
-        if overlap_abs > pre_abs + 1e-6 or pre_abs > fixed_abs + 1e-6 or fixed_abs >= cutoff_abs + 1e-6:
-            fix_reasons.append("fix_required.invalid_oto_order")
-        if fixed < float(min_fixed_ms):
-            fix_reasons.append("fix_required.too_short_fixed")
-        if cutoff_abs <= fixed_abs + float(min_tail_ms):
-            fix_reasons.append("fix_required.cutoff_invalid")
-        if cutoff >= 0.0:
-            attention_reasons.append("attention.positive_cutoff")
-        if duration_ms <= 0.0:
-            attention_reasons.append("attention.duration_unknown")
-        if role in {"vc", "vv"} and overlap <= 0.0:
-            attention_reasons.append("attention.short_tail")
+        if not special_zero_template and not trusted_nonphonetic_template:
+            if offset < 0.0:
+                fix_reasons.append("fix_required.invalid_oto_order")
+            if overlap_abs > pre_abs + 1e-6 or pre_abs > fixed_abs + 1e-6 or fixed_abs >= cutoff_abs + 1e-6:
+                fix_reasons.append("fix_required.invalid_oto_order")
+            if fixed < float(min_fixed_ms):
+                fix_reasons.append("fix_required.too_short_fixed")
+            if cutoff_abs <= fixed_abs + float(min_tail_ms):
+                fix_reasons.append("fix_required.cutoff_invalid")
+            if cutoff >= 0.0:
+                attention_reasons.append("attention.positive_cutoff")
+            if duration_ms <= 0.0:
+                attention_reasons.append("attention.duration_unknown")
+            if role in {"vc", "vv"} and overlap <= 0.0:
+                attention_reasons.append("attention.short_tail")
         diagnostic_metrics = _numeric_diagnostics(diagnostics)
-        local_margin = diagnostic_metrics.get("hsmm_min_selected_vs_best_local_margin")
-        if local_margin is not None:
-            if local_margin < float(hsmm_local_margin_fix):
-                fix_reasons.append("fix_required.hsmm_local_margin_bad")
-            elif local_margin < float(hsmm_local_margin_attention):
-                attention_reasons.append("attention.hsmm_local_margin_low")
-        duration_z = diagnostic_metrics.get("hsmm_max_duration_z_abs")
-        if duration_z is not None:
-            if duration_z >= float(hsmm_duration_z_fix):
-                fix_reasons.append("fix_required.hsmm_duration_prior_violation")
-            elif duration_z >= float(hsmm_duration_z_attention):
-                attention_reasons.append("attention.hsmm_duration_prior_deviation")
-        if role == "vv":
-            if _metric_positive(diagnostic_metrics, "evidence_vv_boundary_low_feature_agreement_count"):
-                fix_reasons.append("fix_required.evidence_vv_boundary_low_feature_agreement")
-            elif _metric_positive(diagnostic_metrics, "evidence_vv_boundary_ambiguous_count") or _metric_positive(
+        if not special_zero_template and not trusted_nonphonetic_template:
+            local_margin = diagnostic_metrics.get("hsmm_min_selected_vs_best_local_margin")
+            if local_margin is not None:
+                if local_margin < float(hsmm_local_margin_fix):
+                    fix_reasons.append("fix_required.hsmm_local_margin_bad")
+                elif local_margin < float(hsmm_local_margin_attention):
+                    attention_reasons.append("attention.hsmm_local_margin_low")
+            duration_z = diagnostic_metrics.get("hsmm_max_duration_z_abs")
+            if duration_z is not None:
+                if duration_z >= float(hsmm_duration_z_fix):
+                    fix_reasons.append("fix_required.hsmm_duration_prior_violation")
+                elif duration_z >= float(hsmm_duration_z_attention):
+                    attention_reasons.append("attention.hsmm_duration_prior_deviation")
+            if role == "vv":
+                if _metric_positive(diagnostic_metrics, "evidence_vv_boundary_low_feature_agreement_count"):
+                    fix_reasons.append("fix_required.evidence_vv_boundary_low_feature_agreement")
+                elif _metric_positive(diagnostic_metrics, "evidence_vv_boundary_ambiguous_count") or _metric_positive(
+                    diagnostic_metrics,
+                    "evidence_vv_boundary_low_margin_count",
+                ):
+                    attention_reasons.append("attention.evidence_vv_boundary_ambiguous")
+            if role in {"cv", "vc"} and _alias_has_sonorant(alias):
+                if _metric_positive(diagnostic_metrics, "evidence_sonorant_constriction_low_feature_agreement_count"):
+                    fix_reasons.append("fix_required.evidence_sonorant_low_feature_agreement")
+                elif _metric_positive(
+                    diagnostic_metrics,
+                    "evidence_sonorant_constriction_ambiguous_count",
+                ) or _metric_positive(
+                    diagnostic_metrics,
+                    "evidence_sonorant_constriction_low_margin_count",
+                ):
+                    attention_reasons.append("attention.evidence_sonorant_ambiguous")
+            if _metric_positive(diagnostic_metrics, "local_refine_changed_anchor_count"):
+                local_refine_delta = diagnostic_metrics.get("local_refine_max_delta_ms")
+                if local_refine_delta is None or abs(float(local_refine_delta)) >= float(
+                    local_refine_changed_attention_delta_ms
+                ):
+                    attention_reasons.append("attention.local_refine_changed_anchor")
+            if _metric_positive(diagnostic_metrics, "local_refine_low_margin_count"):
+                attention_reasons.append("attention.local_refine_low_margin")
+            if _metric_positive(diagnostic_metrics, "local_refine_rejected_slot_boundary_count"):
+                attention_reasons.append("attention.local_refine_rejected_slot_boundary")
+            if _metric_positive(diagnostic_metrics, "timing_clamp_large_delta_count"):
+                attention_reasons.append("attention.timing_clamp_large_delta")
+            elif _metric_positive(diagnostic_metrics, "timing_clamp_count"):
+                attention_reasons.append("attention.timing_clamped")
+            if _metric_positive(diagnostic_metrics, "row_warning_island_count_mismatch_count"):
+                fix_reasons.append("fix_required.structural_island_count_mismatch")
+            if _metric_positive(diagnostic_metrics, "row_warning_preutterance_slot_shift_count"):
+                fix_reasons.append("fix_required.preutterance_slot_shift")
+            if _metric_positive(diagnostic_metrics, "row_warning_local_gate_low_count"):
+                attention_reasons.append("attention.local_gate_low")
+            if _metric_positive(diagnostic_metrics, "row_warning_missing_local_gate_count"):
+                attention_reasons.append("attention.missing_local_gate")
+            if _metric_positive(diagnostic_metrics, "rule_based_checkpoint_failed_count"):
+                attention_reasons.append("attention.rule_based_checkpoint_failed")
+            elif _metric_positive(diagnostic_metrics, "rule_based_inference_count") and not _metric_positive(
                 diagnostic_metrics,
-                "evidence_vv_boundary_low_margin_count",
+                "hsmm_decoder_used",
             ):
-                attention_reasons.append("attention.evidence_vv_boundary_ambiguous")
-        if role in {"cv", "vc"} and _alias_has_sonorant(alias):
-            if _metric_positive(diagnostic_metrics, "evidence_sonorant_constriction_low_feature_agreement_count"):
-                fix_reasons.append("fix_required.evidence_sonorant_low_feature_agreement")
-            elif _metric_positive(diagnostic_metrics, "evidence_sonorant_constriction_ambiguous_count") or _metric_positive(
-                diagnostic_metrics,
-                "evidence_sonorant_constriction_low_margin_count",
-            ):
-                attention_reasons.append("attention.evidence_sonorant_ambiguous")
-        if _metric_positive(diagnostic_metrics, "local_refine_changed_anchor_count"):
-            attention_reasons.append("attention.local_refine_changed_anchor")
-        if _metric_positive(diagnostic_metrics, "local_refine_low_margin_count"):
-            attention_reasons.append("attention.local_refine_low_margin")
-        if _metric_positive(diagnostic_metrics, "local_refine_rejected_slot_boundary_count"):
-            attention_reasons.append("attention.local_refine_rejected_slot_boundary")
-        if _metric_positive(diagnostic_metrics, "timing_clamp_large_delta_count"):
-            attention_reasons.append("attention.timing_clamp_large_delta")
-        elif _metric_positive(diagnostic_metrics, "timing_clamp_count"):
-            attention_reasons.append("attention.timing_clamped")
-        if _metric_positive(diagnostic_metrics, "row_warning_island_count_mismatch_count"):
-            fix_reasons.append("fix_required.structural_island_count_mismatch")
-        if _metric_positive(diagnostic_metrics, "row_warning_preutterance_slot_shift_count"):
-            fix_reasons.append("fix_required.preutterance_slot_shift")
-        if _metric_positive(diagnostic_metrics, "row_warning_local_gate_low_count"):
-            attention_reasons.append("attention.local_gate_low")
-        if _metric_positive(diagnostic_metrics, "row_warning_missing_local_gate_count"):
-            attention_reasons.append("attention.missing_local_gate")
-        if _metric_positive(diagnostic_metrics, "rule_based_checkpoint_failed_count"):
-            attention_reasons.append("attention.rule_based_checkpoint_failed")
-        elif _metric_positive(diagnostic_metrics, "rule_based_inference_count"):
-            attention_reasons.append("attention.rule_based_inference")
+                attention_reasons.append("attention.rule_based_inference")
 
         if fix_reasons:
             split = SPLIT_FIX_REQUIRED
@@ -506,6 +535,27 @@ def _resolve_duration_ms(wav: str, *, wav_root: str, durations: Mapping[str, flo
     if wav_root:
         return wav_duration_ms(os.path.join(wav_root, wav), missing_value=0.0)
     return 0.0
+
+
+def _is_special_zero_template_row(
+    *,
+    wav: str,
+    alias: str,
+    offset: float,
+    overlap: float,
+    pre: float,
+    fixed: float,
+    cutoff: float,
+) -> bool:
+    if any(abs(float(value)) > 1e-6 for value in (offset, overlap, pre, fixed, cutoff)):
+        return False
+    text = f"{wav} {alias}".strip().lower()
+    compact_alias = "".join(part for part in str(alias or "").strip().lower().split())
+    if compact_alias in {"br", "breath", "sil", "pau", "sp"}:
+        return True
+    if compact_alias.startswith("br") and compact_alias[2:].isdigit():
+        return True
+    return any(token in text for token in ("\u606f", "\u5438", "\u5410"))
 
 
 def _looks_vowel(text: str) -> bool:

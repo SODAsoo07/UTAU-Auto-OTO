@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Callable, Iterable, Mapping
 
+from core.generation.common.oto_alias_family import alias_family
 from core.generation.common.oto_file_utils import apply_alias_suffix
 from core.model_context.builder import row_specs_to_model_contexts
 from core.model_context.oto_rows import load_row_specs_from_source_oto
@@ -26,8 +27,9 @@ from .oto_adapter import (
     bootstrap_row,
     expected_slots_for_template_rows,
     load_oto_template_rows_alias_only,
+    repair_cvvc_row_sequence,
 )
-from .row_plan import build_filename_slots, build_filename_template_rows
+from .row_plan import build_filename_slots, build_filename_template_rows, filename_phone_sequence_from_slots
 from .runtime_inference import RuntimePrediction, predict_wav
 
 # Weights for the aggregate NoMfaWorkflowReport.confidence score. Must sum to 1.0.
@@ -179,6 +181,7 @@ def generate_no_mfa_oto_with_model_context(
     evidence_debug: list[dict[str, object]] = []
 
     if source_oto:
+        warnings.append("base_oto_alias_list_used")
         template_rows = load_oto_template_rows_alias_only(source_oto)
         templates_by_wav: dict[str, list] = {}
         for row in template_rows:
@@ -196,12 +199,19 @@ def generate_no_mfa_oto_with_model_context(
         for context in contexts:
             contexts_by_wav_name.setdefault(str(context.wav.wav_name).lower(), []).append(context)
 
+        source_ordered_lines: list[tuple[int, int, str]] = []
+        source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
         for wav_key, template_group in templates_by_wav.items():
             wav_path = os.path.join(wav_root, wav_key)
             if not os.path.isfile(wav_path):
                 warnings.append(f"missing_wav:{wav_key}")
                 continue
-            expected_phones = _expected_phones(wav_key, contexts_by_wav_name.get(wav_key, []))
+            row_plan_slots = build_filename_slots(wav_key, language=language, format_type=format_type)
+            expected_phones = _expected_phones(
+                wav_key,
+                contexts_by_wav_name.get(wav_key, []),
+                filename_slots=row_plan_slots,
+            )
             expected_slots = expected_slots_for_template_rows(template_group, expected_phones)
             prediction = predict_wav(
                 wav_path,
@@ -218,13 +228,37 @@ def generate_no_mfa_oto_with_model_context(
                 prediction.posterior,
                 wav_name=wav_key,
                 expected_phones=expected_phones,
-                filename_slots=(),
+                filename_slots=row_plan_slots if use_hsmm_decoder else (),
                 runtime_events=prediction_events,
             )
             evidence_debug.append(evidence_pack)
             _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
             slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
             decoded_source = list(prediction_events)
+            selected_event_source = "runtime_prediction"
+            hsmm = None
+            if use_hsmm_decoder and row_plan_slots:
+                candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
+                hsmm = decode_filename_slots_with_hsmm(
+                    prediction.posterior,
+                    row_plan_slots,
+                    event_priors=(*prediction_events, *candidate_priors),
+                )
+                if hsmm.ok and hsmm.events:
+                    if _hsmm_event_sequence_matches_expected(
+                        expected_slots or (),
+                        hsmm.events,
+                        runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
+                    ):
+                        decoded_source = list(hsmm.events)
+                        selected_event_source = "filename_hsmm"
+                        warnings.append("filename_hsmm_decoder_used")
+                    else:
+                        warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
+                else:
+                    warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
+            elif use_hsmm_decoder:
+                warnings.append(f"filename_hsmm_decoder_skipped:no_filename_slots:{wav_key}")
             file_duration_ms = _wav_duration_ms(wav_path, warnings)
             row_anchors = assign_template_row_anchors(
                 prediction.posterior,
@@ -244,18 +278,31 @@ def generate_no_mfa_oto_with_model_context(
                 vc_pre_max_ms=vc_pre_max_ms,
             )
             timeline_rows: list[dict[str, object]] = []
-            for template_row, anchor in zip(template_group, row_anchors):
-                adapted = adapt_template_row(
+            adapted_group = [
+                adapt_template_row(
                     template_row,
                     anchor,
                     file_duration_ms=file_duration_ms,
                     config=adapter_config,
                 )
+                for template_row, anchor in zip(template_group, row_anchors)
+            ]
+            adapted_group = repair_cvvc_row_sequence(
+                adapted_group,
+                adapter_config,
+                file_duration_ms=file_duration_ms,
+            )
+            for template_row, adapted in zip(template_group, adapted_group):
                 timeline_rows.append(
                     _adapted_row_debug(
                         adapted,
                         row_index=len(timeline_rows),
-                        row_plan_record=_template_row_plan_context(template_row, len(timeline_rows)),
+                        row_plan_record=_template_row_plan_context(
+                            template_row,
+                            len(timeline_rows),
+                            anchor=adapted.anchor,
+                            filename_slots=row_plan_slots,
+                        ),
                     )
                 )
                 rows_total += 1
@@ -266,40 +313,51 @@ def generate_no_mfa_oto_with_model_context(
                 row_conf = _row_confidence(adapted, evidence, policy=policy)
                 cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
                 nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
-                row_results.append(
-                    NoMfaRowResult(
-                        wav_key=wav_key,
-                        alias=str(adapted.alias or ""),
-                        oto_params={
-                            "offset": float(adapted.timing.offset),
-                            "consonant": float(adapted.timing.consonant),
-                            "cutoff": float(adapted.timing.cutoff),
-                            "preutterance": float(adapted.timing.preutterance),
-                            "overlap": float(adapted.timing.overlap),
-                        },
-                        confidence=row_conf,
-                        boundary_evidence=evidence,
-                        warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+                source_row_index = int(getattr(template_row, "source_row_index", -1))
+                source_order = source_row_index if source_row_index >= 0 else rows_total
+                source_sequence = len(source_ordered_lines)
+                source_ordered_results.append(
+                    (
+                        source_order,
+                        source_sequence,
+                        NoMfaRowResult(
+                            wav_key=wav_key,
+                            alias=str(adapted.alias or ""),
+                            oto_params={
+                                "offset": float(adapted.timing.offset),
+                                "consonant": float(adapted.timing.consonant),
+                                "cutoff": float(adapted.timing.cutoff),
+                                "preutterance": float(adapted.timing.preutterance),
+                                "overlap": float(adapted.timing.overlap),
+                            },
+                            confidence=row_conf,
+                            boundary_evidence=evidence,
+                            warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+                        ),
                     )
                 )
-                all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
+                source_ordered_lines.append(
+                    (source_order, source_sequence, apply_alias_suffix(adapted.format_line(), alias_suffix))
+                )
             timeline_debug.append(
                 _build_timeline_debug_record(
                     wav_name=wav_key,
                     wav_path=wav_path,
-                    use_hsmm_decoder_requested=False,
-                    selected_event_source="runtime_prediction",
+                    use_hsmm_decoder_requested=bool(use_hsmm_decoder),
+                    selected_event_source=selected_event_source,
                     expected_phones=expected_phones,
-                    filename_slots=(),
+                    filename_slots=row_plan_slots if use_hsmm_decoder else (),
                     expected_slots=expected_slots or (),
                     prediction=prediction,
                     prediction_events=prediction_events,
                     selected_events=decoded_source,
-                    hsmm=None,
+                    hsmm=hsmm,
                     adapted_rows=timeline_rows,
                     evidence=evidence_pack,
                 )
             )
+        row_results.extend(row for _source_order, _source_sequence, row in sorted(source_ordered_results))
+        all_lines.extend(line for _source_order, _source_sequence, line in sorted(source_ordered_lines))
     else:
         wav_files = sorted(Path(wav_root).glob("*.wav"))
         for wav_path in wav_files:
@@ -309,7 +367,7 @@ def generate_no_mfa_oto_with_model_context(
                 format_type=format_type,
             )
             row_plan_slots = build_filename_slots(wav_path.name, language=language, format_type=format_type)
-            expected_phones = list(row_plan_phones or infer_filename_phone_sequence(wav_path.name))
+            expected_phones = list(row_plan_phones or _expected_phones(wav_path.name, [], filename_slots=row_plan_slots))
             expected_slots = (
                 expected_slots_for_template_rows(template_group, expected_phones)
                 if template_group and expected_phones
@@ -400,15 +458,20 @@ def generate_no_mfa_oto_with_model_context(
                         wav_path.stem,
                         anchors[0] if anchors else None,
                         file_duration_ms=file_duration_ms,
-                        config=OtoAdapterConfig(
-                            mode="bootstrap",
-                            language=language,
-                            format_type=format_type,
-                            alias_type=alias_type,
+                            config=OtoAdapterConfig(
+                                mode="bootstrap",
+                                language=language,
+                                format_type=format_type,
+                                alias_type=alias_type,
                             vc_pre_max_ms=vc_pre_max_ms,
                         ),
                     )
                 )
+            adapted_rows = repair_cvvc_row_sequence(
+                adapted_rows,
+                adapter_config,
+                file_duration_ms=file_duration_ms,
+            )
             for adapted in adapted_rows:
                 rows_total += 1
                 if adapted.anchor is not None:
@@ -701,18 +764,65 @@ def _adapted_row_debug(adapted, *, row_index: int, row_plan_record: object | Non
     return payload
 
 
-def _template_row_plan_context(template_row: object, row_index: int) -> dict[str, object]:
+def _template_row_plan_context(
+    template_row: object,
+    row_index: int,
+    *,
+    anchor: object | None = None,
+    filename_slots: Iterable[object] = (),
+) -> dict[str, object]:
+    alias = str(getattr(template_row, "alias", "") or "")
+    role = str(getattr(anchor, "role", "") or "").strip().lower()
+    alias_role_family = alias_family(alias)
+    source_timing_trusted = bool(
+        alias_role_family == "policy_breath" and not _template_row_timing_is_degenerate(template_row)
+    )
+    phone_index = _int_or_none(getattr(anchor, "expected_phone_index", None)) if anchor is not None else None
+    slot_index = _filename_slot_index_for_phone(filename_slots, phone_index)
+    left_slot_index = slot_index
+    right_slot_index = slot_index
+    if role == "vc" and slot_index is not None:
+        left_slot_index = max(0, int(slot_index) - 1)
+        right_slot_index = int(slot_index)
+    role_family = alias_role_family if alias_role_family == "policy_breath" else role
     return {
         "wav": str(getattr(template_row, "wav", "") or ""),
-        "alias": str(getattr(template_row, "alias", "") or ""),
+        "alias": alias,
         "row_index": int(row_index),
-        "slot_index": -1,
-        "left_slot_index": -1,
-        "right_slot_index": -1,
+        "slot_index": int(slot_index) if slot_index is not None else -1,
+        "left_slot_index": int(left_slot_index) if left_slot_index is not None else -1,
+        "right_slot_index": int(right_slot_index) if right_slot_index is not None else -1,
         "source_row_index": int(getattr(template_row, "source_row_index", -1)),
-        "source_timing_trusted": False,
-        "warnings": ["template_source_timing_untrusted"],
+        "source_timing_trusted": source_timing_trusted,
+        "role_family": role_family,
+        "expected_phone_index": int(phone_index) if phone_index is not None else -1,
+        "warnings": ["template_special_source_timing_preserved"]
+        if source_timing_trusted
+        else ["template_source_timing_untrusted"],
     }
+
+
+def _template_row_timing_is_degenerate(template_row: object) -> bool:
+    timing = getattr(template_row, "timing", None)
+    return all(
+        abs(float(getattr(timing, field, 0.0) or 0.0)) <= 1e-6
+        for field in ("offset", "consonant", "cutoff", "preutterance", "overlap")
+    )
+
+
+def _filename_slot_index_for_phone(filename_slots: Iterable[object], phone_index: int | None) -> int | None:
+    if phone_index is None:
+        return None
+    target = int(phone_index)
+    for slot in filename_slots:
+        start = _int_or_none(getattr(slot, "phone_start_index", None))
+        vowel = _int_or_none(getattr(slot, "vowel_phone_index", None))
+        slot_index = _int_or_none(getattr(slot, "slot_index", None))
+        if start is None or vowel is None or slot_index is None:
+            continue
+        if int(start) <= target <= int(vowel):
+            return int(slot_index)
+    return None
 
 
 def _expected_slot_debug(slot: object) -> dict[str, object]:
@@ -846,9 +956,50 @@ def _runtime_events_for_hsmm_guard(
     prediction_events: Iterable[Mapping[str, object]],
 ) -> tuple[Mapping[str, object], ...]:
     meta = prediction.posterior.metadata or {}
+    events = tuple(prediction_events)
     if bool(meta.get("rule_based")):
         return ()
-    return tuple(prediction_events)
+    if _runtime_event_sequence_collapsed_for_hsmm_guard(prediction, events):
+        return ()
+    return events
+
+
+def _runtime_event_sequence_collapsed_for_hsmm_guard(
+    prediction: RuntimePrediction,
+    events: Iterable[Mapping[str, object]],
+    *,
+    min_event_count: int = 4,
+    min_first_ratio: float = 0.30,
+    max_span_ratio: float = 0.30,
+) -> bool:
+    event_list = tuple(events)
+    if len(event_list) < int(min_event_count):
+        return False
+    times = [
+        float(event.get("selected_time_ms", event.get("time_ms", 0.0)) or 0.0)
+        for event in event_list
+        if str(event.get("label", "")) in {"phone_change", "cv_boundary", "vowel_nucleus", "vv_boundary"}
+    ]
+    if len(times) < int(min_event_count):
+        return False
+    phone_indices = sorted(
+        {
+            _int_field(event.get("expected_phone_index", -1), default=-1)
+            for event in event_list
+            if _int_field(event.get("expected_phone_index", -1), default=-1) >= 0
+        }
+    )
+    if len(phone_indices) < int(min_event_count) or int(phone_indices[-1]) - int(phone_indices[0]) < int(min_event_count) - 1:
+        return False
+    posterior_times = list(getattr(prediction.posterior, "times_ms", ()) or ())
+    if not posterior_times:
+        return False
+    duration_ms = max(float(posterior_times[-1]), 1.0)
+    if len(posterior_times) >= 2:
+        duration_ms += max(0.0, float(posterior_times[-1]) - float(posterior_times[-2]))
+    first_ratio = min(times) / duration_ms
+    span_ratio = (max(times) - min(times)) / duration_ms
+    return first_ratio >= float(min_first_ratio) and span_ratio <= float(max_span_ratio)
 
 
 def _adapter_config_for_row_plan_record(
@@ -879,23 +1030,30 @@ def _hsmm_event_sequence_matches_expected(
     expected = [item for item in expected if item[0]]
     if not expected:
         return True
-    hsmm_items: list[tuple[tuple[str, int], Mapping[str, object]]] = []
+    hsmm_items: list[tuple[tuple[str, int], Mapping[str, object], str]] = []
     hsmm_cursor = 0
     hsmm_list = list(hsmm_events)
+    previous_vc_used_vowel_boundary = False
     for expected_key in expected:
-        matched: tuple[tuple[str, int], Mapping[str, object]] | None = None
+        matched: tuple[tuple[str, int], Mapping[str, object], str] | None = None
         for idx in range(hsmm_cursor, len(hsmm_list)):
             event = hsmm_list[idx]
             label = str(event.get("label", ""))
-            if label not in {"phone_change", "cv_boundary", "vowel_nucleus"}:
+            if label not in {"phone_change", "cv_boundary", "vowel_nucleus", "vv_boundary"}:
                 continue
             key = (label, _int_field(event.get("expected_phone_index", -1), default=-1))
-            if _hsmm_event_matches_expected_slot(expected_key, key):
-                matched = ((expected_key[0], expected_key[1]), event)
+            if _hsmm_event_matches_expected_slot(expected_key, key) or (
+                previous_vc_used_vowel_boundary and _hsmm_event_matches_following_vowel_boundary(expected_key, key)
+            ):
+                matched = ((expected_key[0], expected_key[1]), event, expected_key[2])
                 hsmm_cursor = idx + 1
                 break
         if matched is None:
             return False
+        previous_vc_used_vowel_boundary = (
+            str(expected_key[2]).strip().lower() in {"vc", "cv_head"}
+            and str(matched[1].get("label", "")).strip().lower() in {"vv_boundary", "vowel_nucleus"}
+        )
         hsmm_items.append(matched)
 
     runtime_by_key: dict[tuple[str, int], list[float]] = {}
@@ -905,7 +1063,16 @@ def _hsmm_event_sequence_matches_expected(
             continue
         key = (label, _int_field(event.get("expected_phone_index", -1), default=-1))
         runtime_by_key.setdefault(key, []).append(float(event.get("selected_time_ms", 0.0) or 0.0))
-    for key, event in hsmm_items:
+    runtime_skip_phone_indices = {
+        int(key[1])
+        for key, event, expected_role in hsmm_items
+        if _hsmm_runtime_delta_guard_can_skip(expected_role, str(event.get("label", "")))
+    }
+    for key, event, expected_role in hsmm_items:
+        if _hsmm_runtime_delta_guard_can_skip(expected_role, str(event.get("label", ""))):
+            continue
+        if int(key[1]) in runtime_skip_phone_indices and str(event.get("label", "")) in {"vv_boundary", "vowel_nucleus"}:
+            continue
         runtime_times = runtime_by_key.get(key) or []
         if not runtime_times:
             continue
@@ -913,6 +1080,13 @@ def _hsmm_event_sequence_matches_expected(
         if min(abs(hsmm_time - runtime_time) for runtime_time in runtime_times) > float(max_runtime_delta_ms):
             return False
     return True
+
+
+def _hsmm_runtime_delta_guard_can_skip(expected_role: str, actual_label: str) -> bool:
+    return (
+        str(expected_role or "").strip().lower() == "cv_head"
+        and str(actual_label or "").strip().lower() in {"vv_boundary", "vowel_nucleus"}
+    )
 
 
 def _hsmm_event_matches_expected_slot(
@@ -925,6 +1099,18 @@ def _hsmm_event_matches_expected_slot(
         return False
     if actual_label == expected_label:
         return True
+    if (
+        str(expected_label) == "phone_change"
+        and str(expected_role).strip().lower() == "vc"
+        and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
+    ):
+        return True
+    if (
+        str(expected_label) in {"phone_change", "cv_boundary"}
+        and str(expected_role).strip().lower() == "cv_head"
+        and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
+    ):
+        return True
     # A vowel-only first slot has no consonant state, so the filename HSMM
     # emits its only reliable anchor as a nucleus. For a cv_head row that is
     # still the right ordered slot; later local refinement can pull it to the
@@ -933,7 +1119,21 @@ def _hsmm_event_matches_expected_slot(
     return (
         str(expected_label) == "cv_boundary"
         and str(expected_role).strip().lower() == "cv_head"
-        and str(actual_label) == "vowel_nucleus"
+        and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
+    )
+
+
+def _hsmm_event_matches_following_vowel_boundary(
+    expected: tuple[str, int, str],
+    actual: tuple[str, int],
+) -> bool:
+    expected_label, expected_phone_index, expected_role = expected
+    actual_label, actual_phone_index = actual
+    return (
+        str(expected_label) == "cv_boundary"
+        and str(expected_role).strip().lower() == "implicit_cv"
+        and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
+        and int(actual_phone_index) == int(expected_phone_index)
     )
 
 
@@ -946,8 +1146,16 @@ def _int_field(value: object, *, default: int = -1) -> int:
         return int(default)
 
 
-def _expected_phones(wav_name: str, contexts: list) -> list[str]:
+def _expected_phones(wav_name: str, contexts: list, *, filename_slots: Iterable[object] = ()) -> list[str]:
+    slots = tuple(filename_slots)
     phones = infer_filename_phone_sequence(str(wav_name or ""))
+    slot_phones = [
+        str(phone or "").strip().lower()
+        for phone in filename_phone_sequence_from_slots(slots)
+        if str(phone or "").strip()
+    ]
+    if slot_phones and _prefer_filename_slot_phone_sequence(slots, slot_phones, phones):
+        return slot_phones
     if phones:
         return phones
     if not contexts:
@@ -961,6 +1169,43 @@ def _expected_phones(wav_name: str, contexts: list) -> list[str]:
             continue
         tokens.append(t)
     return tokens
+
+
+def _prefer_filename_slot_phone_sequence(
+    filename_slots: Iterable[object],
+    slot_phones: Iterable[str],
+    inferred_phones: Iterable[str],
+) -> bool:
+    slot_phone_list = [str(phone or "").strip().lower() for phone in slot_phones if str(phone or "").strip()]
+    inferred_phone_list = [str(phone or "").strip().lower() for phone in inferred_phones if str(phone or "").strip()]
+    if not slot_phone_list:
+        return False
+    if not inferred_phone_list:
+        return True
+    if tuple(slot_phone_list) == tuple(inferred_phone_list):
+        return True
+    if _expanded_multichar_phones(slot_phone_list) == tuple(inferred_phone_list):
+        return any(len(phone) > 1 for phone in slot_phone_list)
+    yoon_vowels = {"ya", "yu", "ye", "yo"}
+    for slot in filename_slots:
+        onset = str(getattr(slot, "onset", "") or "").strip().lower()
+        vowel = str(getattr(slot, "vowel", "") or "").strip().lower()
+        if onset and vowel in yoon_vowels and len(tuple(getattr(slot, "phones", ()) or ())) == 2:
+            return len(slot_phone_list) < len(inferred_phone_list)
+    return False
+
+
+def _expanded_multichar_phones(phones: Iterable[str]) -> tuple[str, ...]:
+    expanded: list[str] = []
+    for phone in phones:
+        text = str(phone or "").strip().lower()
+        if not text:
+            continue
+        if len(text) > 1 and all(char.isalpha() for char in text):
+            expanded.extend(text)
+        else:
+            expanded.append(text)
+    return tuple(expanded)
 
 
 def _normalize_out_path(path: str) -> str:
@@ -983,6 +1228,9 @@ def _repair_anchor_monotonicity(anchors: list) -> list:
         if anchor is None:
             continue
         if float(anchor.anchor_abs_ms) + 1e-5 < last_time:
+            if _anchor_allows_row_order_backtrack(anchor):
+                last_time = float(anchor.anchor_abs_ms)
+                continue
             repaired_time = last_time + 4.0
             out[idx] = replace(
                 anchor,
@@ -993,6 +1241,10 @@ def _repair_anchor_monotonicity(anchors: list) -> list:
         else:
             last_time = float(anchor.anchor_abs_ms)
     return out
+
+
+def _anchor_allows_row_order_backtrack(anchor) -> bool:
+    return any(str(warning).startswith("alias_target_backtrack") for warning in getattr(anchor, "warnings", ()) or ())
 
 
 def _safe_conf(value: float) -> float:

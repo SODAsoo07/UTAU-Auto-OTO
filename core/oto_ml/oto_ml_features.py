@@ -28,7 +28,10 @@ import hashlib
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
-import textgrid
+try:
+    import textgrid  # type: ignore
+except Exception:  # pragma: no cover - optional for audio-only/no-MFA runtime inference
+    textgrid = None
 
 try:
     import numpy as np
@@ -703,7 +706,7 @@ def _build_tg_index(tg_dir: str) -> Dict[str, str]:
 def _load_textgrid_tiers(tg_path: str) -> Tuple[List[object], List[object]]:
     phones: List[object] = []
     words: List[object] = []
-    if not tg_path or not os.path.exists(tg_path):
+    if not tg_path or not os.path.exists(tg_path) or textgrid is None:
         return phones, words
     tg = textgrid.TextGrid.fromFile(tg_path)
     phone_tier = None

@@ -5,6 +5,8 @@ import contextlib
 import json
 import math
 import os
+import shutil
+import tempfile
 import wave
 from statistics import median
 from typing import Callable
@@ -593,6 +595,16 @@ def _apply_no_mfa_ml_correction(
     policy = str(os.environ.get("UTOA_NO_MFA_ML_POLICY", "auto") or "auto").strip().lower() or "auto"
     route = str(os.environ.get("UTOA_NO_MFA_ML_ROUTE", os.environ.get("UTOA_ML_ROUTE", "legacy")) or "legacy").strip()
     report: dict[str, object] = {}
+    pre_safety_path = ""
+    if _env_bool("UTOA_NO_MFA_ML_SAFETY_ENABLE", True):
+        fd, pre_safety_path = tempfile.mkstemp(prefix="autooto_no_mfa_pre_ml_", suffix=".ini")
+        os.close(fd)
+        try:
+            shutil.copyfile(oto_path, pre_safety_path)
+        except Exception:
+            with contextlib.suppress(Exception):
+                os.remove(pre_safety_path)
+            pre_safety_path = ""
     try:
         from core.oto_ml_refiner import apply_oto_ml_to_oto_file
 
@@ -612,9 +624,59 @@ def _apply_no_mfa_ml_correction(
             )
             or 0
         )
+        if pre_safety_path:
+            try:
+                from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+
+                safety_report = apply_no_mfa_lightgbm_safety_filter(
+                    pre_oto_path=pre_safety_path,
+                    post_oto_path=oto_path,
+                    language=str(language or "").strip().lower() or "korean",
+                    format_type=str(format_type or "").strip().lower(),
+                    max_overlap_increase_ms=_env_float("UTOA_NO_MFA_ML_SAFETY_MAX_OVERLAP_INCREASE_MS", 5.0),
+                )
+                if bool(safety_report.get("enabled")) and int(safety_report.get("changed_rows", 0) or 0) > 0:
+                    _log(
+                        callback,
+                        "[No-MFA] existing OTO-ML safety filter: "
+                        f"restored_terminal={int(safety_report.get('restored_terminal_rows', 0) or 0)}, "
+                        f"restored_breath={int(safety_report.get('restored_breath_rows', 0) or 0)}, "
+                        f"restored_pure_vowel={int(safety_report.get('restored_pure_vowel_sequence_rows', 0) or 0)}, "
+                        f"restored_pure_vowel_onset={int(safety_report.get('restored_pure_vowel_onset_sequence_rows', 0) or 0)}, "
+                        f"restored_middle_dot_transition={int(safety_report.get('restored_middle_dot_transition_rows', 0) or 0)}, "
+                        f"restored_headless_vc_onset={int(safety_report.get('restored_headless_vc_onset_sequence_rows', 0) or 0)}, "
+                        f"restored_regular_pair_onset={int(safety_report.get('restored_regular_pair_onset_sequence_rows', 0) or 0)}, "
+                        f"restored_terminal_release_r={int(safety_report.get('restored_terminal_release_r_rows', 0) or 0)}, "
+                        f"restored_terminal_release_r_terminal_copy={int(safety_report.get('restored_terminal_release_r_terminal_copy_rows', 0) or 0)}, "
+                        f"restored_standalone_release_r_offset={int(safety_report.get('restored_standalone_release_r_offset_rows', 0) or 0)}, "
+                        f"capped_standalone_release_r_cutoff={int(safety_report.get('capped_standalone_release_r_cutoff_rows', 0) or 0)}, "
+                        f"capped_pitch_regular_pair_cv_pre_overlap={int(safety_report.get('capped_pitch_regular_pair_cv_pre_overlap_rows', 0) or 0)}, "
+                        f"clamped_pitch_regular_pair_cv_cutoff={int(safety_report.get('clamped_pitch_regular_pair_cv_cutoff_rows', 0) or 0)}, "
+                        f"restored_terminal_v={int(safety_report.get('restored_terminal_standalone_vowel_rows', 0) or 0)}, "
+                        f"retimed_terminal_v={int(safety_report.get('retimed_terminal_standalone_vowel_companion_rows', 0) or 0)}, "
+                        f"restored_initial_v={int(safety_report.get('restored_initial_standalone_vowel_rows', 0) or 0)}, "
+                        f"restored_cv_fixed_cutoff={int(safety_report.get('restored_cv_fixed_cutoff_rows', 0) or 0)}, "
+                        f"restored_underscore_vc_positive_offset_shift={int(safety_report.get('restored_underscore_vc_positive_offset_shift_rows', 0) or 0)}, "
+                        f"regularized_following_cv_block_offset={int(safety_report.get('regularized_following_cv_block_offset_rows', 0) or 0)}, "
+                        f"retimed_romaji_vc_following_cv={int(safety_report.get('retimed_romaji_vc_following_cv_rows', 0) or 0)}, "
+                        f"shifted_pitch_missing_cv_slot={int(safety_report.get('shifted_pitch_missing_cv_slot_rows', 0) or 0)}, "
+                        f"shifted_pitch_headless_initial_slot={int(safety_report.get('shifted_pitch_headless_initial_slot_rows', 0) or 0)}, "
+                        f"shifted_pitch_katakana_n_grid={int(safety_report.get('shifted_pitch_katakana_n_grid_rows', 0) or 0)}, "
+                        f"shifted_underscore_kana_slot1={int(safety_report.get('shifted_underscore_kana_slot1_rows', 0) or 0)}, "
+                        f"shifted_underscore_kana_delayed_slot={int(safety_report.get('shifted_underscore_kana_delayed_slot_rows', 0) or 0)}, "
+                        f"capped_cv_head_vowel_pre_overlap={int(safety_report.get('capped_cv_head_vowel_pre_overlap_rows', 0) or 0)}, "
+                        f"capped_cv_pre_overlap={int(safety_report.get('capped_cv_pre_overlap_rows', 0) or 0)}, "
+                        f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}",
+                    )
+            except Exception as safety_exc:
+                _log(callback, f"[No-MFA] existing OTO-ML safety filter skipped: {safety_exc}")
     except Exception as exc:
         _log(callback, f"[No-MFA] existing OTO-ML correction skipped: {exc}")
         return 0
+    finally:
+        if pre_safety_path:
+            with contextlib.suppress(Exception):
+                os.remove(pre_safety_path)
 
     status = str(report.get("status", "") or "").strip() or "unknown"
     code = str(report.get("code", "") or "").strip()
@@ -1509,6 +1571,11 @@ def generate_no_mfa_auto_oto(
     )
     if mode == "mfa_free_ssl_slot":
         checkpoint = _resolve_default_mfa_free_checkpoint()
+        resolved_format_type = (
+            str(os.environ.get("UTOA_NO_MFA_FORMAT_TYPE", "") or "").strip()
+            or str(os.environ.get("UTOA_AUTO_FORMAT", "") or "").strip()
+            or "CV"
+        )
         try:
             from core.mfa_free_oto.workflow import (
                 NoMfaWorkflowGuard,
@@ -1522,11 +1589,7 @@ def generate_no_mfa_auto_oto(
                 alias_suffix=alias_suffix,
                 checkpoint_path=checkpoint if (checkpoint and os.path.isfile(checkpoint)) else "",
                 language=str(language or "japanese"),
-                format_type=(
-                    str(os.environ.get("UTOA_NO_MFA_FORMAT_TYPE", "") or "").strip()
-                    or str(os.environ.get("UTOA_AUTO_FORMAT", "") or "").strip()
-                    or "CV"
-                ),
+                format_type=resolved_format_type,
                 alias_type=str(os.environ.get("UTOA_NO_MFA_ALIAS_TYPE", "auto") or "auto"),
                 encoder=(str(os.environ.get("UTOA_MFA_FREE_OTO_ENCODER", "") or "").strip() or "acoustic_world_v1"),
                 device=(str(os.environ.get("UTOA_MFA_FREE_OTO_DEVICE", "") or "").strip() or None),
@@ -1543,6 +1606,16 @@ def generate_no_mfa_auto_oto(
                 callback=callback,
             )
             runtime_metrics = dict(runtime_report.metrics or {})
+            if _env_bool("UTOA_MFA_FREE_HSMM_LIGHTGBM_ENABLE", False):
+                lightgbm_changed = _apply_no_mfa_ml_correction(
+                    language=str(language or "japanese"),
+                    oto_path=normalized_out_path,
+                    wav_dir=wav_dir,
+                    format_type=resolved_format_type,
+                    callback=callback,
+                )
+                runtime_metrics["lightgbm_postprocess_requested"] = 1.0
+                runtime_metrics["lightgbm_postprocess_changed"] = float(lightgbm_changed)
             baseline_metrics = _load_runtime_baseline_metrics()
             runtime_delta = _build_runtime_delta(runtime_metrics, baseline_metrics)
             _set_last_no_mfa_runtime_meta(

@@ -53,6 +53,7 @@ def decode_segmental_hsmm(
     allow_leading_gap: bool = False,
     allow_trailing_gap: bool = True,
     leading_gap_penalty_per_ms: float = 0.0,
+    max_leading_gap_ms: float = 0.0,
     trailing_gap_penalty_per_ms: float = 0.0,
     allow_internal_gaps: bool = False,
     internal_gap_penalty_per_ms: float = 0.0,
@@ -75,9 +76,12 @@ def decode_segmental_hsmm(
     prev: dict[int, tuple[float, list[tuple[int, int]]]]
     if allow_leading_gap:
         leading_penalty = max(0.0, float(leading_gap_penalty_per_ms))
+        max_leading_frames = frame_count - 1
+        if float(max_leading_gap_ms or 0.0) > 0.0:
+            max_leading_frames = min(max_leading_frames, int(math.ceil(float(max_leading_gap_ms) / frame_shift)))
         prev = {
             start_frame: (-(leading_penalty * float(start_frame) * frame_shift), [])
-            for start_frame in range(frame_count)
+            for start_frame in range(max_leading_frames + 1)
         }
     else:
         prev = {0: (0.0, [])}
@@ -177,7 +181,9 @@ def decode_segmental_hsmm(
             "internal_gap_ms": _internal_gap_ms(best_path, frame_shift),
             "trailing_gap_ms": float(max(0, frame_count - best_end)) * frame_shift,
             "allow_leading_gap": bool(allow_leading_gap),
+            "max_leading_gap_ms": float(max_leading_gap_ms or 0.0),
             "allow_internal_gaps": bool(allow_internal_gaps),
+            "max_internal_gap_ms": float(max_internal_gap_ms or 0.0),
             "allow_trailing_gap": bool(allow_trailing_gap),
         },
     )

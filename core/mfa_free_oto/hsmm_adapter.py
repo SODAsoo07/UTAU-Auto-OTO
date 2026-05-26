@@ -158,10 +158,11 @@ def decode_filename_slots_with_hsmm(
         allow_leading_gap=True,
         allow_trailing_gap=True,
         leading_gap_penalty_per_ms=0.00005,
+        max_leading_gap_ms=_max_leading_gap_ms(duration, len(states)),
         trailing_gap_penalty_per_ms=0.00002,
         allow_internal_gaps=True,
         internal_gap_penalty_per_ms=0.00006,
-        max_internal_gap_ms=900.0,
+        max_internal_gap_ms=_max_internal_gap_ms(duration, len(states)),
     )
     events = hsmm_result_to_slot_events(result, slots) if result.ok else ()
     diagnostics = build_hsmm_diagnostics(
@@ -179,6 +180,22 @@ def decode_filename_slots_with_hsmm(
         state_interval_priors=state_interval_priors,
         diagnostics=diagnostics,
     )
+
+
+def _max_internal_gap_ms(duration_ms: float, state_count: int) -> float:
+    if duration_ms <= 0.0 or state_count <= 0:
+        return 180.0
+    nominal_state_ms = float(duration_ms) / float(max(1, state_count))
+    return _clamp(nominal_state_ms * 0.95, 90.0, 260.0)
+
+
+def _max_leading_gap_ms(duration_ms: float, state_count: int) -> float:
+    if state_count <= 2:
+        return 900.0
+    if duration_ms <= 0.0 or state_count <= 0:
+        return 220.0
+    nominal_state_ms = float(duration_ms) / float(max(1, state_count))
+    return _clamp(nominal_state_ms * 0.95, 90.0, 260.0)
 
 
 def build_hsmm_diagnostics(
@@ -404,6 +421,19 @@ def hsmm_result_to_slot_events(
             events.append(
                 _event(
                     label="cv_boundary",
+                    time_ms=vowel_state.start_ms,
+                    score=vowel_state.score,
+                    expected_phone=slot.vowel_phone,
+                    expected_phone_index=slot.vowel_phone_index,
+                    slot_index=event_index,
+                    frame_index=vowel_state.start_frame,
+                )
+            )
+            event_index += 1
+        if vowel_state is not None and not slot.onset_phones:
+            events.append(
+                _event(
+                    label="vv_boundary",
                     time_ms=vowel_state.start_ms,
                     score=vowel_state.score,
                     expected_phone=slot.vowel_phone,

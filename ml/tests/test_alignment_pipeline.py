@@ -31,6 +31,27 @@ class AlignmentPipelineTests(unittest.TestCase):
         self.assertEqual(resolve_aligner_chain("none", ""), ["none"])
         self.assertEqual(resolve_aligner_chain("none", "mfa"), ["none", "mfa"])
 
+    def test_normalize_aligner_name_accepts_hsmm_oto_aliases(self):
+        for raw in ("HSMM OTO", "hsmm_oto", "hsmm oto test"):
+            self.assertEqual(normalize_aligner_name(raw, default="mfa"), "hsmm_oto")
+        self.assertEqual(resolve_aligner_chain("HSMM OTO", ""), ["hsmm_oto"])
+
+    def test_hsmm_oto_alignment_skips_to_oto_stage(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = run_alignment_with_fallback(
+                language="japanese",
+                wav_folder=td,
+                dictionary_path=os.path.join(td, "dictionary.txt"),
+                output_folder=os.path.join(td, "textgrids"),
+                primary_aligner="HSMM OTO",
+                fallback_aligner="",
+                mfa_path="",
+                mfa_align_profile="default",
+                callback=None,
+            )
+        self.assertTrue(bool(result.get("ok")))
+        self.assertEqual(str(result.get("used_engine", "")), "hsmm_oto")
+
     def test_unknown_primary_still_falls_back_to_mfa(self):
         with tempfile.TemporaryDirectory() as td:
             with mock.patch(

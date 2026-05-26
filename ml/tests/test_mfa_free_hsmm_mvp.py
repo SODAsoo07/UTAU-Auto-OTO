@@ -34,8 +34,12 @@ from core.mfa_free_oto.evidence_pack import (
     summarize_event_candidate_reliability,
     validate_acoustic_evidence_pack,
 )
-from core.mfa_free_oto.hsmm_adapter import decode_filename_slots_with_hsmm
-from core.mfa_free_oto.oto_adapter import OtoAdapterConfig, expected_slots_for_template_rows
+from core.mfa_free_oto.hsmm_adapter import (
+    _max_internal_gap_ms,
+    _max_leading_gap_ms,
+    decode_filename_slots_with_hsmm,
+)
+from core.mfa_free_oto.oto_adapter import OtoAdapterConfig, OtoAnchor, expected_slots_for_template_rows
 import core.mfa_free_oto.row_plan as row_plan_module
 from core.mfa_free_oto.row_plan import (
     build_filename_row_plan,
@@ -47,8 +51,10 @@ from core.mfa_free_oto.slot_viterbi import ExpectedSlot
 from core.mfa_free_oto.types import EVENT_LABELS, FRAME_LABELS, FramePosterior
 from core.mfa_free_oto.workflow import (
     _adapter_config_for_row_plan_record,
+    _expected_phones,
     _hsmm_event_sequence_matches_expected,
     _runtime_events_for_hsmm_guard,
+    _template_row_plan_context,
 )
 from core.model_context.timebase import TimebaseContract, cache_key_matches_timebase, timebase_from_mapping
 
@@ -172,6 +178,25 @@ def test_validation_splitter_writes_disjoint_subsets_and_summary(tmp_path):
     assert "--review-session" in install_template_args
     assert "--target-oto" in install_template_args
     assert review_session["recommended_next_steps"][5]["dry_run_by_default"] is True
+
+
+def test_validation_splitter_keeps_zero_breath_template_rows_clean():
+    records = validate_oto_lines(
+        [
+            "\u606f 2.wav=\u606f 2,0,0,0,0,0",
+            "\u606f 2.wav=br2,0,0,0,0,0",
+            "\u606f 2.wav=\u5438 2,0,0,0,0,0",
+        ],
+        wav_durations_ms={"\u606f 2.wav": 950.0},
+        row_diagnostics={
+            0: {"rule_based_inference_count": 1.0},
+            1: {"rule_based_inference_count": 1.0},
+            2: {"rule_based_inference_count": 1.0, "local_refine_low_margin_count": 1.0},
+        },
+    )
+
+    assert [record.split for record in records] == [SPLIT_CLEAN, SPLIT_CLEAN, SPLIT_CLEAN]
+    assert [record.reasons for record in records] == [("clean",), ("clean",), ("clean",)]
 
 
 def test_validation_splitter_preserves_row_plan_context_in_records(tmp_path):
@@ -2036,6 +2061,29 @@ def test_segmental_hsmm_decoder_can_skip_leading_gap_for_late_segment():
     assert with_gap.meta["leading_gap_ms"] == 220.0
 
 
+def test_segmental_hsmm_decoder_can_cap_leading_gap_for_dense_sequences():
+    times = [float(i * 10) for i in range(60)]
+    states = [
+        HSMMStateSpec("slot0.v", "vowel", 90.0, 140.0, mode_duration_ms=120.0, duration_sigma_ms=15.0),
+    ]
+    frame_scores = {
+        "slot0.v": [2.0 if 220.0 <= t < 340.0 else -2.0 for t in times],
+    }
+    capped = decode_segmental_hsmm(
+        states,
+        times,
+        frame_scores,
+        beam_width_per_state=32,
+        timeout_ms=1000,
+        allow_leading_gap=True,
+        max_leading_gap_ms=100.0,
+    )
+
+    assert capped.ok
+    assert capped.states[0].start_ms <= 100.0
+    assert capped.meta["max_leading_gap_ms"] == 100.0
+
+
 def test_segmental_hsmm_decoder_can_skip_internal_gap_between_slots():
     times = [float(i * 10) for i in range(80)]
     states = [
@@ -2064,6 +2112,20 @@ def test_segmental_hsmm_decoder_can_skip_internal_gap_between_slots():
     assert with_gap.ok
     assert [(s.start_ms, s.end_ms) for s in with_gap.states] == [(80.0, 200.0), (520.0, 640.0)]
     assert with_gap.meta["internal_gap_ms"] == 320.0
+
+
+def test_filename_hsmm_internal_gap_cap_scales_with_state_density():
+    assert _max_internal_gap_ms(3000.0, 12) == pytest.approx(237.5)
+    assert _max_internal_gap_ms(10000.0, 12) == pytest.approx(260.0)
+    assert _max_internal_gap_ms(400.0, 12) == pytest.approx(90.0)
+    assert _max_internal_gap_ms(0.0, 0) == pytest.approx(180.0)
+
+
+def test_filename_hsmm_leading_gap_cap_preserves_single_vowel_banks():
+    assert _max_leading_gap_ms(3000.0, 12) == pytest.approx(237.5)
+    assert _max_leading_gap_ms(10000.0, 12) == pytest.approx(260.0)
+    assert _max_leading_gap_ms(400.0, 12) == pytest.approx(90.0)
+    assert _max_leading_gap_ms(3000.0, 1) == pytest.approx(900.0)
 
 
 def test_hsmm_event_sequence_guard_rejects_distant_runtime_disagreement():
@@ -2107,6 +2169,82 @@ def test_hsmm_event_sequence_guard_accepts_cv_head_vowel_only_nucleus():
     assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
 
 
+def test_hsmm_event_sequence_guard_accepts_cv_head_vv_boundary_then_vowel_row():
+    expected_slots = [
+        ExpectedSlot(0, 0, "a", "cv_head", "cv_boundary"),
+        ExpectedSlot(1, 0, "a", "v", "vowel_nucleus"),
+        ExpectedSlot(2, 1, "i", "vv", "vowel_nucleus"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 0, "selected_time_ms": 380.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 0, "selected_time_ms": 520.0},
+        {"label": "vv_boundary", "expected_phone_index": 1, "selected_time_ms": 680.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 760.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+
+
+def test_hsmm_event_sequence_guard_ignores_distant_runtime_for_vowel_only_cv_head():
+    expected_slots = [
+        ExpectedSlot(0, 1, "a", "cv_head", "cv_boundary"),
+        ExpectedSlot(1, 1, "a", "vv", "vowel_nucleus"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 1, "selected_time_ms": 790.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 930.0},
+    ]
+    runtime_events = [
+        {"label": "cv_boundary", "expected_phone_index": 1, "selected_time_ms": 2610.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 2680.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events, runtime_events=runtime_events)
+
+
+def test_hsmm_event_sequence_guard_accepts_vc_target_with_vowel_boundary_anchor():
+    expected_slots = [
+        ExpectedSlot(0, 1, "o", "cv_head", "cv_boundary"),
+        ExpectedSlot(1, 1, "o", "vv", "vowel_nucleus"),
+        ExpectedSlot(2, 2, "n", "vc", "phone_change"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 1, "selected_time_ms": 790.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 930.0},
+        {"label": "vv_boundary", "expected_phone_index": 2, "selected_time_ms": 1310.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+
+
+def test_hsmm_event_sequence_guard_accepts_implicit_cv_with_vowel_boundary_anchor():
+    expected_slots = [
+        ExpectedSlot(0, 2, "n", "vc", "phone_change"),
+        ExpectedSlot(1, 3, "o", "implicit_cv", "cv_boundary"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 2, "selected_time_ms": 1310.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 2, "selected_time_ms": 1442.0},
+        {"label": "vv_boundary", "expected_phone_index": 3, "selected_time_ms": 1750.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+
+
+def test_hsmm_event_sequence_guard_accepts_implicit_cv_after_vowel_only_cv_head():
+    expected_slots = [
+        ExpectedSlot(0, 1, "n", "cv_head", "phone_change"),
+        ExpectedSlot(1, 2, "a", "implicit_cv", "cv_boundary"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 1, "selected_time_ms": 820.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 968.5},
+        {"label": "vv_boundary", "expected_phone_index": 2, "selected_time_ms": 1350.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+
+
 def test_hsmm_event_sequence_guard_keeps_interior_cv_boundary_strict():
     expected_slots = [
         ExpectedSlot(0, 0, "a", "implicit_cv", "cv_boundary"),
@@ -2114,8 +2252,12 @@ def test_hsmm_event_sequence_guard_keeps_interior_cv_boundary_strict():
     hsmm_events = [
         {"label": "vowel_nucleus", "expected_phone_index": 0, "selected_time_ms": 520.0},
     ]
+    vv_boundary_events = [
+        {"label": "vv_boundary", "expected_phone_index": 0, "selected_time_ms": 480.0},
+    ]
 
     assert not _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+    assert not _hsmm_event_sequence_matches_expected(expected_slots, vv_boundary_events)
 
 
 def test_hsmm_runtime_guard_ignores_rule_based_runtime_events():
@@ -2132,6 +2274,68 @@ def test_hsmm_runtime_guard_keeps_model_runtime_events():
     assert _runtime_events_for_hsmm_guard(prediction, events) == events
 
 
+def test_hsmm_runtime_guard_ignores_collapsed_late_model_events():
+    prediction = SimpleNamespace(
+        posterior=SimpleNamespace(
+            metadata={"rule_based": False},
+            times_ms=[float(idx * 10) for idx in range(501)],
+        )
+    )
+    events = (
+        {"label": "cv_boundary", "expected_phone_index": 0, "selected_time_ms": 2100.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 2140.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 2, "selected_time_ms": 2180.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 3, "selected_time_ms": 2220.0},
+    )
+
+    assert _runtime_events_for_hsmm_guard(prediction, events) == ()
+
+
+def test_workflow_expected_phones_expands_romaji_yoon_cvvc_onsets():
+    slots = build_filename_slots("kya-kyu-kye-kyo-kya.wav", language="japanese", format_type="cvvc")
+
+    assert _expected_phones("kya-kyu-kye-kyo-kya.wav", [], filename_slots=slots) == [
+        "k",
+        "y",
+        "a",
+        "k",
+        "y",
+        "u",
+        "k",
+        "y",
+        "e",
+        "k",
+        "y",
+        "o",
+        "k",
+        "y",
+        "a",
+    ]
+
+
+def test_workflow_expected_phones_keeps_standalone_y_w_expanded():
+    ya_slots = build_filename_slots("ya-yu-ye-yo.wav", language="japanese", format_type="cvvc")
+    wa_slots = build_filename_slots("wa-wi-we-wo.wav", language="japanese", format_type="cvvc")
+
+    assert _expected_phones("ya-yu-ye-yo.wav", [], filename_slots=ya_slots) == ["y", "a", "y", "u", "y", "e", "y", "o"]
+    assert _expected_phones("wa-wi-we-wo.wav", [], filename_slots=wa_slots) == ["w", "a", "w", "i", "w", "e", "w", "o"]
+
+
+def test_workflow_expected_phones_preserves_japanese_multigraph_onsets():
+    slots = build_filename_slots("sha-shi-chu-tsu.wav", language="japanese", format_type="cvvc")
+
+    assert _expected_phones("sha-shi-chu-tsu.wav", [], filename_slots=slots) == [
+        "sh",
+        "a",
+        "sh",
+        "i",
+        "ch",
+        "u",
+        "ts",
+        "u",
+    ]
+
+
 def test_adapter_config_uses_row_plan_role_family_for_vcv_rows():
     records = build_filename_row_plan("_a'bba'e.wav", language="korean", format_type="vcv")
     config = OtoAdapterConfig(language="korean", format_type="vcv", alias_type="auto")
@@ -2142,6 +2346,25 @@ def test_adapter_config_uses_row_plan_role_family_for_vcv_rows():
     assert row_config.alias_type == "vcv"
     assert vv_config.alias_type == "vv"
     assert config.alias_type == "auto"
+
+
+def test_template_row_plan_context_maps_anchor_phone_to_filename_slot():
+    slots = build_filename_slots("あかき.wav", language="japanese", format_type="CVVC")
+    template_row = SimpleNamespace(wav="あかき.wav", alias="a k", source_row_index=7)
+
+    context = _template_row_plan_context(
+        template_row,
+        3,
+        anchor=OtoAnchor(anchor_abs_ms=500.0, score=0.8, role="vc", expected_phone_index=1),
+        filename_slots=slots,
+    )
+
+    assert context["slot_index"] == 1
+    assert context["left_slot_index"] == 0
+    assert context["right_slot_index"] == 1
+    assert context["role_family"] == "vc"
+    assert context["expected_phone_index"] == 1
+    assert context["source_row_index"] == 7
 
 
 def test_validate_oto_lines_exposes_expected_split_labels():
@@ -2210,6 +2433,25 @@ def test_validate_oto_lines_exposes_rule_based_fallback_as_attention():
     assert metrics["rule_based_inference_rows"] == 2
     assert metrics["rule_based_checkpoint_missing_rows"] == 1
     assert metrics["rule_based_checkpoint_failed_rows"] == 1
+
+
+def test_validate_oto_lines_does_not_force_attention_for_hsmm_primary_rule_based_rows():
+    records = validate_oto_lines(
+        ["a.wav=a,0,100,-350,50,25"],
+        wav_durations_ms={"a.wav": 500.0},
+        row_diagnostics={
+            0: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+                "hsmm_decoder_used": 1.0,
+                "hsmm_min_selected_vs_best_local_margin": 0.25,
+            },
+        },
+    )
+
+    assert records[0].split == SPLIT_CLEAN
+    assert records[0].reasons == ("clean",)
+    assert records[0].metrics["rule_based_checkpoint_missing_count"] == 1.0
 
 
 def test_evaluate_gate_blocks_apply_when_checkpoint_fallback_failed(tmp_path):
@@ -2814,7 +3056,7 @@ def test_mfa_free_oto_review_cli_split_flags_local_refine_attention(tmp_path):
                         "anchor": {
                             "anchor_abs_ms": 62.0,
                             "refined_from_abs_ms": 40.0,
-                            "local_refine_delta_ms": 22.0,
+                            "local_refine_delta_ms": 42.0,
                             "local_refine_margin": 0.20,
                             "warnings": ["local_refine_changed_anchor"],
                         },
@@ -2858,6 +3100,68 @@ def test_mfa_free_oto_review_cli_split_flags_local_refine_attention(tmp_path):
     validation = json.loads((review_dir / "case.validation.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert validation["split"] == SPLIT_ATTENTION_ONLY
     assert "attention.local_refine_changed_anchor" in validation["reasons"]
+    assert validation["metrics"]["local_refine_max_delta_ms"] == 42.0
+
+
+def test_mfa_free_oto_review_cli_keeps_small_local_refine_delta_clean(tmp_path):
+    generated = tmp_path / "generated.ini"
+    generated.write_text("a.wav=a,0,100,-350,50,25\n", encoding="utf-8")
+    timeline = tmp_path / "case.timeline.jsonl"
+    timeline.write_text(
+        json.dumps(
+            {
+                "wav": "a.wav",
+                "selected_event_source": "filename_hsmm",
+                "adapted_rows": [
+                    {
+                        "raw_line": "a.wav=a,0,100,-350,50,25",
+                        "anchor": {
+                            "anchor_abs_ms": 62.0,
+                            "refined_from_abs_ms": 40.0,
+                            "local_refine_delta_ms": 22.0,
+                            "local_refine_margin": 0.20,
+                            "warnings": ["local_refine_changed_anchor"],
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    durations = tmp_path / "durations.json"
+    durations.write_text(json.dumps({"a.wav": 500.0}), encoding="utf-8")
+    review_dir = tmp_path / "review"
+    script = REPO_ROOT / "scripts/dev/mfa_free_oto_review.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "split",
+            "--generated",
+            str(generated),
+            "--out-dir",
+            str(review_dir),
+            "--name",
+            "case",
+            "--durations-json",
+            str(durations),
+            "--timeline-jsonl",
+            str(timeline),
+        ],
+        cwd=str(REPO_ROOT),
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["counts"] == {"attention_only": 0, "clean": 1, "fix_required": 0, "total": 1}
+    validation = json.loads((review_dir / "case.validation.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert validation["split"] == SPLIT_CLEAN
+    assert validation["reasons"] == ["clean"]
     assert validation["metrics"]["local_refine_max_delta_ms"] == 22.0
 
 
@@ -3320,6 +3624,31 @@ def test_filename_row_plan_generates_cvvc_alias_order_without_template():
     assert filename_phone_sequence_from_slots(slots) == ("g", "a", "g", "eu", "g", "eo")
 
 
+def test_japanese_cvvc_kana_filename_slots_preserve_kw_and_yoon_onsets():
+    kw_slots = build_filename_slots("\u304f\u3041\u304f\u3043.wav", language="japanese", format_type="cvvc")
+
+    assert [(slot.token, slot.onset, slot.vowel, slot.phones) for slot in kw_slots] == [
+        ("kwa", "kw", "a", ("k", "w", "a")),
+        ("kwi", "kw", "i", ("k", "w", "i")),
+    ]
+    assert filename_phone_sequence_from_slots(kw_slots) == ("k", "w", "a", "k", "w", "i")
+
+    yoon_slots = build_filename_slots("\u307f\u3083\u307f\u307f\u3085.wav", language="japanese", format_type="cvvc")
+    assert [(slot.token, slot.onset, slot.vowel, slot.phones) for slot in yoon_slots] == [
+        ("mya", "my", "a", ("m", "y", "a")),
+        ("mi", "m", "i", ("m", "i")),
+        ("myu", "my", "u", ("m", "y", "u")),
+    ]
+
+    ny_slots = build_filename_slots("\u306b\u3083\u306b\u306b\u3085.wav", language="japanese", format_type="cvvc")
+    assert [(slot.token, slot.onset, slot.vowel, slot.phones) for slot in ny_slots] == [
+        ("nya", "ny", "a", ("n", "y", "a")),
+        ("ni", "n", "i", ("n", "i")),
+        ("nyu", "ny", "u", ("n", "y", "u")),
+    ]
+    assert filename_phone_sequence_from_slots(ny_slots) == ("n", "y", "a", "n", "i", "n", "y", "u")
+
+
 def test_filename_row_plan_generates_vcv_alias_order_without_template():
     records = build_filename_row_plan("_a'bbeo'bba.wav", language="korean", format_type="vcv")
 
@@ -3725,8 +4054,8 @@ def test_filename_hsmm_adapter_uses_runtime_event_prior_for_single_vowel():
 
     assert baseline.ok
     assert with_prior.ok
-    baseline_nucleus = baseline.events[0]["selected_time_ms"]
-    prior_nucleus = with_prior.events[0]["selected_time_ms"]
+    baseline_nucleus = next(event["selected_time_ms"] for event in baseline.events if event["label"] == "vowel_nucleus")
+    prior_nucleus = next(event["selected_time_ms"] for event in with_prior.events if event["label"] == "vowel_nucleus")
     assert baseline_nucleus == pytest.approx(155.5, abs=20.0)
     assert prior_nucleus == pytest.approx(520.0, abs=25.0)
     assert prior_nucleus - baseline_nucleus > 300.0
@@ -3796,8 +4125,10 @@ def test_evidence_candidate_priors_can_steer_filename_hsmm():
 
     assert baseline.ok
     assert with_candidate.ok
-    assert baseline.events[0]["selected_time_ms"] == pytest.approx(155.5, abs=20.0)
-    assert with_candidate.events[0]["selected_time_ms"] == pytest.approx(520.0, abs=25.0)
+    baseline_nucleus = next(event["selected_time_ms"] for event in baseline.events if event["label"] == "vowel_nucleus")
+    candidate_nucleus = next(event["selected_time_ms"] for event in with_candidate.events if event["label"] == "vowel_nucleus")
+    assert baseline_nucleus == pytest.approx(155.5, abs=20.0)
+    assert candidate_nucleus == pytest.approx(520.0, abs=25.0)
     assert with_candidate.diagnostics["event_prior_state_count"] == 1
     assert with_candidate.diagnostics["event_prior_input_count"] == 1
     assert with_candidate.diagnostics["event_prior_mapped_count"] == 1
@@ -4950,7 +5281,7 @@ def test_mfa_free_oto_review_cli_can_use_single_vowel_hsmm_after_leading_gap(tmp
     record = json.loads(timeline_path.read_text(encoding="utf-8").splitlines()[0])
     assert record["selected_event_source"] == "filename_hsmm"
     assert record["hsmm"]["ok"] is True
-    assert [event["label"] for event in record["selected_events"]] == ["vowel_nucleus"]
+    assert [event["label"] for event in record["selected_events"]] == ["vv_boundary", "vowel_nucleus"]
     assert record["hsmm"]["meta"]["leading_gap_ms"] > 0.0
     assert record["hsmm"]["diagnostics"]["state_count"] == 1
     assert record["hsmm"]["diagnostics"]["event_prior_state_count"] == 1
@@ -5074,6 +5405,85 @@ def test_compare_hsmm_reports_row_param_deltas_from_generated_oto(tmp_path):
         "preutterance": 5.0,
         "overlap": -5.0,
     }
+
+
+def test_evaluate_lightgbm_postprocess_reports_reference_improvement(tmp_path):
+    reference = tmp_path / "reference.ini"
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    out = tmp_path / "lgbm_eval.json"
+    reference.write_text(
+        "\n".join(
+            [
+                "a.wav=a,10,100,-300,50,25",
+                "a.wav=a k,150,120,-180,80,35",
+                "a.wav=i,260,90,-160,70,35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pre.write_text(
+        "\n".join(
+            [
+                "a.wav=a,30,100,-300,50,25",
+                "a.wav=a k,170,120,-180,80,35",
+                "a.wav=i,260,90,-160,70,35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    post.write_text(
+        "\n".join(
+            [
+                "a.wav=a,12,100,-300,50,25",
+                "a.wav=a k,154,120,-180,80,35",
+                "a.wav=i,260,90,-160,70,35",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script = REPO_ROOT / "scripts/dev/mfa_free_oto_review.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "evaluate-lightgbm-postprocess",
+            "--reference-oto",
+            str(reference),
+            "--pre-lightgbm-oto",
+            str(pre),
+            "--post-lightgbm-oto",
+            str(post),
+            "--cutoff-end-mode",
+            "raw",
+            "--out",
+            str(out),
+        ],
+        cwd=str(REPO_ROOT),
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is True
+    assert payload["improvement"]["by_param"]["offset"]["pre_mae_ms"] == 13.3
+    assert payload["improvement"]["by_param"]["offset"]["post_mae_ms"] == 2.0
+    assert payload["pre_vs_reference"]["by_alias_family"]["vc"]["by_param"]["offset"]["MAE_ms"] == 20.0
+    assert payload["improvement"]["by_alias_family"]["vc"]["by_param"]["offset"] == {
+        "pre_mae_ms": 20.0,
+        "post_mae_ms": 4.0,
+        "delta_mae_ms": -16.0,
+    }
+    assert payload["recommended_use"]["safe_candidate"] is True
+    assert payload["recommended_use"]["matched_rows"] == 3
+    assert payload["recommended_use"]["changed_ratio"] == 0.6667
+    assert payload["pre_vs_post"]["changed_rows"] == 2
+    assert out.is_file()
 
 
 def test_compare_hsmm_reports_timeline_event_deltas(tmp_path):
