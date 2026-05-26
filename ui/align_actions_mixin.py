@@ -39,8 +39,21 @@ class AlignActionsMixin:
             and primary_engine_for_prompt in {"mfa", "sequence"}
             and lang_for_prompt != "english"
         ):
-            textgrid_dir_for_prompt = os.path.join(wav_dir_for_prompt, "textgrids")
-            if os.path.isdir(textgrid_dir_for_prompt):
+            prompt_dirs = [wav_dir_for_prompt]
+            try:
+                if self._is_recursive_voicebank_scan_enabled():
+                    targets, _batch_enabled = self._resolve_voicebank_batch_targets_for_ui(wav_dir_for_prompt)
+                    if targets:
+                        prompt_dirs = [target.wav_dir for target in targets]
+            except Exception:
+                prompt_dirs = [wav_dir_for_prompt]
+            has_existing_textgrids = False
+            for prompt_dir in prompt_dirs:
+                textgrid_dir_for_prompt = os.path.join(prompt_dir, "textgrids")
+                if os.path.isdir(textgrid_dir_for_prompt):
+                    has_existing_textgrids = True
+                    break
+            if has_existing_textgrids:
                 ask_fn = getattr(self, "_ask_yes_no_dialog_sync", None)
                 if callable(ask_fn):
                     proceed = ask_fn(
@@ -74,9 +87,6 @@ class AlignActionsMixin:
                     self._set_status("Alignment skipped (English Preview CVVC)")
                     return
 
-                dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
-                dict_path = os.path.join(wav_dir, dict_filename)
-                output_dir = os.path.join(wav_dir, "textgrids")
                 primary_engine = normalize_aligner_name(
                     self.aligner_var.get() if hasattr(self, "aligner_var") else "HSMM OTO",
                     default="hsmm_oto",
@@ -85,10 +95,28 @@ class AlignActionsMixin:
                     self._append_log("ℹ HSMM OTO 모드에서는 별도 TextGrid 정렬 단계를 건너뜁니다.")
                     self._set_status("Alignment skipped (HSMM OTO)")
                     return
-                if hasattr(self, "_validate_alignment_input_files"):
-                    needs_lab_dict = primary_engine == "mfa"
-                    if needs_lab_dict and (not self._validate_alignment_input_files(wav_dir, dict_path)):
+                if hasattr(self, "_resolve_voicebank_batch_targets_for_ui"):
+                    targets, batch_scan_enabled = self._resolve_voicebank_batch_targets_for_ui(wav_dir)
+                    if not targets:
                         return
+                    if hasattr(self, "_append_voicebank_batch_summary"):
+                        self._append_voicebank_batch_summary(
+                            targets,
+                            batch_scan_enabled=batch_scan_enabled,
+                            stage_name="정렬",
+                        )
+                else:
+                    targets = [
+                        type(
+                            "_Target",
+                            (),
+                            {
+                                "wav_dir": os.path.abspath(wav_dir),
+                                "index": 0,
+                                "total": 1,
+                            },
+                        )()
+                    ]
 
                 mfa_profile = (
                     self._get_mfa_align_profile_code()
@@ -123,40 +151,60 @@ class AlignActionsMixin:
                 if hasattr(self, "_apply_advanced_tuning_envs"):
                     self._apply_advanced_tuning_envs()
 
-                result = run_alignment_with_fallback(
-                    language=lang,
-                    wav_folder=wav_dir,
-                    dictionary_path=dict_path,
-                    output_folder=output_dir,
-                    primary_aligner=primary_engine,
-                    fallback_aligner="",
-                    mfa_path=self.mfa_path or "",
-                    mfa_align_profile=mfa_profile,
-                    format_hint=selected_format,
-                    overwrite_existing_textgrids=bool(overwrite_existing_textgrids),
-                    callback=self._append_log,
-                )
-                if bool(result.get("ok", False)):
-                    used_engine = str(result.get("used_engine", "") or "mfa").upper()
-                    self._append_log(f"✅ 정렬 완료: engine={used_engine}, output={output_dir}")
-                    self._set_status(f"{used_engine} alignment complete")
+                success_count = 0
+                failed_count = 0
+                for target in targets:
+                    target_wav_dir = target.wav_dir
+                    prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
+                    if target.total > 1:
+                        self._append_log(f"{prefix}대상 폴더: {target_wav_dir}")
+                    dict_filename = "japanese_dict.txt" if lang == "japanese" else "korean_dict.txt"
+                    dict_path = os.path.join(target_wav_dir, dict_filename)
+                    output_dir = os.path.join(target_wav_dir, "textgrids")
+                    if hasattr(self, "_validate_alignment_input_files"):
+                        needs_lab_dict = primary_engine == "mfa"
+                        if needs_lab_dict and (not self._validate_alignment_input_files(target_wav_dir, dict_path)):
+                            failed_count += 1
+                            continue
+
+                    result = run_alignment_with_fallback(
+                        language=lang,
+                        wav_folder=target_wav_dir,
+                        dictionary_path=dict_path,
+                        output_folder=output_dir,
+                        primary_aligner=primary_engine,
+                        fallback_aligner="",
+                        mfa_path=self.mfa_path or "",
+                        mfa_align_profile=mfa_profile,
+                        format_hint=selected_format,
+                        overwrite_existing_textgrids=bool(overwrite_existing_textgrids),
+                        callback=self._append_log,
+                    )
+                    if bool(result.get("ok", False)):
+                        used_engine = str(result.get("used_engine", "") or "mfa").upper()
+                        self._append_log(f"{prefix}✅ 정렬 완료: engine={used_engine}, output={output_dir}")
+                        success_count += 1
+                    else:
+                        err = str(result.get("message", "") or "alignment failed")
+                        code = str(result.get("code", "") or "")
+                        self._append_log(f"{prefix}Alignment failed: {err} ({code})")
+                        if hasattr(self, "_is_lab_or_dict_missing_alignment_error") and hasattr(self, "_notify_lab_or_dict_missing"):
+                            if self._is_lab_or_dict_missing_alignment_error(code, err):
+                                self._notify_lab_or_dict_missing(target_wav_dir, dict_path)
+                        if (
+                            primary_engine == "mfa"
+                            and hasattr(self, "_schedule_alignment_failure_mfa_followup")
+                        ):
+                            self._schedule_alignment_failure_mfa_followup(
+                                language=lang,
+                                align_code=code,
+                                align_message=err,
+                            )
+                        failed_count += 1
+                if failed_count:
+                    self._set_status(f"Alignment partial/failed ({success_count}/{len(targets)})")
                 else:
-                    err = str(result.get("message", "") or "alignment failed")
-                    code = str(result.get("code", "") or "")
-                    self._append_log(f"Alignment failed: {err} ({code})")
-                    if hasattr(self, "_is_lab_or_dict_missing_alignment_error") and hasattr(self, "_notify_lab_or_dict_missing"):
-                        if self._is_lab_or_dict_missing_alignment_error(code, err):
-                            self._notify_lab_or_dict_missing(wav_dir, dict_path)
-                    if (
-                        primary_engine == "mfa"
-                        and hasattr(self, "_schedule_alignment_failure_mfa_followup")
-                    ):
-                        self._schedule_alignment_failure_mfa_followup(
-                            language=lang,
-                            align_code=code,
-                            align_message=err,
-                        )
-                    self._set_status("Alignment failed")
+                    self._set_status(f"Alignment complete ({success_count}/{len(targets)})")
             except Exception as e:
                 self._handle_error("Alignment", e)
             finally:
