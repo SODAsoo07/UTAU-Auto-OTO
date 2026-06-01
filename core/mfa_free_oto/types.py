@@ -91,6 +91,7 @@ _VOWEL_PHONES: frozenset[str] = frozenset(
         "weo",
         "wi",
         "wo",
+        "eui",
         "ui",
         "ang",
         "eng",

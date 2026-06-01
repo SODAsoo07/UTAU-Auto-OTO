@@ -25,9 +25,10 @@ from .oto_adapter import (
     anchors_from_prediction,
     assign_template_row_anchors,
     bootstrap_row,
-    expected_slots_for_template_rows,
+    _is_nonphonetic_special_alias,
     load_oto_template_rows_alias_only,
     repair_cvvc_row_sequence,
+    timeline_expected_slots_for_template_rows,
 )
 from .row_plan import build_filename_slots, build_filename_template_rows, filename_phone_sequence_from_slots
 from .runtime_inference import RuntimePrediction, predict_wav
@@ -201,18 +202,25 @@ def generate_no_mfa_oto_with_model_context(
 
         source_ordered_lines: list[tuple[int, int, str]] = []
         source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
-        for wav_key, template_group in templates_by_wav.items():
+        total_wav_groups = len(templates_by_wav)
+        for wav_index, (wav_key, template_group) in enumerate(templates_by_wav.items(), start=1):
             wav_path = os.path.join(wav_root, wav_key)
             if not os.path.isfile(wav_path):
                 warnings.append(f"missing_wav:{wav_key}")
                 continue
+            if callback:
+                callback(f"[No-MFA/MFA-Free] wav {wav_index}/{total_wav_groups}: {wav_key}")
             row_plan_slots = build_filename_slots(wav_key, language=language, format_type=format_type)
             expected_phones = _expected_phones(
                 wav_key,
                 contexts_by_wav_name.get(wav_key, []),
                 filename_slots=row_plan_slots,
             )
-            expected_slots = expected_slots_for_template_rows(template_group, expected_phones)
+            expected_slots = timeline_expected_slots_for_template_rows(
+                template_group,
+                expected_phones,
+                language=language,
+            )
             prediction = predict_wav(
                 wav_path,
                 checkpoint_path=checkpoint_path,
@@ -237,7 +245,13 @@ def generate_no_mfa_oto_with_model_context(
             decoded_source = list(prediction_events)
             selected_event_source = "runtime_prediction"
             hsmm = None
-            if use_hsmm_decoder and row_plan_slots:
+            hsmm_skip_no_expected = (
+                bool(use_hsmm_decoder)
+                and bool(row_plan_slots)
+                and not bool(expected_slots)
+                and _template_group_is_nonphonetic_special_only(template_group)
+            )
+            if use_hsmm_decoder and row_plan_slots and (expected_slots or not hsmm_skip_no_expected):
                 candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
                 hsmm = decode_filename_slots_with_hsmm(
                     prediction.posterior,
@@ -257,6 +271,8 @@ def generate_no_mfa_oto_with_model_context(
                         warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
                 else:
                     warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
+            elif hsmm_skip_no_expected:
+                warnings.append(f"filename_hsmm_decoder_skipped:no_expected_slots:{wav_key}")
             elif use_hsmm_decoder:
                 warnings.append(f"filename_hsmm_decoder_skipped:no_filename_slots:{wav_key}")
             file_duration_ms = _wav_duration_ms(wav_path, warnings)
@@ -267,6 +283,7 @@ def generate_no_mfa_oto_with_model_context(
                 min_score=0.02,
                 use_source_timing_prior=False,
                 expected_phones=expected_phones,
+                language=language,
             )
             if one_step_shift_repair_enabled:
                 row_anchors = _repair_anchor_monotonicity(row_anchors)
@@ -360,7 +377,10 @@ def generate_no_mfa_oto_with_model_context(
         all_lines.extend(line for _source_order, _source_sequence, line in sorted(source_ordered_lines))
     else:
         wav_files = sorted(Path(wav_root).glob("*.wav"))
-        for wav_path in wav_files:
+        total_wav_files = len(wav_files)
+        for wav_index, wav_path in enumerate(wav_files, start=1):
+            if callback:
+                callback(f"[No-MFA/MFA-Free] wav {wav_index}/{total_wav_files}: {wav_path.name}")
             template_group, row_plan_phones, row_plan_records = build_filename_template_rows(
                 wav_path.name,
                 language=language,
@@ -369,7 +389,7 @@ def generate_no_mfa_oto_with_model_context(
             row_plan_slots = build_filename_slots(wav_path.name, language=language, format_type=format_type)
             expected_phones = list(row_plan_phones or _expected_phones(wav_path.name, [], filename_slots=row_plan_slots))
             expected_slots = (
-                expected_slots_for_template_rows(template_group, expected_phones)
+                timeline_expected_slots_for_template_rows(template_group, expected_phones, language=language)
                 if template_group and expected_phones
                 else None
             )
@@ -397,7 +417,13 @@ def generate_no_mfa_oto_with_model_context(
             decoded_source = list(prediction_events)
             selected_event_source = "runtime_prediction"
             hsmm = None
-            if use_hsmm_decoder and row_plan_slots:
+            hsmm_skip_no_expected = (
+                bool(use_hsmm_decoder)
+                and bool(row_plan_slots)
+                and not bool(expected_slots)
+                and _template_group_is_nonphonetic_special_only(template_group)
+            )
+            if use_hsmm_decoder and row_plan_slots and (expected_slots or not hsmm_skip_no_expected):
                 candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
                 hsmm = decode_filename_slots_with_hsmm(
                     prediction.posterior,
@@ -417,6 +443,8 @@ def generate_no_mfa_oto_with_model_context(
                         warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
                 else:
                     warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
+            elif hsmm_skip_no_expected:
+                warnings.append(f"filename_hsmm_decoder_skipped:no_expected_slots:{wav_path.name}")
             file_duration_ms = _wav_duration_ms(str(wav_path), warnings)
             adapter_config = OtoAdapterConfig(
                 mode="template-preserve" if template_group else "bootstrap",
@@ -434,6 +462,7 @@ def generate_no_mfa_oto_with_model_context(
                     min_score=0.02,
                     use_source_timing_prior=False,
                     expected_phones=expected_phones,
+                    language=language,
                 )
                 if one_step_shift_repair_enabled:
                     row_anchors = _repair_anchor_monotonicity(row_anchors)
@@ -951,6 +980,12 @@ def _event_source_for_oto(prediction: RuntimePrediction) -> Iterable[dict[str, o
     ]
 
 
+def _template_group_is_nonphonetic_special_only(template_group: Iterable[object]) -> bool:
+    aliases = [str(getattr(row, "alias", "") or "").strip() for row in template_group]
+    aliases = [alias for alias in aliases if alias]
+    return bool(aliases) and all(_is_nonphonetic_special_alias(alias) for alias in aliases)
+
+
 def _runtime_events_for_hsmm_guard(
     prediction: RuntimePrediction,
     prediction_events: Iterable[Mapping[str, object]],
@@ -1108,6 +1143,12 @@ def _hsmm_event_matches_expected_slot(
     if (
         str(expected_label) in {"phone_change", "cv_boundary"}
         and str(expected_role).strip().lower() == "cv_head"
+        and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
+    ):
+        return True
+    if (
+        str(expected_label) == "cv_boundary"
+        and str(expected_role).strip().lower() == "vcv"
         and str(actual_label) in {"vv_boundary", "vowel_nucleus"}
     ):
         return True

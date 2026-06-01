@@ -22,6 +22,7 @@ from core.no_mfa_oto_builder import (
     get_last_no_mfa_runtime_meta,
     resolve_no_mfa_source_oto,
 )
+from core.mfa_free_oto.review_generation import generate_hsmm_oto_review
 from core.mfa_runner import (
     ALERT_MSVC_REQUIRED,
     MFA_PORTABLE_PYTHON_VERSION,
@@ -128,42 +129,16 @@ class PipelineActionsMixin:
         )
         os.makedirs(preview_dir, exist_ok=True)
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", bank_name).strip("._") or "voicebank"
-        cmd = [
-            sys.executable or "python",
-            "-m",
-            "scripts.dev.mfa_free_oto_review",
-            "generate",
-            "--wav-dir",
-            os.path.abspath(wav_dir),
-            "--out-dir",
-            preview_dir,
-            "--name",
-            safe_name,
-            "--language",
-            language,
-            "--format-type",
-            format_type,
-            "--alias-type",
-            "auto",
-            "--encoder",
-            "acoustic",
-            "--use-hsmm-decoder",
-        ]
-        if bool(apply_lightgbm):
-            cmd.append("--apply-lightgbm")
-            policy = str(lightgbm_policy or "auto").strip().lower() or "auto"
-            cmd.extend(["--lightgbm-policy", policy])
-            model_dir = str(lightgbm_model_dir or "").strip()
-            if model_dir:
-                cmd.extend(["--lightgbm-model-dir", os.path.abspath(model_dir)])
+        policy = str(lightgbm_policy or "auto").strip().lower() or "auto"
+        model_dir = str(lightgbm_model_dir or "").strip()
         device = ""
         if hasattr(self, "oto_crnn_device_var"):
             try:
                 device = str(self.oto_crnn_device_var.get() or "").strip().lower()
             except Exception:
                 device = ""
-        if device in {"cpu", "cuda"}:
-            cmd.extend(["--device", device])
+        if device not in {"cpu", "cuda"}:
+            device = ""
 
         base_oto = (
             resolve_no_mfa_source_oto(
@@ -173,9 +148,6 @@ class PipelineActionsMixin:
             if str(source_oto_path or "").strip()
             else ""
         )
-        if base_oto:
-            cmd.extend(["--template-oto", base_oto])
-
         if callback:
             try:
                 callback("[HSMM OTO] progress 0/1")
@@ -191,27 +163,49 @@ class PipelineActionsMixin:
         self._append_log(f"[HSMM OTO] input wav dir: {os.path.abspath(wav_dir)}")
         self._append_log(f"[HSMM OTO] preview artifacts: {preview_dir}")
         self._append_log("[HSMM OTO] stage 1/4: prepare decoder workspace")
-        pretty = " ".join(f'"{part}"' if (" " in str(part) or "\t" in str(part)) else str(part) for part in cmd)
-        self._append_log(f"[HSMM OTO] 실행: {pretty}")
+        self._append_log("[HSMM OTO] runtime helper: core.mfa_free_oto.review_generation")
         self._append_log("[HSMM OTO] stage 2/4: run HSMM/acoustic decoder")
-        proc = self._popen_subprocess_hidden(
-            cmd,
-            cwd=str(getattr(self, "app_dir", "") or os.getcwd()),
-            stdout=sp.PIPE,
-            stderr=sp.STDOUT,
-            text=False,
-        )
-        stdout_lines = []
-        for line in self._iter_decoded_stdout_lines(proc):
-            stdout_lines.append(line)
-            self._append_log(f"[HSMM OTO] {line}")
-        proc.wait()
-        self._append_log(f"[HSMM OTO] decoder process finished: code={int(proc.returncode)}")
-        if int(proc.returncode) != 0:
-            return 0, 0, [f"HSMM OTO generation failed (code={int(proc.returncode)})"]
+
+        def _review_callback(message):
+            text = str(message or "").strip()
+            if text:
+                self._append_log(f"[HSMM OTO] {text}")
+
+        try:
+            preview_summary = generate_hsmm_oto_review(
+                wav_dir=os.path.abspath(wav_dir),
+                out_dir=preview_dir,
+                name=safe_name,
+                template_oto=base_oto,
+                language=language,
+                format_type=format_type,
+                alias_type="auto",
+                encoder="acoustic_world_v1",
+                device=device,
+                apply_lightgbm=bool(apply_lightgbm),
+                lightgbm_policy=policy,
+                lightgbm_model_dir=os.path.abspath(model_dir) if model_dir else "",
+                callback=_review_callback,
+            )
+        except Exception as exc:
+            self._append_log(f"[HSMM OTO] decoder failed: {exc}")
+            return 0, 0, [f"HSMM OTO generation failed: {exc}"]
+
+        if "review_split_counts" not in preview_summary and isinstance(preview_summary.get("split_counts"), dict):
+            preview_summary["review_split_counts"] = preview_summary.get("split_counts")
+        if "review_split_output_paths" not in preview_summary and isinstance(preview_summary.get("split_output_paths"), dict):
+            preview_summary["review_split_output_paths"] = preview_summary.get("split_output_paths")
+        if "oto_rows" not in preview_summary and preview_summary.get("processed") is not None:
+            preview_summary["oto_rows"] = preview_summary.get("processed")
+
+        self._append_log(f"[HSMM OTO] decoder finished: ok={bool(preview_summary.get('ok'))}")
+        if not bool(preview_summary.get("ok")):
+            errors = [str(item) for item in list(preview_summary.get("errors", []) or []) if str(item).strip()]
+            if not errors:
+                errors = ["HSMM OTO generation failed"]
+            return int(preview_summary.get("processed") or 0), int(preview_summary.get("total") or 0), errors
 
         self._append_log("[HSMM OTO] stage 3/4: copy generated oto")
-        preview_summary = self._parse_hsmm_oto_preview_summary(stdout_lines)
         generated_path = str(preview_summary.get("generated_oto_path") or "").strip()
         out_path_abs = os.path.abspath(out_path)
         if generated_path and os.path.isfile(generated_path):

@@ -22,7 +22,9 @@ _ACOUSTIC_TRACKS = (
     "transition_likelihood",
     "voicing",
     "nucleus_likelihood",
+    "vowel_boundary_likelihood",
     "sonorant_onset_likelihood",
+    "spectral_shape_delta_likelihood",
     "silence_likelihood",
     "world_nucleus",
     "world_voicing",
@@ -711,12 +713,14 @@ def _vv_boundary_track(
     frame_count: int,
 ) -> list[float]:
     transition = list(acoustic_tracks.get("transition_likelihood", ()))
+    boundary = list(acoustic_tracks.get("vowel_boundary_likelihood", ()))
     vowel = list(class_tracks.get("vowel", ()))
     out: list[float] = []
     for idx in range(frame_count):
         tr = _track_value(transition, idx)
+        vb = _track_value(boundary, idx)
         vv = _track_value(vowel, idx)
-        out.append(_round_score(max(0.0, min(1.0, (0.60 * tr) + (0.40 * vv)))))
+        out.append(_round_score(max(0.0, min(1.0, (0.45 * vb) + (0.35 * tr) + (0.20 * vv)))))
     return out
 
 
@@ -1074,6 +1078,7 @@ def _filename_slot_from_mapping(payload: Mapping[str, object], *, default_wav: s
             vowel_phone=str(payload.get("vowel_phone", "")),
             phone_start_index=int(payload.get("phone_start_index", 0) or 0),
             vowel_phone_index=int(payload.get("vowel_phone_index", 0) or 0),
+            coda_phones=tuple(str(item) for item in payload.get("coda_phones", ()) or ()),
             warnings=tuple(str(item) for item in payload.get("warnings", ()) or ()),
             schema_version=int(payload.get("schema_version", 1) or 1),
         )

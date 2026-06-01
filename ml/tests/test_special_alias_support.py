@@ -37,6 +37,12 @@ class SpecialAliasSupportTests(unittest.TestCase):
         self.assertFalse(is_ja_breath("あ 吸い"))
         self.assertFalse(is_ja_breath("a H"))
 
+    def test_korean_custom_map_lowercase_liquids_are_phonetic(self):
+        self.assertEqual(classify_kr_alias("ra", {"ra": "r"}), "cv")
+        self.assertEqual(classify_kr_alias("la", {"la": "l"}), "cv")
+        self.assertEqual(classify_kr_alias("ha", {"ha": "h"}), "cv")
+        self.assertEqual(classify_kr_alias("release", {"release": "R"}), "br")
+
     def test_style_suffix_stripping(self):
         stripped = strip_alias_annotation_suffixes("ga_eng01", classifier=classify_kr_alias)
         self.assertEqual(stripped, "ga")

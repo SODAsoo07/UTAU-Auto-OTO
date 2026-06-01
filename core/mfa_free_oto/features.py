@@ -238,12 +238,11 @@ def acoustic_world_features(
     cfg = config or AcousticFeatureConfig(sample_rate=sample_rate)
     aux = acoustic_aux_features(samples, sample_rate, config=cfg)
     try:
-        import librosa
         import pyworld as pw
         from scipy.ndimage import gaussian_filter1d
     except ImportError as exc:
         raise RuntimeError(
-            "acoustic_world_v1 encoder requires pyworld, librosa, and scipy."
+            "acoustic_world_v1 encoder requires pyworld and scipy."
         ) from exc
 
     wav64 = samples.astype(np.float64)
@@ -261,19 +260,20 @@ def acoustic_world_features(
     sp_delta = np.pad(sp_delta, (1, 0), mode="edge")
     spectral_stability = 1.0 - _robust_unit(sp_delta)
 
-    hop = max(1, int(round(sample_rate * cfg.hop_ms / 1000.0)))
-    onset = librosa.onset.onset_strength(y=samples.astype(np.float32), sr=sample_rate, hop_length=hop)
-    rms = librosa.feature.rms(y=samples.astype(np.float32), frame_length=max(1, int(round(sample_rate * cfg.frame_ms / 1000.0))), hop_length=hop).squeeze(0)
+    onset_times, rms, onset = _frame_rms_flux_tracks(
+        samples.astype(np.float32),
+        sample_rate,
+        frame_ms=float(cfg.frame_ms),
+        hop_ms=float(cfg.hop_ms),
+    )
     onset = _safe_smooth_track(onset.astype(np.float32), gaussian_filter1d)
     rms = _safe_smooth_track(rms.astype(np.float32), gaussian_filter1d)
 
     world_voicing = _interp_vector(world_times_ms, _safe_smooth_track(voiced, gaussian_filter1d), aux.times_ms)
     world_periodicity = _interp_vector(world_times_ms, _safe_smooth_track(periodicity.astype(np.float32), gaussian_filter1d), aux.times_ms)
     world_stability = _interp_vector(world_times_ms, _safe_smooth_track(spectral_stability.astype(np.float32), gaussian_filter1d), aux.times_ms)
-    onset_times = (np.arange(onset.shape[0], dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
-    rms_times = (np.arange(rms.shape[0], dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
     onset_interp = _interp_vector(onset_times, _robust_unit(onset), aux.times_ms)
-    rms_interp = _interp_vector(rms_times, _robust_unit(rms), aux.times_ms)
+    rms_interp = _interp_vector(onset_times, _robust_unit(rms), aux.times_ms)
 
     voiced_delta = np.abs(np.gradient(world_voicing.astype(np.float32))).astype(np.float32)
     transition_world = np.clip(
@@ -286,8 +286,15 @@ def acoustic_world_features(
         0.0,
         1.0,
     ).astype(np.float32)
-
     merged_scores = dict(aux.scores)
+    vowel_boundary_world = np.clip(
+        (0.50 * np.asarray(merged_scores.get("vowel_boundary_likelihood", transition_world), dtype=np.float32))
+        + (0.28 * transition_world)
+        + (0.22 * np.clip(world_voicing * (1.0 - world_stability), 0.0, 1.0)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
     merged_scores.update(
         {
             "world_f0_hz": _interp_vector(world_times_ms, np.asarray(f0, dtype=np.float32), aux.times_ms),
@@ -297,6 +304,7 @@ def acoustic_world_features(
             "world_transition": transition_world,
             "world_nucleus": nucleus_world,
             "transition_likelihood": np.clip(0.55 * merged_scores["transition_likelihood"] + 0.45 * transition_world, 0.0, 1.0).astype(np.float32),
+            "vowel_boundary_likelihood": vowel_boundary_world,
             "voicing": np.clip(0.55 * merged_scores["voicing"] + 0.45 * world_voicing, 0.0, 1.0).astype(np.float32),
             "nucleus_likelihood": nucleus_world,
             "onset_strength": onset_interp,
@@ -320,6 +328,43 @@ def acoustic_world_features(
         times_ms=aux.times_ms,
         features=features,
         scores=merged_scores,
+    )
+
+
+def _frame_rms_flux_tracks(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    frame_ms: float,
+    hop_ms: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    frame_size = max(1, int(round(sample_rate * frame_ms / 1000.0)))
+    hop = max(1, int(round(sample_rate * hop_ms / 1000.0)))
+    if samples.shape[0] < frame_size:
+        samples = np.pad(samples, (0, frame_size - samples.shape[0]))
+    frame_count = 1 + max(0, (samples.shape[0] - frame_size) // hop)
+    window = np.hanning(frame_size).astype(np.float32)
+    previous_mag: np.ndarray | None = None
+    rms_values: list[float] = []
+    flux_values: list[float] = []
+    for idx in range(frame_count):
+        start = idx * hop
+        frame = samples[start : start + frame_size]
+        if frame.shape[0] < frame_size:
+            frame = np.pad(frame, (0, frame_size - frame.shape[0]))
+        weighted = frame.astype(np.float32) * window
+        rms_values.append(float(np.sqrt(np.mean(frame * frame) + 1e-12)))
+        mag = np.abs(np.fft.rfft(weighted)).astype(np.float32)
+        if previous_mag is None:
+            flux_values.append(0.0)
+        else:
+            flux_values.append(float(np.mean(np.maximum(0.0, mag - previous_mag))))
+        previous_mag = mag
+    times_ms = (np.arange(frame_count, dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
+    return (
+        times_ms,
+        np.asarray(rms_values, dtype=np.float32),
+        np.asarray(flux_values, dtype=np.float32),
     )
 
 
@@ -380,7 +425,11 @@ def acoustic_aux_features(
     raw_rows: list[np.ndarray] = []
     mel_rows: list[np.ndarray] = []
     previous_mag: np.ndarray | None = None
+    previous_mag_norm: np.ndarray | None = None
+    previous_centroid = 0.0
     previous_rms = 0.0
+    shape_delta_values: list[float] = []
+    centroid_delta_values: list[float] = []
     for idx in range(frame_count):
         start = idx * hop
         frame = samples[start : start + frame_size]
@@ -398,9 +447,16 @@ def acoustic_aux_features(
             mag_norm = mag / (float(mag.sum()) + 1e-8)
             centroid = float(np.sum(np.linspace(0.0, 1.0, mag.shape[0]) * mag_norm))
         else:
+            mag_norm = np.zeros_like(mag, dtype=np.float32)
             centroid = 0.0
         flux = 0.0 if previous_mag is None else float(np.mean(np.maximum(0.0, mag - previous_mag)))
+        shape_delta = 0.0 if previous_mag_norm is None else float(np.mean(np.abs(mag_norm - previous_mag_norm)))
+        centroid_delta = 0.0 if previous_mag_norm is None else abs(float(centroid) - float(previous_centroid))
+        shape_delta_values.append(shape_delta)
+        centroid_delta_values.append(centroid_delta)
         previous_mag = mag
+        previous_mag_norm = mag_norm
+        previous_centroid = centroid
         harmonicity = _autocorr_harmonicity(frame, sample_rate)
         mel = np.log1p(_pool_spectrum(mag, cfg.aux_fft_bins)).astype(np.float32)
         raw_rows.append(np.asarray([rms, log_rms, delta_rms, zcr, centroid, flux, harmonicity], dtype=np.float32))
@@ -411,11 +467,42 @@ def acoustic_aux_features(
     flux_score = _robust_unit(raw[:, 5])
     voicing_score = np.clip(raw[:, 6], 0.0, 1.0).astype(np.float32)
     energy_rise = _positive_unit(raw[:, 2])
+    spectral_shape_delta = _robust_unit(np.asarray(shape_delta_values, dtype=np.float32))
+    centroid_delta = _robust_unit(np.asarray(centroid_delta_values, dtype=np.float32))
     transition_score = np.clip(0.65 * flux_score + 0.35 * energy_rise, 0.0, 1.0).astype(np.float32)
+    vowel_active = np.clip((0.54 * voicing_score) + (0.32 * (1.0 - silence_score)) + (0.14 * _robust_unit(raw[:, 0])), 0.0, 1.0)
+    vowel_active_delta = (
+        np.gradient(vowel_active.astype(np.float32))
+        if vowel_active.shape[0] > 1
+        else np.zeros_like(vowel_active, dtype=np.float32)
+    )
+    vowel_envelope_edge = np.clip(
+        0.50 * _positive_unit(vowel_active_delta)
+        + 0.50 * _positive_unit(-vowel_active_delta),
+        0.0,
+        1.0,
+    )
+    vowel_boundary_score = np.clip(
+        vowel_active
+        * (
+            (0.48 * spectral_shape_delta)
+            + (0.22 * centroid_delta)
+            + (0.18 * transition_score)
+            + (0.12 * vowel_envelope_edge)
+        ),
+        0.0,
+        1.0,
+    ).astype(np.float32)
     # Sonorant (m/n/l/r/w/y) onsets carry little spectral flux because voicing
-    # is continuous across the boundary; an energy rise gated by voicing keeps a
-    # cv-boundary cue where the flux-based transition score under-fires.
-    sonorant_onset_score = np.clip(voicing_score * energy_rise, 0.0, 1.0).astype(np.float32)
+    # is continuous across the boundary. Spectral-shape movement catches nasal
+    # and liquid constrictions even when absolute volume is low or not rising.
+    voiced_active = np.clip((0.62 * voicing_score) + (0.38 * (1.0 - silence_score)), 0.0, 1.0)
+    sonorant_edge = np.clip(
+        (0.42 * energy_rise) + (0.42 * spectral_shape_delta) + (0.16 * centroid_delta),
+        0.0,
+        1.0,
+    )
+    sonorant_onset_score = np.clip(voiced_active * sonorant_edge, 0.0, 1.0).astype(np.float32)
     features = np.concatenate(
         [
             _standardize(raw),
@@ -441,7 +528,10 @@ def acoustic_aux_features(
             "voicing": voicing_score,
             "silence_likelihood": silence_score,
             "flux_likelihood": flux_score,
+            "spectral_shape_delta_likelihood": spectral_shape_delta,
+            "centroid_delta_likelihood": centroid_delta,
             "transition_likelihood": transition_score,
+            "vowel_boundary_likelihood": vowel_boundary_score,
             "sonorant_onset_likelihood": sonorant_onset_score,
         },
     )

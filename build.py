@@ -67,8 +67,47 @@ EXCLUDED_TRAINING_MODULES = [
 ]
 EXCLUDED_BUILD_ONLY_MODULES = [
     "build",
+    "librosa",
     "core.mapping_supervised_training",
     "ml.tests.test_alignment_pipeline",
+    "numba",
+    "onnxruntime.tools",
+    "onnxruntime.transformers",
+    "pandas.tests",
+]
+
+PYINSTALLER_HIDDEN_IMPORTS = [
+    "textgrid",
+    "customtkinter",
+    "onnxruntime",
+    "core.mfa_free_oto.review_generation",
+    "core.mfa_free_oto.workflow",
+    "core.mfa_free_oto.features",
+    "core.alignment.hsmm_decoder",
+    "pyworld",
+    "scipy",
+    "scipy.ndimage",
+    "lightgbm",
+    "pandas",
+]
+NUITKA_INCLUDE_MODULES = [
+    "textgrid",
+    "onnxruntime",
+    "lightgbm",
+    "pandas",
+    "pyworld",
+    "scipy",
+    "scipy.ndimage",
+    "scipy.io.wavfile",
+    "scipy.sparse",
+    "core.mfa_free_oto.review_generation",
+    "core.mfa_free_oto.workflow",
+    "core.mfa_free_oto.features",
+    "core.alignment.hsmm_decoder",
+]
+NUITKA_INCLUDE_PACKAGES = [
+    "customtkinter",
+    "onnxruntime.capi",
 ]
 
 
@@ -631,11 +670,7 @@ def _build_pyinstaller_args(app_name, ffmpeg_bin, app_icon_path="", onefile=Fals
     ]
     if ffmpeg_bin:
         pyinstaller_args.append(f"--add-data={ffmpeg_bin};ffmpeg/bin")
-    pyinstaller_args += [
-        "--hidden-import=textgrid",
-        "--hidden-import=customtkinter",
-        "--hidden-import=onnxruntime",
-    ]
+    pyinstaller_args += [f"--hidden-import={module_name}" for module_name in PYINSTALLER_HIDDEN_IMPORTS]
     for src, name in _iter_msvc_runtime_files():
         pyinstaller_args.append(f"--add-binary={src};.")
     for src, dst in _iter_runtime_data_entries():
@@ -692,12 +727,13 @@ def _run_nuitka_build(app_name, ffmpeg_bin, app_icon_path="", onefile=False, dev
         "--windows-console-mode=disable",
         f"--output-dir={output_root}",
         f"--output-filename={app_name}.exe",
-        "--include-module=textgrid",
-        "--include-package=customtkinter",
-        "--include-package=onnxruntime",
         f"--jobs={cpu_jobs}",
         f"--nofollow-import-to={','.join(_excluded_build_modules())}",
     ]
+    for module_name in NUITKA_INCLUDE_MODULES:
+        cmd.append(f"--include-module={module_name}")
+    for package_name in NUITKA_INCLUDE_PACKAGES:
+        cmd.append(f"--include-package={package_name}")
     if dev:
         # Nuitka 4.x enables compiler caches through its cache control layer;
         # the old --enable-ccache switch is no longer accepted.

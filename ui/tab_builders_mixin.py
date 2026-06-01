@@ -262,31 +262,8 @@ class TabBuildersMixin:
         return action_panel
 
     def _slot_pipeline_mfa_status(self, parent, _layout_root, _node):
-        mfa_inner = ctk.CTkFrame(parent, fg_color="transparent")
-        mfa_inner.pack(fill="x", padx=10, pady=8)
-
-        status_group = ctk.CTkFrame(mfa_inner, fg_color="transparent")
-        status_group.pack(side="left")
-
-        mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
-        if getattr(self, "_mfa_install_in_progress", False):
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("🔧 MFA 설치 중..."), font=("", 13, "bold"), text_color="#C27803"
-            )
-        elif getattr(self, "_mfa_path_probe_pending", False):
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("⏳ MFA 확인 중..."), font=("", 13, "bold"), text_color=PALETTE.hint_text
-            )
-        elif mfa_ready:
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("✅ MFA 설치됨"), font=("", 13, "bold"), text_color="#4F8F61"
-            )
-        else:
-            self.mfa_status_label = ctk.CTkLabel(
-                status_group, text=t("⚪ MFA 미완료"), font=("", 13, "bold"), text_color="#90A4AE"
-            )
-        self.mfa_status_label.pack(side="left")
-        return mfa_inner
+        self.mfa_status_label = None
+        return None
 
     def _slot_pipeline_intro(self, parent, _layout_root, _node):
         intro_label = ctk.CTkLabel(

@@ -12,6 +12,7 @@ from .types import FramePosterior
 
 
 HSMM_ADAPTER_SCHEMA_VERSION = 1
+_SONORANT_PHONES = frozenset({"m", "n", "ng", "ny", "r", "l", "w", "y", "j"})
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ def build_hsmm_frame_scores(
     posterior: FramePosterior,
     states: Sequence[HSMMStateSpec],
     *,
+    slots: Sequence[FilenameSlot] = (),
     state_interval_priors: Mapping[str, Sequence[float]] | None = None,
 ) -> dict[str, tuple[float, ...]]:
     times = np.asarray(posterior.times_ms, dtype=np.float32)
@@ -105,6 +107,11 @@ def build_hsmm_frame_scores(
         0.0,
         1.0,
     )
+    sonorant_consonant_score = np.clip(
+        (0.34 * onset) + (0.24 * transition) + (0.22 * voicing) + (0.20 * active),
+        0.0,
+        1.0,
+    )
     vowel_score = np.clip(
         (0.50 * vowel) + (0.22 * voicing) + (0.18 * nucleus) + (0.10 * active),
         0.0,
@@ -114,8 +121,16 @@ def build_hsmm_frame_scores(
     out: dict[str, tuple[float, ...]] = {}
     duration = _posterior_duration_ms(times)
     order_count = max(1, len(states))
+    sonorant_onset_state_ids = {
+        _state_id(slot, "onset")
+        for slot in slots
+        if slot.onset_phones and _phones_include_sonorant(slot.onset_phones)
+    }
     for order, state in enumerate(states):
-        base = consonant_score if state.state_type == "consonant" else vowel_score
+        if state.state_type == "consonant" and state.state_id in sonorant_onset_state_ids:
+            base = sonorant_consonant_score
+        else:
+            base = consonant_score if state.state_type == "consonant" else vowel_score
         prior = _position_prior(times, expected_ms=(order + 0.5) * duration / float(order_count), sigma_ms=max(40.0, duration / float(order_count + 1)))
         event_prior = _track(state_interval_priors or {}, state.state_id, frame_count)
         if np.any(event_prior):
@@ -147,6 +162,7 @@ def decode_filename_slots_with_hsmm(
     frame_scores = build_hsmm_frame_scores(
         posterior,
         states,
+        slots=slots,
         state_interval_priors=state_interval_priors,
     )
     result = decode_segmental_hsmm(
@@ -484,6 +500,16 @@ def _event(
 
 def _state_id(slot: FilenameSlot, kind: str) -> str:
     return f"slot{int(slot.slot_index)}.{kind}"
+
+
+def _phones_include_sonorant(phones: Sequence[str]) -> bool:
+    for phone in phones:
+        normalized = str(phone or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized in _SONORANT_PHONES or normalized.startswith(("m", "n", "r", "l")):
+            return True
+    return False
 
 
 def _track(mapping: Mapping[str, Sequence[float]], key: str, frame_count: int) -> np.ndarray:

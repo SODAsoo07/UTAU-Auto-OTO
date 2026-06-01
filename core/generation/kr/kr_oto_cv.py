@@ -15,7 +15,9 @@ from core.kr_oto_rules import (
 KR_FRICATIVE_ONSETS = {"s", "ss", "sh", "h", "f"}
 # 격음 (기식이 길다)
 KR_ASPIRATE_ONSETS = {"k", "t", "p", "ch"}
-_SILENCE_PHONE_MARKS = {"", "sil", "pau", "sp", "spn", "br", "bre", "breath", "r"}
+# Keep this to TextGrid phone labels only. UTAU release aliases such as "R"
+# are handled at alias level; bare "r" is a real Korean liquid phone here.
+_SILENCE_PHONE_MARKS = {"", "sil", "pau", "sp", "spn", "br", "bre", "breath"}
 
 
 def _is_fricative_consonant(ipa_hint="", roman_hint=""):

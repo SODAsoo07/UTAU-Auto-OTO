@@ -2425,7 +2425,9 @@ def build_training_rows(
 
 def dataset_fieldnames() -> List[str]:
     return [
-        "voicebank_id", "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
+        "voicebank_id", "case_id", "group_id", "case_wav",
+        "wav", "alias", "wav_norm", "alias_norm", "occurrence_index", "line_index", "source_oto_id", "source_row_id",
+        "alias_family", "vc_left_token", "vc_right_token", "vc_right_class", "vc_pair",
         "mel_patch_key", "mel_patch_debug_key", "mel_onset_anchor_ms", "mel_tail_anchor_ms", "mel_patch_source",
         *FEATURE_NAMES,
         "manual_offset", "manual_cons", "manual_cutoff", "manual_cutoff_abs", "manual_cutoff_mode", "manual_pre", "manual_ovl",

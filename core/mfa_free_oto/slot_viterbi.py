@@ -13,9 +13,22 @@ from .types import EVENT_LABELS, FramePosterior, is_vowel_phone
 _ROLE_GAP_CV_TO_NUCLEUS_MS = 18.0
 _ROLE_GAP_NUCLEUS_TO_CV_MS = 22.0
 _ROLE_GAP_NUCLEUS_TO_NUCLEUS_MS = 26.0
+_ROLE_GAP_CONSECUTIVE_CV_RATIO = 0.45
+_ROLE_GAP_CONSECUTIVE_CV_MIN_MS = 80.0
+_ROLE_GAP_CONSECUTIVE_CV_MAX_MS = 220.0
 # A row whose mean slot period is at or below this is treated as "dense", which
 # enables extra nucleus peak suppression.
 _DENSE_ROW_SLOT_PERIOD_MS = 72.0
+_SONORANT_PHONES = frozenset({"m", "n", "ng", "ny", "r", "l", "w", "y", "j"})
+_NASAL_PHONES = frozenset({"m", "n", "ng", "ny", "my"})
+_LIQUID_PHONES = frozenset({"r", "l", "ry"})
+_KOREAN_OBSTRUENT_VC_EXPECTED_SHIFT_RATIO_BY_PHONE = {
+    "b": 0.82,
+    "d": 0.74,
+    "h": 0.48,
+    "p": -0.15,
+    "k": -0.10,
+}
 
 
 @dataclass(frozen=True)
@@ -126,7 +139,8 @@ def assign_slots_viterbi(
         return SlotViterbiResult(assignments=(), path_score=0.0, average_score=0.0, warnings=("hard_no_expected_slots",))
 
     duration_ms = float(times[-1]) if times.size == 1 else float(max(times[-1], times[1] - times[0]))
-    expected_times = _expected_slot_times(slots, duration_ms)
+    active_start_ms, active_end_ms = _expected_time_window(posterior, times, duration_ms, language=language)
+    expected_times = _expected_slot_times(slots, duration_ms, start_ms=active_start_ms, end_ms=active_end_ms)
     selected_by_slot: dict[int, SlotAssignment] = {}
     path_score_total = 0.0
     segment_bounds = _segment_slot_ranges(
@@ -136,7 +150,7 @@ def assign_slots_viterbi(
     )
     if len(segment_bounds) > 1:
         warnings.append(f"segmented_decode:{len(segment_bounds)} overlap={max(0, int(segment_overlap_slots))}")
-    slot_period_ms = float(duration_ms) / float(max(1, len(slots) + 1))
+    slot_period_ms = float(max(1.0, active_end_ms - active_start_ms)) / float(max(1, len(slots)))
     window_ms = max(45.0, slot_period_ms * float(max(1.6, local_window_slots)))
     dense_row = bool(slot_period_ms <= _DENSE_ROW_SLOT_PERIOD_MS)
     previous_assignment: SlotAssignment | None = None
@@ -145,9 +159,20 @@ def assign_slots_viterbi(
         seg_slots = slots[start:end]
         candidate_steps: list[list[SlotCandidate]] = []
         for local_idx, slot in enumerate(seg_slots):
-            expected_time = expected_times.get(slot.slot_index)
+            expected_time = _candidate_expected_time_ms(
+                slot,
+                expected_times.get(slot.slot_index),
+                language=language,
+                slot_period_ms=slot_period_ms,
+                slot_count=len(slots),
+            )
             min_time_ms: float | None = None
-            if local_idx == 0 and previous_assignment is not None and previous_slot is not None:
+            if (
+                local_idx == 0
+                and previous_assignment is not None
+                and previous_slot is not None
+                and slot.slot_index > previous_slot.slot_index
+            ):
                 required = _required_gap_ms(
                     previous_slot,
                     slot,
@@ -165,6 +190,17 @@ def assign_slots_viterbi(
                 min_time_ms=min_time_ms,
                 max_time_ms=None,
                 window_ms=window_ms,
+                expected_time_hard_window_ms=_expected_time_hard_window_ms(
+                    slot,
+                    language=language,
+                    slot_period_ms=slot_period_ms,
+                    slot_count=len(slots),
+                ),
+                expected_time_fallback_enabled=_expected_time_fallback_enabled(
+                    slot,
+                    language=language,
+                    slot_count=len(slots),
+                ),
                 nucleus_min_peak_distance_ms=nucleus_min_peak_distance_ms,
                 dense_row=dense_row,
             )
@@ -182,6 +218,7 @@ def assign_slots_viterbi(
             candidate_steps,
             min_gap_ms=min_gap_ms,
             same_phone_min_gap_ms=same_phone_min_gap_ms,
+            slot_period_ms=slot_period_ms,
             transition_weight=transition_weight,
         )
         if not selected:
@@ -199,7 +236,13 @@ def assign_slots_viterbi(
                 selected_time_ms=candidate.time_ms,
                 score=candidate.score,
                 frame_index=candidate.frame_index,
-                expected_time_ms=expected_times.get(slot.slot_index),
+                expected_time_ms=_candidate_expected_time_ms(
+                    slot,
+                    expected_times.get(slot.slot_index),
+                    language=language,
+                    slot_period_ms=slot_period_ms,
+                    slot_count=len(slots),
+                ),
             )
             seg_assignments.append(assigned)
         for assigned in seg_assignments:
@@ -211,7 +254,13 @@ def assign_slots_viterbi(
             chosen = _select_overlap_assignment(
                 existing,
                 assigned,
-                expected_time_ms=expected_times.get(assigned.slot_index),
+                expected_time_ms=_candidate_expected_time_ms(
+                    slot,
+                    expected_times.get(assigned.slot_index),
+                    language=language,
+                    slot_period_ms=slot_period_ms,
+                    slot_count=len(slots),
+                ),
                 slot=slot,
                 slots=slots,
                 selected_by_slot=selected_by_slot,
@@ -290,6 +339,8 @@ def _slot_candidates(
     min_time_ms: float | None,
     max_time_ms: float | None,
     window_ms: float,
+    expected_time_hard_window_ms: float | None,
+    expected_time_fallback_enabled: bool,
     nucleus_min_peak_distance_ms: float,
     dense_row: bool,
 ) -> list[SlotCandidate]:
@@ -301,33 +352,91 @@ def _slot_candidates(
         return []
     class_prior = _slot_class_prior(posterior, slot)
     acoustic_prior = _slot_acoustic_prior(posterior, slot)
-    values = np.clip(event_values, 0.0, 1.0) * 0.62 + class_prior * 0.24 + acoustic_prior * 0.14
+    sonorant_phone_change = _is_sonorant_phone_change_slot(slot)
+    vowel_transition_slot = str(slot.role) == "vv"
+    if sonorant_phone_change:
+        values = np.clip(
+            (0.25 * np.clip(event_values, 0.0, 1.0)) + (0.15 * class_prior) + (0.60 * acoustic_prior),
+            0.0,
+            1.0,
+        )
+    elif vowel_transition_slot:
+        values = np.clip(
+            (0.24 * np.clip(event_values, 0.0, 1.0)) + (0.16 * class_prior) + (0.60 * acoustic_prior),
+            0.0,
+            1.0,
+        )
+    else:
+        values = np.clip(event_values, 0.0, 1.0) * 0.62 + class_prior * 0.24 + acoustic_prior * 0.14
     peak_indices = _local_peak_indices(values, min_score=min_event_score)
-    if slot.role == "vowel_nucleus" and dense_row:
+    if _is_vowel_nucleus_slot(slot) and dense_row:
         peak_indices = _suppress_peak_indices(
             peak_indices,
             values,
             times,
             min_distance_ms=max(12.0, float(nucleus_min_peak_distance_ms * 0.78)),
         )
-    if slot.role == "vowel_nucleus":
+    if _is_vowel_nucleus_slot(slot):
         peak_indices = _suppress_peak_indices(
             peak_indices,
             values,
             times,
             min_distance_ms=max(12.0, float(nucleus_min_peak_distance_ms)),
         )
+    fallback_indices: set[int] = set()
+    if expected_time_ms is not None and expected_time_hard_window_ms is not None:
+        hard_window = max(1.0, float(expected_time_hard_window_ms))
+        in_window = [
+            idx
+            for idx in peak_indices
+            if abs(float(times[idx]) - float(expected_time_ms)) <= hard_window
+        ]
+        if in_window:
+            peak_indices = in_window
+        elif expected_time_fallback_enabled and times.size > 0:
+            fallback_idx = int(np.argmin(np.abs(times - float(expected_time_ms))))
+            peak_indices = [fallback_idx]
+            fallback_indices.add(fallback_idx)
     if not peak_indices:
-        best_event_idx = int(np.argmax(event_values))
-        if float(event_values[best_event_idx]) >= float(min_event_score):
+        gate_values = values if (sonorant_phone_change or vowel_transition_slot) else event_values
+        best_event_idx = int(np.argmax(gate_values))
+        if float(gate_values[best_event_idx]) >= float(min_event_score):
             peak_indices = [best_event_idx]
         else:
             return []
     duration_ms = float(max(times[-1], 1.0))
     candidates: list[SlotCandidate] = []
+    if fallback_indices:
+        idx = next(iter(fallback_indices))
+        if min_time_ms is not None and float(times[idx]) + 1e-5 < float(min_time_ms):
+            return []
+        if max_time_ms is not None and float(times[idx]) - 1e-5 > float(max_time_ms):
+            return []
+        score = float(values[idx])
+        if expected_time_ms is not None and duration_ms > 0.0:
+            score -= expected_time_weight * (abs(float(times[idx]) - expected_time_ms) / duration_ms)
+        return [SlotCandidate(frame_index=idx, time_ms=float(times[idx]), score=max(score, float(min_event_score)))]
     for idx in peak_indices:
         score = float(values[idx])
-        if float(event_values[idx]) < float(min_event_score):
+        gate_score = (
+            float(values[idx])
+            if (sonorant_phone_change or vowel_transition_slot or str(slot.role or "").strip().lower() == "v")
+            else float(event_values[idx])
+        )
+        is_expected_fallback = idx in fallback_indices
+        if is_expected_fallback:
+            if expected_time_ms is not None and duration_ms > 0.0:
+                distance = abs(float(times[idx]) - expected_time_ms) / duration_ms
+                score -= expected_time_weight * distance
+            if min_time_ms is not None and float(times[idx]) + 1e-5 < float(min_time_ms):
+                continue
+            if max_time_ms is not None and float(times[idx]) - 1e-5 > float(max_time_ms):
+                continue
+            candidates.append(
+                SlotCandidate(frame_index=idx, time_ms=float(times[idx]), score=max(score, float(min_event_score)))
+            )
+            continue
+        if gate_score < float(min_event_score) and not is_expected_fallback:
             continue
         if expected_time_ms is not None and duration_ms > 0.0:
             distance = abs(float(times[idx]) - expected_time_ms) / duration_ms
@@ -347,17 +456,25 @@ def _slot_candidates(
 
 def _slot_class_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.ndarray:
     times = np.asarray(posterior.times_ms, dtype=np.float32)
+    silence = np.asarray(posterior.class_probs.get("silence", []), dtype=np.float32)
     vowel = np.asarray(posterior.class_probs.get("vowel", []), dtype=np.float32)
     consonant = np.asarray(posterior.class_probs.get("consonant", []), dtype=np.float32)
+    if silence.shape[0] != times.shape[0]:
+        silence = np.zeros_like(times)
     if vowel.shape[0] != times.shape[0]:
         vowel = np.zeros_like(times)
     if consonant.shape[0] != times.shape[0]:
         consonant = np.zeros_like(times)
-    if slot.role == "cv_boundary":
+    if _is_cv_boundary_slot(slot):
         left_consonant = _left_context_max(consonant, frames=4)
         return np.clip(0.55 * vowel + 0.45 * left_consonant, 0.0, 1.0)
-    if slot.role == "vowel_nucleus":
+    if _is_vowel_nucleus_slot(slot) or slot.role == "vv":
         return np.clip(vowel, 0.0, 1.0)
+    if str(slot.event_label) == "phone_change":
+        active = np.clip(1.0 - silence, 0.0, 1.0)
+        if _is_sonorant_phone_change_slot(slot):
+            return np.clip((0.40 * consonant) + (0.34 * vowel) + (0.26 * active), 0.0, 1.0)
+        return np.clip((0.72 * consonant) + (0.28 * active), 0.0, 1.0)
     return np.zeros_like(times)
 
 
@@ -365,20 +482,51 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
     times = np.asarray(posterior.times_ms, dtype=np.float32)
     transition = _score_track(posterior, "transition_likelihood", times)
     flux = _score_track(posterior, "flux_likelihood", times)
+    vowel_boundary = _score_track(posterior, "vowel_boundary_likelihood", times)
     sonorant = _score_track(posterior, "sonorant_onset_likelihood", times)
+    spectral_delta = _score_track(posterior, "spectral_shape_delta_likelihood", times)
     voicing = _score_track(posterior, "voicing", times)
     nucleus = np.maximum(_score_track(posterior, "nucleus_likelihood", times), _score_track(posterior, "world_nucleus", times))
     periodicity = _score_track(posterior, "world_periodicity", times)
     spectral_stability = _score_track(posterior, "world_spectral_stability", times)
     silence = _score_track(posterior, "silence_likelihood", times)
     non_silence = 1.0 - silence
-    if slot.role == "cv_boundary":
+    if str(slot.event_label) == "phone_change":
+        if _is_sonorant_phone_change_slot(slot):
+            sonorant_edge = np.maximum(sonorant, np.clip((0.68 * spectral_delta) + (0.32 * transition), 0.0, 1.0))
+            return np.clip(
+                (0.46 * sonorant_edge)
+                + (0.18 * transition)
+                + (0.12 * flux)
+                + (0.14 * voicing)
+                + (0.10 * non_silence),
+                0.0,
+                1.0,
+            )
+        unvoiced = np.clip(1.0 - voicing, 0.0, 1.0)
+        return np.clip(
+            (0.42 * transition) + (0.24 * flux) + (0.20 * unvoiced) + (0.14 * non_silence),
+            0.0,
+            1.0,
+        )
+    if slot.role == "vv":
+        boundary = np.maximum(vowel_boundary, np.clip((0.62 * spectral_delta) + (0.26 * transition) + (0.12 * non_silence), 0.0, 1.0))
+        return np.clip(
+            (0.44 * boundary)
+            + (0.18 * transition)
+            + (0.16 * nucleus)
+            + (0.14 * voicing)
+            + (0.08 * non_silence),
+            0.0,
+            1.0,
+        )
+    if _is_cv_boundary_slot(slot):
         return np.clip(
             0.42 * transition + 0.24 * flux + 0.18 * non_silence + 0.16 * sonorant,
             0.0,
             1.0,
         )
-    if slot.role == "vowel_nucleus":
+    if _is_vowel_nucleus_slot(slot):
         weights = _nucleus_prior_weights()
         return np.clip(
             (weights["voicing"] * voicing)
@@ -390,6 +538,48 @@ def _slot_acoustic_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.nd
             1.0,
         )
     return np.zeros_like(times)
+
+
+def _is_sonorant_phone_change_slot(slot: ExpectedSlot) -> bool:
+    if str(slot.event_label) != "phone_change":
+        return False
+    return _is_sonorant_phone(slot.phone)
+
+
+def _is_nasal_phone(phone: str) -> bool:
+    return str(phone or "").strip().lower() in _NASAL_PHONES
+
+
+def _is_liquid_phone(phone: str) -> bool:
+    return str(phone or "").strip().lower() in _LIQUID_PHONES
+
+
+def _is_cv_boundary_slot(slot: ExpectedSlot) -> bool:
+    if str(slot.event_label) != "cv_boundary":
+        return False
+    role = str(slot.role or "").strip().lower()
+    return role in {"cv_boundary", "cv", "cv_head", "implicit_cv", "vcv"}
+
+
+def _is_vowel_nucleus_slot(slot: ExpectedSlot) -> bool:
+    if str(slot.event_label) != "vowel_nucleus":
+        return False
+    role = str(slot.role or "").strip().lower()
+    return role in {"vowel_nucleus", "v"}
+
+
+def _is_sonorant_phone(phone: str) -> bool:
+    normalized = str(phone or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in _SONORANT_PHONES:
+        return True
+    return normalized.startswith(("m", "n", "r", "l"))
+
+
+def _is_korean_language(language: str) -> bool:
+    lang = str(language or "").strip().lower()
+    return bool(lang.startswith("ko") or lang.startswith("kr"))
 
 
 def _score_track(posterior: FramePosterior, name: str, times: np.ndarray) -> np.ndarray:
@@ -411,9 +601,9 @@ def _append_acoustic_warnings(
     voicing = _track_value(posterior, "voicing", idx)
     if silence is not None and silence > 0.75:
         warnings.append(f"low_energy_slot:{slot.slot_index}:{silence:.3f}")
-    if slot.role == "cv_boundary" and transition is not None and transition < 0.20:
+    if _is_cv_boundary_slot(slot) and transition is not None and transition < 0.20:
         warnings.append(f"weak_flux_slot:{slot.slot_index}:{transition:.3f}")
-    if slot.role == "vowel_nucleus" and voicing is not None and voicing < 0.20:
+    if _is_vowel_nucleus_slot(slot) and voicing is not None and voicing < 0.20:
         warnings.append(f"weak_voicing_slot:{slot.slot_index}:{voicing:.3f}")
 
 
@@ -444,11 +634,185 @@ def _local_peak_indices(values: np.ndarray, *, min_score: float) -> list[int]:
     return peaks
 
 
-def _expected_slot_times(slots: Sequence[ExpectedSlot], duration_ms: float) -> Mapping[int, float]:
+def _expected_slot_times(
+    slots: Sequence[ExpectedSlot],
+    duration_ms: float,
+    *,
+    start_ms: float = 0.0,
+    end_ms: float | None = None,
+) -> Mapping[int, float]:
     if not slots:
         return {}
-    step = float(duration_ms) / float(len(slots) + 1)
-    return {slot.slot_index: step * float(idx + 1) for idx, slot in enumerate(slots)}
+    start = max(0.0, min(float(start_ms), float(duration_ms)))
+    end = float(duration_ms) if end_ms is None else max(start, min(float(end_ms), float(duration_ms)))
+    if len(slots) == 1:
+        return {slots[0].slot_index: start + ((end - start) * 0.5)}
+    span = max(1.0, end - start)
+    return {
+        slot.slot_index: start + span * (float(idx) / float(len(slots) - 1))
+        for idx, slot in enumerate(slots)
+    }
+
+
+def _expected_time_window(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    duration_ms: float,
+    *,
+    language: str,
+) -> tuple[float, float]:
+    lang = str(language or "").strip().lower()
+    if not (lang.startswith("ko") or lang.startswith("kr")):
+        return 0.0, float(duration_ms)
+    if times.size <= 2:
+        return 0.0, float(duration_ms)
+    silence = _score_track(posterior, "silence_likelihood", times)
+    if silence.shape[0] != times.shape[0] or not np.any(np.isfinite(silence)):
+        return 0.0, float(duration_ms)
+    active = silence < _env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_SILENCE_MAX", 0.66)
+    indices = np.flatnonzero(active)
+    if indices.size <= 0:
+        return 0.0, float(duration_ms)
+    raw_start = float(times[int(indices[0])])
+    raw_end = float(times[int(indices[-1])])
+    if raw_end <= raw_start + 120.0:
+        return 0.0, float(duration_ms)
+    leading = raw_start
+    trailing = float(duration_ms) - raw_end
+    if leading < 80.0 and trailing < 80.0:
+        return 0.0, float(duration_ms)
+    span = max(1.0, raw_end - raw_start)
+    head_margin = min(_env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_HEAD_MARGIN_MS", 55.0), span * 0.04)
+    tail_margin = min(_env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_TAIL_MARGIN_MS", 60.0), span * 0.04)
+    start = max(0.0, raw_start + head_margin)
+    end = min(float(duration_ms), raw_end - tail_margin)
+    if end <= start + 120.0:
+        return raw_start, raw_end
+    return start, end
+
+
+def _expected_time_hard_window_ms(
+    slot: ExpectedSlot,
+    *,
+    language: str,
+    slot_period_ms: float,
+    slot_count: int,
+) -> float | None:
+    if not _is_korean_language(language):
+        return None
+    if int(slot_count) < 3:
+        return None
+    sonorant_vc = _is_korean_sonorant_vc_grid_slot(slot, slot_count=slot_count, min_slot_count=4)
+    obstruent_vc = _is_korean_obstruent_vc_grid_slot(slot, slot_count=slot_count)
+    if not (_is_cv_boundary_slot(slot) or _is_vowel_nucleus_slot(slot) or sonorant_vc or obstruent_vc):
+        return None
+    if obstruent_vc:
+        configured_obstruent = _env_float("UTOA_NO_MFA_KR_OBSTRUENT_VC_EXPECTED_HARD_WINDOW_MS", 0.0)
+        if configured_obstruent > 0.0:
+            return configured_obstruent
+        period = float(slot_period_ms)
+        if not np.isfinite(period) or period <= 0.0:
+            return 170.0
+        return float(max(135.0, min(210.0, period * 0.70)))
+    if sonorant_vc:
+        configured_vc = _env_float("UTOA_NO_MFA_KR_VC_EXPECTED_HARD_WINDOW_MS", 0.0)
+        if configured_vc > 0.0:
+            return configured_vc
+        period = float(slot_period_ms)
+        if not np.isfinite(period) or period <= 0.0:
+            return 180.0
+        return float(max(115.0, min(220.0, period * 0.78)))
+    configured = _env_float("UTOA_NO_MFA_KR_CV_EXPECTED_HARD_WINDOW_MS", 0.0)
+    if configured > 0.0:
+        return configured
+    period = float(slot_period_ms)
+    if not np.isfinite(period) or period <= 0.0:
+        return 240.0
+    if _is_vowel_nucleus_slot(slot):
+        return float(max(220.0, min(380.0, period * 1.35)))
+    return float(max(180.0, min(340.0, period * 1.35)))
+
+
+def _expected_time_fallback_enabled(
+    slot: ExpectedSlot,
+    *,
+    language: str,
+    slot_count: int,
+) -> bool:
+    if not _is_korean_language(language):
+        return False
+    return bool(
+        (int(slot_count) >= 3 and _is_vowel_nucleus_slot(slot))
+        or _is_korean_sonorant_vc_grid_slot(slot, slot_count=slot_count, min_slot_count=4)
+        or _is_korean_obstruent_vc_grid_slot(slot, slot_count=slot_count)
+    )
+
+
+def _candidate_expected_time_ms(
+    slot: ExpectedSlot,
+    expected_time_ms: float | None,
+    *,
+    language: str,
+    slot_period_ms: float,
+    slot_count: int,
+) -> float | None:
+    if expected_time_ms is None:
+        return None
+    expected = float(expected_time_ms)
+    if not _is_korean_sonorant_vc_grid_slot(slot, slot_count=slot_count):
+        if _is_korean_obstruent_vc_grid_slot(slot, slot_count=slot_count):
+            period = float(slot_period_ms)
+            if not np.isfinite(period) or period <= 0.0 or not _is_korean_language(language):
+                return expected
+            phone = str(slot.phone or "").strip().lower()
+            ratio = _env_phone_float(
+                "UTOA_NO_MFA_KR_OBSTRUENT_VC_EXPECTED_SHIFT_RATIO",
+                phone,
+                _KOREAN_OBSTRUENT_VC_EXPECTED_SHIFT_RATIO_BY_PHONE.get(phone, 0.35),
+            )
+            return max(0.0, expected + period * float(ratio))
+        return expected
+    period = float(slot_period_ms)
+    if not np.isfinite(period) or period <= 0.0:
+        return expected
+    if not _is_korean_language(language):
+        return expected
+    phone = str(slot.phone or "").strip().lower()
+    if _is_nasal_phone(phone):
+        ratio = _env_float("UTOA_NO_MFA_KR_NASAL_VC_EXPECTED_SHIFT_RATIO", 0.45)
+        return max(0.0, expected - period * float(ratio))
+    if _is_liquid_phone(phone):
+        ratio = _env_float("UTOA_NO_MFA_KR_LIQUID_VC_EXPECTED_SHIFT_RATIO", 0.55)
+        return max(0.0, expected + period * float(ratio))
+    return expected
+
+
+def _is_korean_sonorant_vc_grid_slot(
+    slot: ExpectedSlot,
+    *,
+    slot_count: int,
+    min_slot_count: int = 8,
+) -> bool:
+    if int(slot_count) < int(min_slot_count):
+        return False
+    if str(slot.event_label) != "phone_change":
+        return False
+    if str(slot.role or "").strip().lower() != "vc":
+        return False
+    return bool(_is_nasal_phone(slot.phone) or _is_liquid_phone(slot.phone))
+
+
+def _is_korean_obstruent_vc_grid_slot(slot: ExpectedSlot, *, slot_count: int) -> bool:
+    if int(slot_count) < 8:
+        return False
+    if str(slot.event_label) != "phone_change":
+        return False
+    if str(slot.role or "").strip().lower() != "vc":
+        return False
+    phone = str(slot.phone or "").strip().lower()
+    if not phone:
+        return False
+    return not _is_sonorant_phone(phone)
 
 
 def _append_gap_warnings(
@@ -522,6 +886,7 @@ def _solve_viterbi_path(
     *,
     min_gap_ms: float,
     same_phone_min_gap_ms: float,
+    slot_period_ms: float,
     transition_weight: float,
 ) -> tuple[list[int], float]:
     dp: list[list[tuple[float, int | None]]] = []
@@ -541,6 +906,7 @@ def _solve_viterbi_path(
                 min_gap_ms=min_gap_ms,
                 same_phone_min_gap_ms=same_phone_min_gap_ms,
             )
+            required_gap = max(required_gap, _same_role_sequence_gap_ms(prev_slot, slot, slot_period_ms))
             for prev_idx, prev_candidate in enumerate(candidate_steps[step_idx - 1]):
                 prev_score, _ = dp[step_idx - 1][prev_idx]
                 gap = candidate.time_ms - prev_candidate.time_ms
@@ -573,6 +939,24 @@ def _solve_viterbi_path(
     if len(selected) != len(candidate_steps):
         return [], -1e9
     return selected, path_score
+
+
+def _same_role_sequence_gap_ms(prev_slot: ExpectedSlot, cur_slot: ExpectedSlot, slot_period_ms: float) -> float:
+    prev_role = str(prev_slot.role or "").strip().lower()
+    cur_role = str(cur_slot.role or "").strip().lower()
+    if prev_role != cur_role:
+        return 0.0
+    if prev_role != "cv":
+        return 0.0
+    period = float(slot_period_ms)
+    if not np.isfinite(period) or period <= 0.0:
+        return 0.0
+    return float(
+        min(
+            _ROLE_GAP_CONSECUTIVE_CV_MAX_MS,
+            max(_ROLE_GAP_CONSECUTIVE_CV_MIN_MS, period * _ROLE_GAP_CONSECUTIVE_CV_RATIO),
+        )
+    )
 
 
 def _suppress_peak_indices(
@@ -626,7 +1010,7 @@ def _select_overlap_assignment(
     if current_ok and not incoming_ok:
         return current
     exp = float(expected_time_ms) if expected_time_ms is not None else None
-    if slot.role == "cv_boundary":
+    if _is_cv_boundary_slot(slot):
         if exp is not None:
             cur_dist = abs(float(current.selected_time_ms) - exp)
             inc_dist = abs(float(incoming.selected_time_ms) - exp)
@@ -710,9 +1094,9 @@ def _refine_cv_assignments_locally(
 
     out = list(assignments)
     for idx, assignment in enumerate(out):
-        if assignment.role != "cv_boundary":
-            continue
         slot = slots[assignment.slot_index]
+        if not _is_cv_boundary_slot(slot):
+            continue
         expected_time = expected_times.get(assignment.slot_index)
         min_allowed: float | None = None
         max_allowed: float | None = None
@@ -816,3 +1200,17 @@ def _env_float(name: str, default: float) -> float:
         return float(text)
     except ValueError:
         return float(default)
+
+
+def _env_phone_float(prefix: str, phone: str, default: float) -> float:
+    token = "".join(ch if ch.isalnum() else "_" for ch in str(phone or "").strip().upper())
+    if token:
+        raw = os.environ.get(f"{prefix}_{token}")
+        if raw is not None:
+            text = str(raw).strip()
+            if text:
+                try:
+                    return float(text)
+                except ValueError:
+                    return float(default)
+    return _env_float(prefix, default)
