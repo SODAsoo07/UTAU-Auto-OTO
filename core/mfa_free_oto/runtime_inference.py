@@ -234,7 +234,9 @@ def _predict_posterior_rule_based(
     silence = _track(batch.acoustic_scores, "silence_likelihood", frame_count)
     voicing = _track(batch.acoustic_scores, "voicing", frame_count)
     transition = _track(batch.acoustic_scores, "transition_likelihood", frame_count)
+    vowel_boundary = _track(batch.acoustic_scores, "vowel_boundary_likelihood", frame_count)
     sonorant = _track(batch.acoustic_scores, "sonorant_onset_likelihood", frame_count)
+    shape_delta = _track(batch.acoustic_scores, "spectral_shape_delta_likelihood", frame_count)
     nucleus = _track(batch.acoustic_scores, "nucleus_likelihood", frame_count)
     if not np.any(nucleus):
         nucleus = _track(batch.acoustic_scores, "world_nucleus", frame_count)
@@ -247,12 +249,28 @@ def _predict_posterior_rule_based(
     denom = np.maximum(np.sum(class_stack, axis=1, keepdims=True), 1e-6)
     class_norm = (class_stack / denom).astype(np.float32)
     cv = np.clip(
-        (0.38 * transition) + (0.30 * class_norm[:, 2]) + (0.16 * (1.0 - silence)) + (0.16 * sonorant),
+        (0.34 * transition)
+        + (0.26 * class_norm[:, 2])
+        + (0.14 * (1.0 - silence))
+        + (0.14 * sonorant)
+        + (0.12 * vowel_boundary),
         0.0,
         1.0,
     )
     vn = np.clip((0.55 * nucleus) + (0.30 * voicing) + (0.15 * (1.0 - silence)), 0.0, 1.0)
-    pc = np.clip((0.58 * transition) + (0.22 * (1.0 - silence)) + (0.20 * (1.0 - voicing)), 0.0, 1.0)
+    sonorant_edge = np.maximum(
+        sonorant,
+        np.clip(
+            ((0.62 * shape_delta) + (0.23 * transition) + (0.15 * (1.0 - silence)))
+            * ((0.58 * voicing) + (0.42 * (1.0 - silence))),
+            0.0,
+            1.0,
+        ),
+    )
+    pc = np.maximum(
+        np.clip((0.58 * transition) + (0.22 * (1.0 - silence)) + (0.20 * (1.0 - voicing)), 0.0, 1.0),
+        np.clip((0.52 * sonorant_edge) + (0.18 * transition) + (0.18 * (1.0 - silence)) + (0.12 * voicing), 0.0, 1.0),
+    )
     acoustic_scores = {key: np.asarray(value, dtype=np.float32).tolist() for key, value in batch.acoustic_scores.items()}
     return FramePosterior(
         wav_path=str(wav_path),

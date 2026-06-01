@@ -52,6 +52,7 @@ _KOREAN_VOWELS = (
     "wo",
     "we",
     "wi",
+    "eui",
     "ui",
     "a",
     "i",
@@ -73,12 +74,13 @@ class FilenameSlot:
     vowel_phone: str
     phone_start_index: int
     vowel_phone_index: int
+    coda_phones: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     schema_version: int = ROW_PLAN_SCHEMA_VERSION
 
     @property
     def phones(self) -> tuple[str, ...]:
-        return (*self.onset_phones, self.vowel_phone)
+        return (*self.onset_phones, self.vowel_phone, *self.coda_phones)
 
     def to_json_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -148,6 +150,7 @@ def build_filename_slots(
                         vowel=item.vowel,
                         onset_phones=item.onset_phones,
                         vowel_phone=item.vowel_phone,
+                        coda_phones=item.coda_phones,
                         phone_start_index=item.phone_start_index,
                         vowel_phone_index=item.vowel_phone_index,
                         warnings=tuple(dict.fromkeys((*item.warnings, f"token_fallback:{token}"))),
@@ -157,16 +160,19 @@ def build_filename_slots(
                 phone_index += sum(len(item.phones) for item in fallback_slots)
                 continue
             continue
-        onset, vowel, warnings = parsed
+        onset, vowel, coda, warnings = parsed
         onset_phones = tuple(_split_onset_phones(onset))
+        coda_phones = tuple(_split_onset_phones(coda))
+        token_surface = f"{onset}{vowel}" if coda_phones else token
         slot = FilenameSlot(
             wav=wav,
             slot_index=len(slots),
-            token=token,
+            token=token_surface,
             onset=onset,
             vowel=vowel,
             onset_phones=onset_phones,
             vowel_phone=vowel,
+            coda_phones=coda_phones,
             phone_start_index=phone_index,
             vowel_phone_index=phone_index + len(onset_phones),
             warnings=tuple(warnings),
@@ -195,6 +201,7 @@ def _slots_from_kana_phone_slots(wav: str, phone_slots: Sequence[Sequence[str]])
             vowel=vowel,
             onset_phones=onset_phones,
             vowel_phone=vowel,
+            coda_phones=(),
             phone_start_index=phone_index,
             vowel_phone_index=phone_index + len(onset_phones),
             warnings=("kana_filename_slot",),
@@ -255,6 +262,22 @@ def build_filename_row_plan(
             )
         if not transitions:
             continue
+        if slot.coda_phones:
+            coda_alias = "".join(slot.coda_phones)
+            _append_record(
+                records,
+                wav=slot.wav,
+                alias=f"{slot.vowel}{coda_alias}",
+                role_family="vc",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=slot.slot_index,
+                expected_tokens=(slot.vowel, coda_alias),
+                expected_phone_indices=tuple(
+                    range(slot.vowel_phone_index, slot.vowel_phone_index + 1 + len(slot.coda_phones))
+                ),
+                warnings=slot.warnings,
+            )
         next_slot = slots[position + 1] if position + 1 < len(slots) else None
         if next_slot is None:
             continue
@@ -395,6 +418,7 @@ def _slots_from_phone_sequence(
                     vowel=phone,
                     onset_phones=tuple(pending_onset),
                     vowel_phone=phone,
+                    coda_phones=(),
                     phone_start_index=phone_index - len(pending_onset),
                     vowel_phone_index=phone_index,
                     warnings=("phone_sequence_fallback",),
@@ -422,13 +446,28 @@ def _split_syllable_token(
     *,
     language: str,
     format_type: str,
-) -> tuple[str, str, tuple[str, ...]] | None:
+) -> tuple[str, str, str, tuple[str, ...]] | None:
     text = _normalize_token(token)
     if not text:
         return None
     vowels = _vowel_inventory(language=language, format_type=format_type)
     if text in vowels and is_vowel_phone(text, language):
-        return "", text, ()
+        return "", text, "", ()
+    if _is_korean_language(language) or str(format_type or "").strip().lower() in {"cvc", "cvvc", "cv-vc"}:
+        for vowel in sorted(vowels, key=len, reverse=True):
+            idx = text.find(vowel)
+            if idx < 0:
+                continue
+            onset = text[:idx]
+            coda = text[idx + len(vowel):]
+            if not onset and not coda and not is_vowel_phone(vowel, language):
+                continue
+            warnings: list[str] = []
+            if onset and not any(char.isalpha() for char in onset):
+                warnings.append(f"non_alpha_onset:{onset}")
+            if coda and not any(char.isalpha() for char in coda):
+                warnings.append(f"non_alpha_coda:{coda}")
+            return onset, vowel, coda, tuple(warnings)
     for vowel in sorted(vowels, key=len, reverse=True):
         if not text.endswith(vowel):
             continue
@@ -438,9 +477,9 @@ def _split_syllable_token(
         warnings: list[str] = []
         if onset and not any(char.isalpha() for char in onset):
             warnings.append(f"non_alpha_onset:{onset}")
-        return onset, vowel, tuple(warnings)
+        return onset, vowel, "", tuple(warnings)
     if is_vowel_phone(text, language):
-        return "", text, ()
+        return "", text, "", ()
     return None
 
 
@@ -450,9 +489,10 @@ def _vowel_inventory(*, language: str, format_type: str) -> tuple[str, ...]:
     if _is_japanese_language(language):
         return _JA_VOWELS
     values: list[str] = []
-    if lang in {"ko", "kr", "korean"} or fmt in {"cvc", "cvvc", "cv-vc"}:
+    if _is_korean_language(language) or fmt in {"cvc", "cvvc", "cv-vc"}:
         values.extend(_KOREAN_VOWELS)
-    values.extend(_JA_VOWELS)
+    if not _is_korean_language(language):
+        values.extend(_JA_VOWELS)
     seen: list[str] = []
     for item in values:
         if item not in seen:
@@ -462,6 +502,10 @@ def _vowel_inventory(*, language: str, format_type: str) -> tuple[str, ...]:
 
 def _is_japanese_language(language: str) -> bool:
     return str(language or "").strip().lower() in {"ja", "japanese", "jp"}
+
+
+def _is_korean_language(language: str) -> bool:
+    return str(language or "").strip().lower() in {"ko", "korean", "kr"}
 
 
 def _split_onset_phones(onset: str) -> list[str]:

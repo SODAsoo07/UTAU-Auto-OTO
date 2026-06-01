@@ -127,6 +127,17 @@ def _lookup_custom_alias_value(custom_map, alias):
     return None
 
 
+def _is_custom_alias_breath_value(value):
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if raw in {"R", "H"}:
+        return True
+    clean = raw.lower()
+    compact = re.sub(r"\s+", "", clean)
+    return clean in {"sil", "pau", "sp", "spn", "br", "bre", "breath"} or bool(
+        compact.startswith("br") and compact[2:].isdigit()
+    )
+
+
 def normalize_ipa_mark(mark):
     """IPA 마크를 정규화해 비교 가능한 형태로 만듭니다."""
     base = clean_phone_mark(mark)
@@ -421,9 +432,10 @@ def classify_alias(alias, custom_map=None):
 
     mapped_val = _lookup_custom_alias_value(custom_map, clean)
     if mapped_val is not None:
-        mapped_val = str(mapped_val).lower()
-        if mapped_val in ["r", "h", "sil", "br"]:
+        mapped_val = str(mapped_val)
+        if _is_custom_alias_breath_value(mapped_val):
             return "br"
+        mapped_val = mapped_val.lower()
         if mapped_val in KR_VOWELS:
             return "mono"
         return "cv"
@@ -488,9 +500,10 @@ def classify_alias(alias, custom_map=None):
 
     mapped_val = _lookup_custom_alias_value(custom_map, clean_lower)
     if mapped_val is not None:
-        mapped_val = str(mapped_val).lower()
-        if mapped_val in ["sil", "br", "r", "h"]:
+        mapped_val = str(mapped_val)
+        if _is_custom_alias_breath_value(mapped_val):
             return "br"
+        mapped_val = mapped_val.lower()
         if mapped_val in KR_VOWELS:
             return "mono"
         return "cv"

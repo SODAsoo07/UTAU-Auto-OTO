@@ -219,6 +219,42 @@
                         "note":  "Implementation path for two-stage coupled tuning runner."
                     },
                     {
+                        "path":  "scripts/evaluate/stratified_oto_residuals.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Gold-vs-generated OTO residual report grouped by alias role, VC token, and VC onset class for model-improvement targeting."
+                    },
+                    {
+                        "path":  "scripts/evaluate/build_oto_residual_dataset.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Build leakage-controlled gold-vs-generated OTO residual JSONL/CSV datasets for LightGBM calibration experiments."
+                    },
+                    {
+                        "path":  "scripts/evaluate/build_oto_boundary_event_dataset.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Build phoneme-boundary event manifests from trusted manual/gold OTO anchors for boundary model training."
+                    },
+                    {
+                        "path":  "scripts/evaluate/apply_boundary_oto_candidates.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Evaluation-only gated OTO offset candidate application from phoneme-boundary model scores."
+                    },
+                    {
+                        "path":  "scripts/evaluate/run_boundary_oto_candidate_matrix.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Run boundary-gated OTO candidate config sweeps across multiple trusted gold OTO cases."
+                    },
+                    {
+                        "path":  "scripts/evaluate/evaluate_oto_lightgbm_residual.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Evaluate residual LightGBM models on external heldout OTO residual CSVs by target, case, alias family, and VC class."
+                    },
+                    {
                         "path":  "scripts/build/build_installer.ps1",
                         "status":  "active",
                         "owner":  "release",

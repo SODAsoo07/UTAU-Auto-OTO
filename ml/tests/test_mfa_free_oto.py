@@ -43,6 +43,9 @@ from core.mfa_free_oto.oto_adapter import (
     _assign_alias_target_indices,
     _alias_phone_sequence,
     _alias_type_for_row,
+    _cvvc_initial_cv_head_phone_sequence,
+    _cvvc_initial_cv_head_vowel_token,
+    _is_nonphonetic_special_alias,
     _refine_anchor_sequence_locally,
     adapt_template_row,
     anchors_from_prediction,
@@ -52,11 +55,13 @@ from core.mfa_free_oto.oto_adapter import (
     parse_template_oto_line,
     repair_cvvc_row_sequence,
     repair_cvvc_vc_row_sequence,
+    timeline_expected_slots_for_template_rows,
 )
 from core.mfa_free_oto.row_plan import build_filename_slots, filename_phone_sequence_from_slots
 from core.mfa_free_oto.review_overlay import render_review_html
 from core.mfa_free_oto import runtime_inference as runtime_inference_module
 from core.mfa_free_oto.slot_viterbi import (
+    ExpectedSlot,
     SlotAssignment,
     SlotViterbiResult,
     assign_slots_viterbi,
@@ -66,6 +71,10 @@ from core.mfa_free_oto.slot_viterbi import (
 from core.mfa_free_oto.targets import rasterize_targets
 from core.mfa_free_oto.types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
 from core.mfa_free_oto.workflow import generate_no_mfa_oto_with_model_context
+
+
+def _enable_ja_cvvc_reference_repairs(monkeypatch):
+    monkeypatch.setenv("UTOA_ENABLE_JA_CVVC_REFERENCE_REPAIRS", "1")
 
 
 def test_goldset_scaffold_marks_rows_for_manual_labelling(tmp_path):
@@ -194,6 +203,5354 @@ def test_slot_viterbi_assigns_filename_slots_in_order():
     assert [event.label for event in decoded] == ["cv_boundary", "vowel_nucleus", "cv_boundary", "vowel_nucleus"]
 
 
+def test_slot_viterbi_sonorant_phone_change_prefers_voiced_onset_over_late_flux():
+    times = [float(idx * 10) for idx in range(31)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.05 for _ in times],
+        "flux_likelihood": [0.05 for _ in times],
+        "sonorant_onset_likelihood": [0.05 for _ in times],
+        "voicing": [0.90 for _ in times],
+        "silence_likelihood": [0.05 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.86 if 110.0 <= time_ms <= 230.0 else 0.18
+        class_probs["consonant"][idx] = 0.28 if 70.0 <= time_ms <= 115.0 else 0.08
+        event_scores["phone_change"][idx] = max(
+            0.01,
+            0.04 * math.exp(-0.5 * ((time_ms - 90.0) / 8.0) ** 2),
+            0.24 * math.exp(-0.5 * ((time_ms - 180.0) / 8.0) ** 2),
+        )
+        acoustic_scores["sonorant_onset_likelihood"][idx] = max(
+            acoustic_scores["sonorant_onset_likelihood"][idx],
+            0.95 * math.exp(-0.5 * ((time_ms - 90.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [ExpectedSlot(slot_index=0, phone_index=0, phone="n", role="vc", event_label="phone_change")]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    assert result.assignments[0].selected_time_ms == pytest.approx(90.0, abs=6.0)
+
+
+def test_slot_viterbi_consecutive_cv_slots_do_not_collapse_to_one_peak_cluster():
+    times = [float(idx * 10) for idx in range(211)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    for center in [360.0, 760.0, 1160.0, 1560.0]:
+        for idx, time_ms in enumerate(times):
+            event_scores["cv_boundary"][idx] = max(
+                event_scores["cv_boundary"][idx],
+                0.58 * math.exp(-0.5 * ((time_ms - center) / 10.0) ** 2),
+            )
+    for center in [1700.0, 1730.0, 1760.0, 1790.0]:
+        for idx, time_ms in enumerate(times):
+            event_scores["cv_boundary"][idx] = max(
+                event_scores["cv_boundary"][idx],
+                0.92 * math.exp(-0.5 * ((time_ms - center) / 8.0) ** 2),
+            )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+    )
+    slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx * 3 + 2, phone=phone, role="cv", event_label="cv_boundary")
+        for idx, phone in enumerate(["u", "e", "o", "a"])
+    ]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    selected = [assignment.selected_time_ms for assignment in result.assignments]
+    assert min(b - a for a, b in zip(selected, selected[1:])) >= 180.0
+    assert selected[0] < 1000.0
+
+
+def test_slot_viterbi_template_cv_role_uses_boundary_acoustic_prior():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.04 for _ in times],
+        "flux_likelihood": [0.04 for _ in times],
+        "sonorant_onset_likelihood": [0.04 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["consonant"][idx] = 0.75 if 105.0 <= time_ms <= 140.0 else 0.05
+        class_probs["vowel"][idx] = 0.78 if 135.0 <= time_ms <= 230.0 else 0.05
+        event_scores["cv_boundary"][idx] = max(
+            event_scores["cv_boundary"][idx],
+            0.14 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+            0.24 * math.exp(-0.5 * ((time_ms - 260.0) / 8.0) ** 2),
+        )
+        acoustic_scores["transition_likelihood"][idx] = max(
+            acoustic_scores["transition_likelihood"][idx],
+            0.95 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+        acoustic_scores["flux_likelihood"][idx] = max(
+            acoustic_scores["flux_likelihood"][idx],
+            0.90 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+        acoustic_scores["sonorant_onset_likelihood"][idx] = max(
+            acoustic_scores["sonorant_onset_likelihood"][idx],
+            0.72 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [ExpectedSlot(slot_index=0, phone_index=1, phone="a", role="cv", event_label="cv_boundary")]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    assert result.assignments[0].selected_time_ms == pytest.approx(140.0, abs=6.0)
+
+
+def test_slot_viterbi_template_v_role_uses_nucleus_acoustic_prior():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "voicing": [0.05 for _ in times],
+        "nucleus_likelihood": [0.04 for _ in times],
+        "world_nucleus": [0.04 for _ in times],
+        "world_periodicity": [0.04 for _ in times],
+        "world_spectral_stability": [0.04 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.82 if 110.0 <= time_ms <= 210.0 else 0.05
+        event_scores["vowel_nucleus"][idx] = max(
+            event_scores["vowel_nucleus"][idx],
+            0.12 * math.exp(-0.5 * ((time_ms - 150.0) / 8.0) ** 2),
+            0.28 * math.exp(-0.5 * ((time_ms - 280.0) / 8.0) ** 2),
+        )
+        for key, peak in (
+            ("voicing", 0.96),
+            ("nucleus_likelihood", 0.92),
+            ("world_nucleus", 0.94),
+            ("world_periodicity", 0.88),
+            ("world_spectral_stability", 0.86),
+        ):
+            acoustic_scores[key][idx] = max(
+                acoustic_scores[key][idx],
+                peak * math.exp(-0.5 * ((time_ms - 150.0) / 8.0) ** 2),
+            )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [ExpectedSlot(slot_index=0, phone_index=0, phone="a", role="v", event_label="vowel_nucleus")]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    assert result.assignments[0].selected_time_ms == pytest.approx(150.0, abs=6.0)
+
+
+def test_korean_vowel_slots_use_expected_grid_when_nucleus_peaks_collapse(monkeypatch):
+    monkeypatch.setenv("UTOA_NO_MFA_KR_CV_EXPECTED_HARD_WINDOW_MS", "80")
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "voicing": [0.05 for _ in times],
+        "nucleus_likelihood": [0.04 for _ in times],
+        "world_nucleus": [0.04 for _ in times],
+        "world_periodicity": [0.04 for _ in times],
+        "world_spectral_stability": [0.04 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.84 if 250.0 <= time_ms <= 330.0 else 0.08
+        event_scores["vowel_nucleus"][idx] = max(
+            event_scores["vowel_nucleus"][idx],
+            0.36 * math.exp(-0.5 * ((time_ms - 300.0) / 8.0) ** 2),
+        )
+        for key in ("voicing", "nucleus_likelihood", "world_nucleus", "world_periodicity", "world_spectral_stability"):
+            acoustic_scores[key][idx] = max(
+                acoustic_scores[key][idx],
+                0.90 * math.exp(-0.5 * ((time_ms - 300.0) / 8.0) ** 2),
+            )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone=phone, role="v", event_label="vowel_nucleus")
+        for idx, phone in enumerate(("a", "e", "i", "o"))
+    ]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03, language="korean")
+
+    assert result.ok
+    assert [item.selected_time_ms for item in result.assignments] == pytest.approx([0.0, 120.0, 300.0, 380.0], abs=10.0)
+
+
+def test_korean_ng_cluster_alias_targets_do_not_collapse_to_n_fallback():
+    rows = [
+        OtoTemplateRow("eunr_eumr_eungr_eulr.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("n R", "m R", "ng R", "l R")
+    ]
+    expected = ["eu", "n", "r", "eu", "m", "r", "eu", "ng", "r", "eu", "l", "r"]
+
+    assert _alias_phone_sequence("ng R") == ["ng", "r"]
+    assert _assign_alias_target_indices(rows, expected) == [2, 5, 8, 11]
+    slots = timeline_expected_slots_for_template_rows(rows, expected, language="korean")
+
+    assert [slot.phone_index for slot in slots] == [2, 3, 5, 8, 11]
+    assert all(slot.phone_index != 1 for slot in slots)
+
+
+def test_korean_no_space_cvc_coda_targets_following_onset_slot():
+    rows = [
+        OtoTemplateRow("bba'bbi'bbu.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("bba", "ap", "bbi", "ip", "bbu")
+    ]
+    expected = ["b", "b", "a", "b", "b", "i", "b", "b", "u"]
+
+    assert _assign_alias_target_indices(rows, expected, language="korean") == [2, 3, 5, 6, 8]
+
+    slots = expected_slots_for_template_rows(rows, expected, language="korean")
+    assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
+        (2, "cv", "cv_boundary"),
+        (3, "vc", "phone_change"),
+        (5, "implicit_cv", "cv_boundary"),
+        (6, "vc", "phone_change"),
+        (8, "implicit_cv", "cv_boundary"),
+    ]
+
+
+def test_korean_compact_glide_vowels_use_cv_boundary_slots():
+    rows = [
+        OtoTemplateRow("wa'we'wi'weo.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("wa", "we", "wi", "weo")
+    ]
+    expected = ["wa", "we", "wi", "weo"]
+
+    slots = expected_slots_for_template_rows(rows, expected, language="korean")
+
+    assert [(slot.phone_index, slot.phone, slot.role, slot.event_label) for slot in slots] == [
+        (0, "wa", "cv", "cv_boundary"),
+        (1, "we", "cv", "cv_boundary"),
+        (2, "wi", "cv", "cv_boundary"),
+        (3, "weo", "cv", "cv_boundary"),
+    ]
+
+
+def test_korean_yoon_timeline_keeps_unaliased_leading_vowel_context():
+    rows = [
+        OtoTemplateRow("ya'pya'pye'pyeo'pyo'pyu'peui.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("pya", "pye", "pyeo", "pyo", "pyu", "peui")
+    ]
+    expected = ["ya", "p", "ya", "p", "ye", "p", "yeo", "p", "yo", "p", "yu", "p", "eui"]
+
+    row_slots = expected_slots_for_template_rows(rows, expected, language="korean")
+    timeline_slots = timeline_expected_slots_for_template_rows(rows, expected, language="korean")
+
+    assert [slot.phone_index for slot in row_slots[:2]] == [2, 4]
+    assert [(slot.phone_index, slot.phone, slot.role, slot.event_label) for slot in timeline_slots[:2]] == [
+        (0, "ya", "v", "vowel_nucleus"),
+        (2, "ya", "cv", "cv_boundary"),
+    ]
+    assert [slot.slot_index for slot in timeline_slots] == list(range(len(timeline_slots)))
+
+
+def test_korean_liquid_yoon_timeline_keeps_vc_leading_context():
+    rows = [
+        OtoTemplateRow("al'rwal'rwel'rwil'rweol.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("lwa", "lwe", "lwi", "lweo")
+    ]
+    expected = ["a", "l", "r", "wa", "l", "r", "we", "l", "r", "wi", "l", "r", "weo", "l"]
+
+    timeline_slots = timeline_expected_slots_for_template_rows(rows, expected, language="korean")
+
+    assert [(slot.phone_index, slot.phone, slot.role, slot.event_label) for slot in timeline_slots[:3]] == [
+        (0, "a", "v", "vowel_nucleus"),
+        (1, "l", "vc", "phone_change"),
+        (3, "wa", "cv", "cv_boundary"),
+    ]
+    assert [slot.slot_index for slot in timeline_slots] == list(range(len(timeline_slots)))
+
+
+def test_korean_dense_cv_skip_gap_repairs_following_anchors():
+    rows = [
+        OtoTemplateRow("jja'jji'jju'jje'jjo'jjeu'jjeo'jja.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("jja", "jji", "jju", "jje", "jjo", "jjeu", "jjeo")
+    ]
+    expected = [
+        "j",
+        "j",
+        "a",
+        "j",
+        "j",
+        "i",
+        "j",
+        "j",
+        "u",
+        "j",
+        "j",
+        "e",
+        "j",
+        "j",
+        "o",
+        "j",
+        "j",
+        "eu",
+        "j",
+        "j",
+        "eo",
+        "j",
+        "j",
+        "a",
+    ]
+    times = [float(idx * 10) for idx in range(521)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = [
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": time_ms,
+            "score": 0.9,
+            "frame_index": int(round(time_ms / 10.0)),
+            "expected_phone": phone,
+            "expected_phone_index": phone_index,
+            "slot_index": slot_index,
+        }
+        for slot_index, (phone_index, phone, time_ms) in enumerate(
+            [
+                (2, "a", 1010.0),
+                (5, "i", 1540.0),
+                (8, "u", 2510.0),
+                (11, "e", 3020.0),
+                (14, "o", 3540.0),
+                (17, "eu", 4040.0),
+                (20, "eo", 4530.0),
+            ]
+        )
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert [round(anchor.anchor_abs_ms, 1) for anchor in anchors if anchor is not None] == [
+        1010.0,
+        1540.0,
+        2050.0,
+        2560.0,
+        3080.0,
+        3580.0,
+        4070.0,
+    ]
+    assert any("korean_cv_skip_gap_repaired:" in warning for warning in anchors[2].warnings)
+
+
+def test_korean_sonorant_cv_leading_skip_gap_repairs_backtracked_cvc_row():
+    rows = [
+        OtoTemplateRow("ang'ing'ung'eng'ong'eung'eong'ang.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in (
+            "ang",
+            "nga",
+            "ngi",
+            "ing",
+            "ngu",
+            "ung",
+            "nge",
+            "eng",
+            "ngo",
+            "ong",
+            "ngeu",
+            "eung",
+            "ngeo",
+            "eong",
+        )
+    ]
+    expected = [
+        "a",
+        "ng",
+        "i",
+        "ng",
+        "u",
+        "ng",
+        "e",
+        "ng",
+        "o",
+        "ng",
+        "eu",
+        "ng",
+        "eo",
+        "ng",
+        "a",
+        "ng",
+    ]
+    times = [float(idx * 10) for idx in range(481)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = []
+    for slot_index, (phone_index, phone, label, time_ms) in enumerate(
+        [
+            (1, "ng", "phone_change", 1000.0),
+            (2, "i", "cv_boundary", 1002.0),
+            (3, "ng", "phone_change", 1490.0),
+            (4, "u", "cv_boundary", 1910.0),
+            (5, "ng", "phone_change", 1950.0),
+            (6, "e", "cv_boundary", 2520.0),
+            (7, "ng", "phone_change", 2560.0),
+            (8, "o", "cv_boundary", 2960.0),
+            (9, "ng", "phone_change", 2970.0),
+            (10, "eu", "cv_boundary", 3450.0),
+            (11, "ng", "phone_change", 3510.0),
+            (12, "eo", "cv_boundary", 3970.0),
+            (13, "ng", "phone_change", 4410.0),
+            (14, "a", "cv_boundary", 4430.0),
+        ]
+    ):
+        decoded_events.append(
+            {
+                "label": label,
+                "selected_time_ms": time_ms,
+                "score": 0.9,
+                "frame_index": int(round(time_ms / 10.0)),
+                "expected_phone": phone,
+                "expected_phone_index": phone_index,
+                "slot_index": slot_index,
+            }
+        )
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[2].anchor_abs_ms == pytest.approx(1405.0, abs=0.1)
+    assert any("korean_cv_leading_skip_gap_repaired:" in warning for warning in anchors[2].warnings)
+    assert anchors[4].anchor_abs_ms == pytest.approx(1910.0, abs=0.1)
+
+
+def test_korean_interleaved_cvc_compressed_cv_repairs_delayed_cv_only():
+    rows = [
+        OtoTemplateRow("dda'ddi'ddu'dde'ddo'ddeu'ddeo'dda.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("dda", "at", "ddi", "it", "ddu", "ut", "dde", "et", "ddo", "ot", "ddeu", "eut", "ddeo", "eot")
+    ]
+    expected = [
+        "d",
+        "d",
+        "a",
+        "d",
+        "d",
+        "i",
+        "d",
+        "d",
+        "u",
+        "d",
+        "d",
+        "e",
+        "d",
+        "d",
+        "o",
+        "d",
+        "d",
+        "eu",
+        "d",
+        "d",
+        "eo",
+        "d",
+        "d",
+        "a",
+    ]
+    times = [float(idx * 10) for idx in range(471)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = []
+    for slot_index, (phone_index, phone, label, time_ms) in enumerate(
+        [
+            (2, "a", "cv_boundary", 1000.0),
+            (3, "d", "phone_change", 1480.0),
+            (5, "i", "cv_boundary", 1490.0),
+            (6, "d", "phone_change", 1980.0),
+            (8, "u", "cv_boundary", 2000.0),
+            (9, "d", "phone_change", 2440.0),
+            (11, "e", "cv_boundary", 2450.0),
+            (12, "d", "phone_change", 2980.0),
+            (14, "o", "cv_boundary", 3000.0),
+            (15, "d", "phone_change", 3500.0),
+            (17, "eu", "cv_boundary", 4000.0),
+            (18, "d", "phone_change", 4018.0),
+            (20, "eo", "cv_boundary", 4510.0),
+            (21, "d", "phone_change", 4540.0),
+        ]
+    ):
+        decoded_events.append(
+            {
+                "label": label,
+                "selected_time_ms": time_ms,
+                "score": 0.9,
+                "frame_index": int(round(time_ms / 10.0)),
+                "expected_phone": phone,
+                "expected_phone_index": phone_index,
+                "slot_index": slot_index,
+            }
+        )
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[10].anchor_abs_ms == pytest.approx(3680.0, abs=0.1)
+    assert anchors[11].anchor_abs_ms == pytest.approx(4018.0, abs=0.1)
+    assert anchors[12].anchor_abs_ms == pytest.approx(4198.0, abs=0.1)
+    assert any("korean_interleaved_cvc_compressed_cv_repaired:" in warning for warning in anchors[10].warnings)
+    assert any("korean_interleaved_cvc_compressed_cv_repaired:" in warning for warning in anchors[12].warnings)
+
+
+def test_korean_interleaved_cvc_late_suffix_block_repairs_tail_block():
+    rows = [
+        OtoTemplateRow("bba'bbi'bbu'bbe'bbo'bbeu'bbeo'bba.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("bba", "ap", "bbi", "ip", "bbu", "up", "bbe", "ep", "bbo", "op", "bbeu", "eup", "bbeo", "eop")
+    ]
+    expected = [
+        "b",
+        "b",
+        "a",
+        "b",
+        "b",
+        "i",
+        "b",
+        "b",
+        "u",
+        "b",
+        "b",
+        "e",
+        "b",
+        "b",
+        "o",
+        "b",
+        "b",
+        "eu",
+        "b",
+        "b",
+        "eo",
+        "b",
+        "b",
+        "a",
+    ]
+    times = [float(idx * 10) for idx in range(517)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = []
+    for slot_index, (phone_index, phone, label, time_ms) in enumerate(
+        [
+            (2, "a", "cv_boundary", 1250.0),
+            (3, "b", "phone_change", 1490.0),
+            (5, "i", "cv_boundary", 1830.0),
+            (6, "b", "phone_change", 2020.0),
+            (8, "u", "cv_boundary", 2030.0),
+            (9, "b", "phone_change", 2510.0),
+            (11, "e", "cv_boundary", 2580.0),
+            (12, "b", "phone_change", 3000.0),
+            (14, "o", "cv_boundary", 3130.0),
+            (15, "b", "phone_change", 3500.0),
+            (17, "eu", "cv_boundary", 4010.0),
+            (18, "b", "phone_change", 4280.0),
+            (20, "eo", "cv_boundary", 4490.0),
+            (21, "b", "phone_change", 4530.0),
+        ]
+    ):
+        decoded_events.append(
+            {
+                "label": label,
+                "selected_time_ms": time_ms,
+                "score": 0.9,
+                "frame_index": int(round(time_ms / 10.0)),
+                "expected_phone": phone,
+                "expected_phone_index": phone_index,
+                "slot_index": slot_index,
+            }
+        )
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[9].anchor_abs_ms == pytest.approx(3500.0, abs=0.1)
+    assert anchors[10].anchor_abs_ms == pytest.approx(3680.0, abs=0.1)
+    assert anchors[11].anchor_abs_ms == pytest.approx(3950.0, abs=0.1)
+    assert anchors[12].anchor_abs_ms == pytest.approx(4160.0, abs=0.1)
+    assert anchors[13].anchor_abs_ms == pytest.approx(4200.0, abs=0.1)
+    assert any("korean_interleaved_cvc_late_suffix_block_repaired:" in warning for warning in anchors[10].warnings)
+    assert any("korean_interleaved_cvc_late_suffix_block_repaired:" in warning for warning in anchors[13].warnings)
+
+
+def test_korean_compound_vowel_skip_gap_repairs_only_large_gap():
+    rows = [
+        OtoTemplateRow("wa'we'wi'weo.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("wa", "we", "wi", "weo")
+    ]
+    expected = ["wa", "we", "wi", "weo"]
+    times = [float(idx * 10) for idx in range(381)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = [
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": time_ms,
+            "score": 0.9,
+            "frame_index": int(round(time_ms / 10.0)),
+            "expected_phone": phone,
+            "expected_phone_index": phone_index,
+            "slot_index": slot_index,
+        }
+        for slot_index, (phone_index, phone, time_ms) in enumerate(
+            [
+                (0, "wa", 1060.0),
+                (1, "we", 1500.0),
+                (2, "wi", 2530.0),
+                (3, "weo", 2770.0),
+            ]
+        )
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert [round(anchor.anchor_abs_ms, 1) for anchor in anchors if anchor is not None] == [
+        1060.0,
+        1500.0,
+        1940.0,
+        2380.0,
+    ]
+    assert any("korean_compound_vowel_skip_gap_repaired:" in warning for warning in anchors[2].warnings)
+
+
+def test_korean_compound_vowel_skip_gap_ignores_moderate_yoon_gap():
+    rows = [
+        OtoTemplateRow("ya'ye'yeo'yo'yu'eui.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in ("ya", "ye", "yeo", "yo", "yu", "eui")
+    ]
+    expected = ["ya", "ye", "yeo", "yo", "yu", "eui"]
+    times = [float(idx * 10) for idx in range(421)]
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.05 for _ in times] for label in FRAME_LABELS},
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    decoded_events = [
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": time_ms,
+            "score": 0.9,
+            "frame_index": int(round(time_ms / 10.0)),
+            "expected_phone": phone,
+            "expected_phone_index": phone_index,
+            "slot_index": slot_index,
+        }
+        for slot_index, (phone_index, phone, time_ms) in enumerate(
+            [
+                (0, "ya", 1010.0),
+                (1, "ye", 1330.0),
+                (2, "yeo", 2040.0),
+                (3, "yo", 2500.0),
+                (4, "yu", 2980.0),
+                (5, "eui", 3470.0),
+            ]
+        )
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded_events,
+        rows,
+        expected_phones=expected,
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert [round(anchor.anchor_abs_ms, 1) for anchor in anchors if anchor is not None] == [
+        1010.0,
+        1330.0,
+        2040.0,
+        2500.0,
+        2980.0,
+        3470.0,
+    ]
+    assert not any(
+        "korean_compound_vowel_skip_gap_repaired:" in warning
+        for anchor in anchors
+        for warning in anchor.warnings
+    )
+
+
+def test_korean_sonorant_vc_slots_use_phone_specific_expected_phase(monkeypatch):
+    monkeypatch.setenv("UTOA_NO_MFA_KR_VC_EXPECTED_HARD_WINDOW_MS", "90")
+    times = [float(idx * 10) for idx in range(321)]
+
+    def posterior_for(phone: str, *, distractor_center: float) -> FramePosterior:
+        event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+        class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+        acoustic_scores = {
+            "transition_likelihood": [0.04 for _ in times],
+            "flux_likelihood": [0.04 for _ in times],
+            "sonorant_onset_likelihood": [0.04 for _ in times],
+            "spectral_shape_delta_likelihood": [0.04 for _ in times],
+            "voicing": [0.82 for _ in times],
+            "silence_likelihood": [0.08 for _ in times],
+        }
+        direction = -0.45 if phone == "n" else 0.55
+        for slot_idx in range(9):
+            center = max(0.0, slot_idx * 400.0 + (400.0 * direction))
+            for frame_idx, time_ms in enumerate(times):
+                peak = math.exp(-0.5 * ((time_ms - center) / 8.0) ** 2)
+                event_scores["phone_change"][frame_idx] = max(event_scores["phone_change"][frame_idx], 0.36 * peak)
+                acoustic_scores["sonorant_onset_likelihood"][frame_idx] = max(
+                    acoustic_scores["sonorant_onset_likelihood"][frame_idx],
+                    0.72 * peak,
+                )
+                acoustic_scores["spectral_shape_delta_likelihood"][frame_idx] = max(
+                    acoustic_scores["spectral_shape_delta_likelihood"][frame_idx],
+                    0.68 * peak,
+                )
+        for frame_idx, time_ms in enumerate(times):
+            late_peak = math.exp(-0.5 * ((time_ms - distractor_center) / 8.0) ** 2)
+            event_scores["phone_change"][frame_idx] = max(event_scores["phone_change"][frame_idx], 0.96 * late_peak)
+            acoustic_scores["sonorant_onset_likelihood"][frame_idx] = max(
+                acoustic_scores["sonorant_onset_likelihood"][frame_idx],
+                0.95 * late_peak,
+            )
+        return FramePosterior(
+            wav_path=f"{phone}.wav",
+            times_ms=times,
+            class_probs=class_probs,
+            event_scores=event_scores,
+            acoustic_scores=acoustic_scores,
+        )
+
+    nasal_slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone="n", role="vc", event_label="phone_change")
+        for idx in range(9)
+    ]
+    nasal = assign_slots_viterbi(
+        posterior_for("n", distractor_center=1460.0),
+        expected_slots=nasal_slots,
+        min_event_score=0.03,
+        language="korean",
+    )
+
+    assert nasal.ok
+    slot_period = 3200.0 / 9.0
+    assert nasal.assignments[3].expected_time_ms == pytest.approx(1200.0 - slot_period * 0.45, abs=0.1)
+    assert nasal.assignments[3].selected_time_ms == pytest.approx(1020.0, abs=12.0)
+
+    liquid_slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone="r", role="vc", event_label="phone_change")
+        for idx in range(9)
+    ]
+    liquid = assign_slots_viterbi(
+        posterior_for("r", distractor_center=1010.0),
+        expected_slots=liquid_slots,
+        min_event_score=0.03,
+        language="korean",
+    )
+
+    assert liquid.ok
+    assert liquid.assignments[3].expected_time_ms == pytest.approx(1200.0 + slot_period * 0.55, abs=0.1)
+    assert liquid.assignments[3].selected_time_ms == pytest.approx(1420.0, abs=12.0)
+
+
+def test_korean_obstruent_vc_slots_use_phone_specific_expected_phase(monkeypatch):
+    monkeypatch.setenv("UTOA_NO_MFA_KR_OBSTRUENT_VC_EXPECTED_HARD_WINDOW_MS", "90")
+    times = [float(idx * 10) for idx in range(321)]
+    slot_period = 3200.0 / 9.0
+
+    def posterior_for(phone: str, *, ratio: float, distractor_center: float) -> FramePosterior:
+        event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+        class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+        acoustic_scores = {
+            "transition_likelihood": [0.04 for _ in times],
+            "flux_likelihood": [0.04 for _ in times],
+            "voicing": [0.20 for _ in times],
+            "silence_likelihood": [0.08 for _ in times],
+        }
+        for slot_idx in range(9):
+            center = max(0.0, slot_idx * 400.0 + slot_period * ratio)
+            for frame_idx, time_ms in enumerate(times):
+                peak = math.exp(-0.5 * ((time_ms - center) / 8.0) ** 2)
+                event_scores["phone_change"][frame_idx] = max(event_scores["phone_change"][frame_idx], 0.34 * peak)
+                acoustic_scores["transition_likelihood"][frame_idx] = max(
+                    acoustic_scores["transition_likelihood"][frame_idx],
+                    0.74 * peak,
+                )
+                acoustic_scores["flux_likelihood"][frame_idx] = max(
+                    acoustic_scores["flux_likelihood"][frame_idx],
+                    0.70 * peak,
+                )
+        for frame_idx, time_ms in enumerate(times):
+            distractor_peak = math.exp(-0.5 * ((time_ms - distractor_center) / 8.0) ** 2)
+            event_scores["phone_change"][frame_idx] = max(event_scores["phone_change"][frame_idx], 0.96 * distractor_peak)
+            acoustic_scores["transition_likelihood"][frame_idx] = max(
+                acoustic_scores["transition_likelihood"][frame_idx],
+                0.95 * distractor_peak,
+            )
+        return FramePosterior(
+            wav_path=f"{phone}.wav",
+            times_ms=times,
+            class_probs=class_probs,
+            event_scores=event_scores,
+            acoustic_scores=acoustic_scores,
+        )
+
+    d_slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone="d", role="vc", event_label="phone_change")
+        for idx in range(9)
+    ]
+    d_result = assign_slots_viterbi(
+        posterior_for("d", ratio=0.74, distractor_center=1320.0),
+        expected_slots=d_slots,
+        min_event_score=0.03,
+        language="korean",
+    )
+
+    assert d_result.ok
+    assert d_result.assignments[3].expected_time_ms == pytest.approx(1200.0 + slot_period * 0.74, abs=0.1)
+    assert d_result.assignments[3].selected_time_ms == pytest.approx(1460.0, abs=12.0)
+
+    p_slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone="p", role="vc", event_label="phone_change")
+        for idx in range(9)
+    ]
+    p_result = assign_slots_viterbi(
+        posterior_for("p", ratio=-0.15, distractor_center=1320.0),
+        expected_slots=p_slots,
+        min_event_score=0.03,
+        language="korean",
+    )
+
+    assert p_result.ok
+    assert p_result.assignments[3].expected_time_ms == pytest.approx(1200.0 - slot_period * 0.15, abs=0.1)
+    assert p_result.assignments[3].selected_time_ms == pytest.approx(1150.0, abs=12.0)
+
+
+def test_slot_viterbi_overlap_segment_does_not_gap_against_same_slot(monkeypatch):
+    monkeypatch.setenv("UTOA_NO_MFA_KR_OBSTRUENT_VC_EXPECTED_HARD_WINDOW_MS", "90")
+    times = [float(idx * 10) for idx in range(451)]
+    duration_ms = float(times[-1])
+    slot_count = 11
+    slot_period = duration_ms / float(slot_count)
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.04 for _ in times],
+        "flux_likelihood": [0.04 for _ in times],
+        "voicing": [0.10 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+    }
+    for slot_idx in range(slot_count):
+        center = max(0.0, (duration_ms * (slot_idx / float(slot_count - 1))) - (slot_period * 0.15))
+        for frame_idx, time_ms in enumerate(times):
+            peak = math.exp(-0.5 * ((time_ms - center) / 8.0) ** 2)
+            event_scores["phone_change"][frame_idx] = max(event_scores["phone_change"][frame_idx], 0.82 * peak)
+            acoustic_scores["transition_likelihood"][frame_idx] = max(
+                acoustic_scores["transition_likelihood"][frame_idx],
+                0.78 * peak,
+            )
+            acoustic_scores["flux_likelihood"][frame_idx] = max(
+                acoustic_scores["flux_likelihood"][frame_idx],
+                0.72 * peak,
+            )
+            class_probs["consonant"][frame_idx] = max(class_probs["consonant"][frame_idx], 0.76 * peak)
+    posterior = FramePosterior(
+        wav_path="dense_p_vc.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [
+        ExpectedSlot(slot_index=idx, phone_index=idx, phone="p", role="vc", event_label="phone_change")
+        for idx in range(slot_count)
+    ]
+
+    result = assign_slots_viterbi(
+        posterior,
+        expected_slots=slots,
+        min_event_score=0.03,
+        language="korean",
+        long_row_segment_size=10,
+        segment_overlap_slots=1,
+    )
+
+    assert result.ok
+    assert not any(warning.startswith("hard_missing_candidates") for warning in result.warnings)
+    assert len(result.assignments) == slot_count
+
+
+def test_korean_cvc_uppercase_release_cluster_uses_compact_manual_style_profile():
+    rows = [
+        AdaptedOtoRow(
+            wav="eunR_eumR_eungR_eulR.wav",
+            alias=alias,
+            timing=OtoTiming(anchor - pre, consonant, cutoff, pre, overlap),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=anchor,
+                score=0.7,
+                role=role,
+                expected_phone="r",
+                vowel_start_abs_ms=vowel_start,
+                expected_phone_index=target,
+                slot_index=index,
+            ),
+            mode="template-bootstrap",
+        )
+        for index, (alias, anchor, pre, overlap, consonant, cutoff, role, target, vowel_start) in enumerate(
+            (
+                ("n R", 930.0, 80.0, 45.0, 120.0, -154.0, "vc", 2, 920.0),
+                ("m R", 2230.0, 120.0, 85.0, 160.0, -250.0, "vcv", 5, 1980.0),
+                ("ng R", 3000.0, 120.0, 85.0, 160.0, -490.0, "vcv", 8, 2980.0),
+                ("l R", 4010.0, 120.0, 85.0, 160.0, -460.0, "vcv", 11, 3990.0),
+            )
+        )
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert [row.timing.offset + row.timing.preutterance for row in repaired] == pytest.approx(
+        [1270.0, 2270.0, 3270.0, 4270.0],
+        abs=0.01,
+    )
+    assert [row.timing.preutterance for row in repaired] == pytest.approx([55.0, 56.0, 45.0, 58.0], abs=0.01)
+    assert [row.timing.overlap for row in repaired] == pytest.approx([28.0, 26.0, 22.0, 30.0], abs=0.01)
+    assert all("korean_cvc_release_cluster_repair" in row.applied_rules for row in repaired)
+
+    lower_case_regular_vc = [
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="a r",
+            timing=OtoTiming(1000.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1080.0, role="vc", expected_phone="r", vowel_start_abs_ms=900.0),
+            mode="template-bootstrap",
+        )
+    ]
+    assert repair_cvvc_row_sequence(
+        lower_case_regular_vc,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=2000.0,
+    ) == lower_case_regular_vc
+
+
+def test_korean_cvc_obstruent_vc_late_rows_use_previous_cv_profile():
+    rows = [
+        AdaptedOtoRow(
+            wav="ssa_ssi.wav",
+            alias="ssa",
+            timing=OtoTiming(870.0, 180.0, -360.0, 120.0, 80.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=990.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa_ssi.wav",
+            alias="a ss",
+            timing=OtoTiming(1320.0, 180.0, -320.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1440.0, role="vc", expected_phone="ss"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa_ssi.wav",
+            alias="ssi",
+            timing=OtoTiming(1370.0, 180.0, -360.0, 120.0, 80.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1490.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa_ssi.wav",
+            alias="i t",
+            timing=OtoTiming(1940.0, 180.0, -320.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2060.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="other.wav",
+            alias="a ch",
+            timing=OtoTiming(2300.0, 180.0, -320.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2420.0, role="vc", expected_phone="ch"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1145.0, 170.0, -250.0, 130.0, 55.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1275.0)
+    assert "korean_cvc_obstruent_vc_previous_cv_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(1690.0, 155.0, -215.0, 125.0, 48.0)
+    assert "korean_cvc_obstruent_vc_previous_cv_repair" in repaired[3].applied_rules
+    assert repaired[4] == rows[4]
+
+
+def test_korean_cvc_spaced_t_vc_after_profile_resyncs_mid_vowels_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="ti",
+            timing=OtoTiming(1440.0, 160.0, -490.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="i t",
+            timing=OtoTiming(1600.0, 155.0, -215.0, 125.0, 48.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1725.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="te",
+            timing=OtoTiming(2440.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2500.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="e t",
+            timing=OtoTiming(2600.0, 155.0, -215.0, 125.0, 48.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2725.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="to",
+            timing=OtoTiming(2940.0, 160.0, -480.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="o t",
+            timing=OtoTiming(3100.0, 155.0, -215.0, 125.0, 48.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3225.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="teu",
+            timing=OtoTiming(3440.0, 160.0, -500.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3500.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="eu t",
+            timing=OtoTiming(3600.0, 155.0, -215.0, 125.0, 48.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3725.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1760.0, 155.0, -215.0, 125.0, 48.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1885.0)
+    assert "korean_cvc_spaced_t_vc_after_profile_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(2760.0, 155.0, -215.0, 125.0, 48.0)
+    assert "korean_cvc_spaced_t_vc_after_profile_repair" in repaired[3].applied_rules
+    assert "korean_cvc_spaced_t_vc_after_profile_repair" not in repaired[5].applied_rules
+    assert repaired[5].timing == rows[5].timing
+    assert repaired[7].timing == OtoTiming(3760.0, 155.0, -215.0, 125.0, 48.0)
+    assert "korean_cvc_spaced_t_vc_after_profile_repair" in repaired[7].applied_rules
+
+
+def test_korean_cvc_internal_obstruent_vc_uses_neighbor_midpoint():
+    rows = [
+        AdaptedOtoRow(
+            wav="bba.wav",
+            alias="bbi",
+            timing=OtoTiming(1710.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1830.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bba.wav",
+            alias="ip",
+            timing=OtoTiming(1940.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2020.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bba.wav",
+            alias="bbu",
+            timing=OtoTiming(1910.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2030.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ddo",
+            timing=OtoTiming(2880.0, 160.0, -450.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ot",
+            timing=OtoTiming(3420.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3500.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ddeu",
+            timing=OtoTiming(3550.0, 160.0, -450.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3670.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="ke",
+            timing=OtoTiming(2390.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2510.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="e k",
+            timing=OtoTiming(2910.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2990.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="ko",
+            timing=OtoTiming(2940.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3060.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="pe",
+            timing=OtoTiming(2370.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2490.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="e p",
+            timing=OtoTiming(2550.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2630.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="po",
+            timing=OtoTiming(2580.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2700.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1810.0, 110.0, -150.0, 70.0, 38.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1880.0)
+    assert "korean_cvc_internal_obstruent_vc_midpoint_repair" in repaired[1].applied_rules
+    assert repaired[4].timing == OtoTiming(3215.0, 145.0, -195.0, 115.0, 45.0)
+    assert repaired[4].anchor is not None
+    assert repaired[4].anchor.anchor_abs_ms == pytest.approx(3330.0)
+    assert "korean_cvc_internal_obstruent_vc_midpoint_repair" in repaired[4].applied_rules
+    assert repaired[7].timing == OtoTiming(2665.0, 150.0, -195.0, 115.0, 60.0)
+    assert repaired[7].anchor is not None
+    assert repaired[7].anchor.anchor_abs_ms == pytest.approx(2780.0)
+    assert "korean_cvc_internal_obstruent_vc_midpoint_repair" in repaired[7].applied_rules
+    assert repaired[10] == rows[10]
+
+
+def test_korean_cvc_default_cv_midpoint_repairs_late_true_cv_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bi",
+            timing=OtoTiming(1440.0, 160.0, -550.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="i b",
+            timing=OtoTiming(1840.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1920.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bu",
+            timing=OtoTiming(2030.0, 160.0, -400.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="u b",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="be",
+            timing=OtoTiming(2450.0, 160.0, -430.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2510.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ng.wav",
+            alias="ngu",
+            timing=OtoTiming(1790.0, 160.0, -480.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1850.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ng.wav",
+            alias="nge",
+            timing=OtoTiming(2400.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2520.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ng.wav",
+            alias="ngo",
+            timing=OtoTiming(2820.0, 160.0, -480.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2880.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(1945.0, 160.0, -250.0, 60.0, 25.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(2005.0)
+    assert "korean_cvc_default_cv_midpoint_repair" in repaired[2].applied_rules
+    assert "korean_cvc_plain_obstruent_cv_cutoff_profile_repair" in repaired[2].applied_rules
+    assert repaired[6] == rows[6]
+
+
+def test_korean_cvc_default_cv_midpoint_ignores_no_space_vc_neighbors():
+    rows = [
+        AdaptedOtoRow(
+            wav="dde.wav",
+            alias="ddu",
+            timing=OtoTiming(1930.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1990.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dde.wav",
+            alias="ut",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dde.wav",
+            alias="dde",
+            timing=OtoTiming(2520.0, 160.0, -320.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2640.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dde.wav",
+            alias="et",
+            timing=OtoTiming(2700.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2780.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dde.wav",
+            alias="ddo",
+            timing=OtoTiming(2930.0, 160.0, -430.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2990.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(2430.0, 160.0, -190.0, 60.0, 25.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(2490.0)
+    assert "korean_cvc_default_cv_midpoint_repair" in repaired[2].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[2].applied_rules
+    assert repaired[1].alias == "ut"
+    assert repaired[3].alias == "et"
+
+
+def test_korean_cvc_sonorant_cv_profile_repairs_later_true_cv_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="ma",
+            timing=OtoTiming(1000.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="a m",
+            timing=OtoTiming(1240.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1320.0, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="mi",
+            timing=OtoTiming(1500.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1620.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="i m",
+            timing=OtoTiming(1740.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1820.0, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="mu",
+            timing=OtoTiming(2000.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2120.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="u m",
+            timing=OtoTiming(2240.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2320.0, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="me",
+            timing=OtoTiming(2500.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2620.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert repaired[0] == rows[0]
+    assert repaired[2] == rows[2]
+    assert repaired[4].timing == OtoTiming(2060.0, 160.0, -600.0, 60.0, 25.0)
+    assert repaired[4].anchor is not None
+    assert repaired[4].anchor.anchor_abs_ms == pytest.approx(2120.0)
+    assert "korean_cvc_sonorant_cv_profile_repair" in repaired[4].applied_rules
+    assert repaired[6].timing == OtoTiming(2560.0, 160.0, -600.0, 60.0, 25.0)
+    assert repaired[6].anchor is not None
+    assert repaired[6].anchor.anchor_abs_ms == pytest.approx(2620.0)
+    assert "korean_cvc_sonorant_cv_profile_repair" in repaired[6].applied_rules
+
+
+def test_korean_cvc_sonorant_cv_profile_skips_l_and_early_yoon_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="mya.wav",
+            alias="mya",
+            timing=OtoTiming(1000.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mya.wav",
+            alias="mye",
+            timing=OtoTiming(1500.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1620.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="la.wav",
+            alias="la",
+            timing=OtoTiming(1000.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="la.wav",
+            alias="li",
+            timing=OtoTiming(1500.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1620.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="la.wav",
+            alias="lu",
+            timing=OtoTiming(2000.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2120.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert repaired == rows
+
+
+def test_korean_cvc_liquid_yoon_cv_profile_repairs_midpoint_late_row_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="ly.wav",
+            alias="lya",
+            timing=OtoTiming(1440.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ly.wav",
+            alias="lye",
+            timing=OtoTiming(2030.0, 160.0, -2370.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ly.wav",
+            alias="lyeo",
+            timing=OtoTiming(2470.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2530.0, role="cv", expected_phone="yeo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="mya",
+            timing=OtoTiming(1440.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="mye",
+            timing=OtoTiming(2030.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="myeo",
+            timing=OtoTiming(2470.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2530.0, role="cv", expected_phone="yeo"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1895.0, 160.0, -240.0, 60.0, 25.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1955.0)
+    assert "korean_cvc_liquid_yoon_cv_profile_repair" in repaired[1].applied_rules
+    assert "korean_cvc_liquid_yoon_cv_profile_repair" not in repaired[4].applied_rules
+    assert repaired[4].timing == rows[4].timing
+
+
+def test_korean_cvc_midrow_vc_neighbor_repairs_late_and_early_slots():
+    rows = [
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="ge",
+            timing=OtoTiming(2370.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2490.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="e g",
+            timing=OtoTiming(2920.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3000.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="go",
+            timing=OtoTiming(2910.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3030.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="su",
+            timing=OtoTiming(1810.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1930.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="u s",
+            timing=OtoTiming(2360.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2440.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="se",
+            timing=OtoTiming(2330.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2450.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="pa",
+            timing=OtoTiming(860.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=980.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="a p",
+            timing=OtoTiming(1070.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1150.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="pi",
+            timing=OtoTiming(1370.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1490.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="da",
+            timing=OtoTiming(850.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=970.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="a d",
+            timing=OtoTiming(1390.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1470.0, role="vc", expected_phone="d"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="di",
+            timing=OtoTiming(1370.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1490.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="id",
+            timing=OtoTiming(1770.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1850.0, role="vc", expected_phone="d"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="du",
+            timing=OtoTiming(1860.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1980.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="u d",
+            timing=OtoTiming(2370.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2450.0, role="vc", expected_phone="d"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="da.wav",
+            alias="de",
+            timing=OtoTiming(2360.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bi",
+            timing=OtoTiming(1380.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="i b",
+            timing=OtoTiming(1890.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1970.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bu",
+            timing=OtoTiming(2030.0, 160.0, -410.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(2730.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(2810.0)
+    assert "korean_cvc_midrow_vc_neighbor_repair" in repaired[1].applied_rules
+    assert repaired[4].timing == OtoTiming(2235.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[7].timing == OtoTiming(1200.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[10] == rows[10]
+    assert repaired[12] == rows[12]
+    assert repaired[14].timing == OtoTiming(2230.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[17].timing == OtoTiming(1840.0, 120.0, -154.0, 80.0, 45.0)
+
+
+def test_korean_cvc_initial_cv_onset_repairs_late_first_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="rwa.wav",
+            alias="rwa",
+            timing=OtoTiming(1150.0, 160.0, -570.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1270.0, role="cv", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="rwa.wav",
+            alias="rwe",
+            timing=OtoTiming(1480.0, 160.0, -430.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1600.0, role="cv", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ngya.wav",
+            alias="ngya",
+            timing=OtoTiming(1390.0, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1510.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ngya.wav",
+            alias="ngye",
+            timing=OtoTiming(1850.0, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1970.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bya.wav",
+            alias="bya",
+            timing=OtoTiming(930.0, 160.0, -490.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1050.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bya.wav",
+            alias="bye",
+            timing=OtoTiming(1420.0, 160.0, -430.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="middle.wav",
+            alias="pa",
+            timing=OtoTiming(860.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=980.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="middle.wav",
+            alias="sya",
+            timing=OtoTiming(1070.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1190.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(940.0, 180.0, -570.0, 70.0, 35.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(1010.0)
+    assert "korean_cvc_initial_cv_onset_repair" in repaired[0].applied_rules
+    assert repaired[2] == rows[2]
+    assert repaired[4].timing == OtoTiming(930.0, 160.0, -320.0, 120.0, 85.0)
+    assert "korean_cvc_head_glide_cv_cutoff_profile_repair" in repaired[4].applied_rules
+    assert repaired[7].timing == OtoTiming(1070.0, 160.0, -320.0, 120.0, 85.0)
+    assert "korean_cvc_head_glide_cv_cutoff_profile_repair" in repaired[7].applied_rules
+
+
+def test_korean_cvc_initial_local_gap_repairs_compressed_second_cv():
+    rows = [
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="ga",
+            timing=OtoTiming(940.0, 180.0, -490.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="a g",
+            timing=OtoTiming(1140.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1220.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="gi",
+            timing=OtoTiming(1180.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1300.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="i g",
+            timing=OtoTiming(1740.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1820.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ka",
+            timing=OtoTiming(940.0, 180.0, -270.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="a k",
+            timing=OtoTiming(1220.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1300.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ki",
+            timing=OtoTiming(1420.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="i k",
+            timing=OtoTiming(1700.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1780.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1340.0, 120.0, -150.0, 110.0, 60.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1450.0)
+    assert "korean_cvc_initial_local_gap_repair" in repaired[1].applied_rules
+    assert repaired[2].timing == OtoTiming(1490.0, 150.0, -340.0, 70.0, 35.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(1560.0)
+    assert "korean_cvc_initial_local_gap_repair" in repaired[2].applied_rules
+    assert repaired[4] == rows[4]
+    assert repaired[5] == rows[5]
+    assert repaired[6] == rows[6]
+    assert repaired[7] == rows[7]
+
+
+def test_korean_cvc_initial_block_collapse_repairs_j_ss_and_n_starts():
+    rows = [
+        AdaptedOtoRow(
+            wav="ja.wav",
+            alias="ja",
+            timing=OtoTiming(840.0, 180.0, -490.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=910.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ja.wav",
+            alias="a j",
+            timing=OtoTiming(918.5, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=998.5, role="vc", expected_phone="j"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ja.wav",
+            alias="ji",
+            timing=OtoTiming(1230.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1350.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ja.wav",
+            alias="i j",
+            timing=OtoTiming(1770.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1850.0, role="vc", expected_phone="j"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa.wav",
+            alias="ssa",
+            timing=OtoTiming(940.0, 180.0, -490.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa.wav",
+            alias="a ss",
+            timing=OtoTiming(1130.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1210.0, role="vc", expected_phone="ss"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa.wav",
+            alias="ssi",
+            timing=OtoTiming(1130.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1250.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ssa.wav",
+            alias="i ss",
+            timing=OtoTiming(1405.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1485.0, role="vc", expected_phone="ss"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="na",
+            timing=OtoTiming(860.0, 180.0, -490.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=930.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="an",
+            timing=OtoTiming(927.5, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1007.5, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="a n",
+            timing=OtoTiming(927.5, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1007.5, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="ni",
+            timing=OtoTiming(1410.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1530.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="sa",
+            timing=OtoTiming(940.0, 180.0, -270.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="a s",
+            timing=OtoTiming(1220.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1300.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="si",
+            timing=OtoTiming(1420.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="i s",
+            timing=OtoTiming(1700.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1780.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1290.0, 120.0, -180.0, 80.0, 45.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1370.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[1].applied_rules
+    assert repaired[2].timing == OtoTiming(1410.0, 160.0, -360.0, 120.0, 85.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(1530.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[2].applied_rules
+    assert repaired[3] == rows[3]
+
+    assert repaired[5].timing == OtoTiming(1280.0, 170.0, -250.0, 130.0, 55.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(1410.0)
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[5].applied_rules
+    assert repaired[6].timing == OtoTiming(1370.0, 160.0, -300.0, 120.0, 85.0)
+    assert repaired[6].anchor is not None
+    assert repaired[6].anchor.anchor_abs_ms == pytest.approx(1490.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[6].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[6].applied_rules
+    assert "korean_cvc_residual_ss_doubled_head_short_cutoff_profile_repair" in repaired[6].applied_rules
+    assert repaired[7].timing == OtoTiming(1645.0, 170.0, -250.0, 130.0, 55.0)
+    assert repaired[7].anchor is not None
+    assert repaired[7].anchor.anchor_abs_ms == pytest.approx(1775.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[7].applied_rules
+
+    assert repaired[9].timing == OtoTiming(1080.0, 115.0, -360.0, 80.0, 45.0)
+    assert repaired[9].anchor is not None
+    assert repaired[9].anchor.anchor_abs_ms == pytest.approx(1160.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[9].applied_rules
+    assert "korean_cvc_residual_compact_an_cutoff_profile_repair" in repaired[9].applied_rules
+    assert repaired[10].timing == OtoTiming(1080.0, 115.0, -260.0, 80.0, 45.0)
+    assert repaired[10].anchor is not None
+    assert repaired[10].anchor.anchor_abs_ms == pytest.approx(1160.0)
+    assert "korean_cvc_initial_block_collapse_repair" in repaired[10].applied_rules
+    assert "korean_cvc_residual_spaced_n_vc_cutoff_profile_repair" in repaired[10].applied_rules
+    assert repaired[11] == rows[11]
+
+    assert repaired[12] == rows[12]
+    assert repaired[13] == rows[13]
+    assert repaired[14] == rows[14]
+    assert repaired[15] == rows[15]
+
+
+def test_korean_cvc_compressed_cv_vc_cv_repairs_late_plain_cv_pairs():
+    rows = [
+        AdaptedOtoRow(
+            wav="be.wav",
+            alias="u b",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="be.wav",
+            alias="be",
+            timing=OtoTiming(2670.0, 160.0, -620.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2790.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="be.wav",
+            alias="e b",
+            timing=OtoTiming(2740.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2820.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="be.wav",
+            alias="bo",
+            timing=OtoTiming(2850.0, 160.0, -590.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2970.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="u ss",
+            timing=OtoTiming(2175.0, 170.0, -250.0, 130.0, 55.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2305.0, role="vc", expected_phone="ss"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="sse",
+            timing=OtoTiming(2530.0, 160.0, -470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2650.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="e ss",
+            timing=OtoTiming(2805.0, 170.0, -250.0, 130.0, 55.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2935.0, role="vc", expected_phone="ss"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="sso",
+            timing=OtoTiming(2860.0, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2980.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="te.wav",
+            alias="u t",
+            timing=OtoTiming(2250.0, 125.0, -215.0, 125.0, 48.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2375.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="te.wav",
+            alias="te",
+            timing=OtoTiming(2570.0, 160.0, -520.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2690.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="te.wav",
+            alias="e t",
+            timing=OtoTiming(2918.576, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2998.576, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="te.wav",
+            alias="to",
+            timing=OtoTiming(2900.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3020.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="a g",
+            timing=OtoTiming(1240.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1320.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="gi",
+            timing=OtoTiming(1490.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1610.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="i g",
+            timing=OtoTiming(1740.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1820.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="gu",
+            timing=OtoTiming(1860.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1980.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(2450.0, 160.0, -210.0, 120.0, 85.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(2570.0)
+    assert "korean_cvc_compressed_cv_vc_cv_repair" in repaired[1].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[1].applied_rules
+    assert repaired[2] == rows[2]
+
+    assert repaired[5].timing == OtoTiming(2360.0, 160.0, -240.0, 120.0, 85.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(2480.0)
+    assert "korean_cvc_compressed_cv_vc_cv_repair" in repaired[5].applied_rules
+    assert "korean_cvc_residual_doubled_head_cv_cutoff_profile_repair" in repaired[5].applied_rules
+    assert repaired[6].timing == OtoTiming(2575.0, 170.0, -250.0, 130.0, 55.0)
+    assert repaired[6].anchor is not None
+    assert repaired[6].anchor.anchor_abs_ms == pytest.approx(2705.0)
+    assert "korean_cvc_compressed_cv_vc_cv_repair" in repaired[6].applied_rules
+
+    assert repaired[9].timing == OtoTiming(2400.0, 160.0, -220.0, 120.0, 85.0)
+    assert repaired[9].anchor is not None
+    assert repaired[9].anchor.anchor_abs_ms == pytest.approx(2520.0)
+    assert "korean_cvc_compressed_cv_vc_cv_repair" in repaired[9].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[9].applied_rules
+    assert repaired[10].timing == OtoTiming(2700.0, 155.0, -215.0, 125.0, 48.0)
+    assert repaired[10].anchor is not None
+    assert repaired[10].anchor.anchor_abs_ms == pytest.approx(2825.0)
+    assert "korean_cvc_compressed_cv_vc_cv_repair" in repaired[10].applied_rules
+
+    assert repaired[13] == rows[13]
+    assert repaired[14] == rows[14]
+    assert repaired[15] == rows[15]
+
+
+def test_korean_cvc_spaced_obstruent_cadence_repairs_late_and_early_vc_rows():
+    def row(wav: str, alias: str, offset: float, *, pre: float = 80.0, overlap: float = 45.0) -> AdaptedOtoRow:
+        return AdaptedOtoRow(
+            wav=wav,
+            alias=alias,
+            timing=OtoTiming(offset, 120.0, -154.0, pre, overlap),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=offset + pre, role="vc", expected_phone=alias.split()[-1]),
+            mode="template-bootstrap",
+        )
+
+    def cv_row(wav: str, alias: str, offset: float) -> AdaptedOtoRow:
+        return AdaptedOtoRow(
+            wav=wav,
+            alias=alias,
+            timing=OtoTiming(offset, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=offset + 120.0, role="cv", expected_phone=alias[-1]),
+            mode="template-bootstrap",
+        )
+
+    rows = [
+        cv_row("b.wav", "ba", 840.0),
+        row("b.wav", "a b", 1390.0),
+        cv_row("b.wav", "bi", 1380.0),
+        cv_row("d-early.wav", "da", 940.0),
+        row("d-early.wav", "a d", 1200.0),
+        cv_row("d-early.wav", "di", 1370.0),
+        cv_row("d-late.wav", "du", 1850.0),
+        row("d-late.wav", "u d", 2410.0),
+        cv_row("d-late.wav", "de", 2460.0),
+        cv_row("g.wav", "geo", 4103.309),
+        row("g.wav", "eo g", 4170.0),
+        cv_row("h.wav", "heu", 3370.0),
+        row("h.wav", "eu h", 3880.0),
+        cv_row("h.wav", "heo", 3920.0),
+        cv_row("k.wav", "ku", 1880.0),
+        row("k.wav", "u k", 2090.0),
+        cv_row("k.wav", "ke", 2390.0),
+        cv_row("ss.wav", "ssi", 1370.0),
+        row("ss.wav", "i ss", 1645.0),
+        cv_row("ss.wav", "ssu", 1900.0),
+        cv_row("safe.wav", "ka", 870.0),
+        row("safe.wav", "a k", 1150.0),
+        cv_row("safe.wav", "ki", 1380.0),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1280.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1360.0)
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[1].applied_rules
+
+    assert repaired[4].timing == OtoTiming(1320.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[7].timing == OtoTiming(2270.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[4].applied_rules
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[7].applied_rules
+
+    assert repaired[10].timing == OtoTiming(4323.309, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[12].timing == OtoTiming(3790.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[10].applied_rules
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[12].applied_rules
+
+    assert repaired[15].timing == OtoTiming(2150.0, 150.0, -195.0, 115.0, 60.0)
+    assert repaired[18].timing == OtoTiming(1710.0, 170.0, -250.0, 130.0, 55.0)
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[15].applied_rules
+    assert "korean_cvc_spaced_obstruent_cadence_repair" in repaired[18].applied_rules
+
+    assert repaired[21] == rows[21]
+
+
+def test_korean_cvc_late_plain_cv_suffix_uses_previous_cv_anchor():
+    rows = [
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bo",
+            timing=OtoTiming(2850.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2970.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="o b",
+            timing=OtoTiming(3430.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3510.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="beu",
+            timing=OtoTiming(3730.0, 160.0, -510.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3850.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="eu b",
+            timing=OtoTiming(3910.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3990.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="beo",
+            timing=OtoTiming(4240.0, 160.0, -580.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4360.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="eo b",
+            timing=OtoTiming(4410.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4490.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ko",
+            timing=OtoTiming(2850.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2970.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="o k",
+            timing=OtoTiming(3340.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3420.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="keu",
+            timing=OtoTiming(3530.0, 160.0, -510.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3650.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="eu k",
+            timing=OtoTiming(3760.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3840.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sonorant.wav",
+            alias="lya",
+            timing=OtoTiming(1440.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1560.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sonorant.wav",
+            alias="al",
+            timing=OtoTiming(1900.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1980.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sonorant.wav",
+            alias="lye",
+            timing=OtoTiming(2030.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sonorant.wav",
+            alias="el",
+            timing=OtoTiming(2210.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2290.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(3470.0, 160.0, -300.0, 70.0, 35.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(3540.0)
+    assert "korean_cvc_late_plain_cv_suffix_repair" in repaired[2].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[2].applied_rules
+    assert repaired[4].timing == OtoTiming(4040.0, 160.0, -250.0, 70.0, 35.0)
+    assert repaired[4].anchor is not None
+    assert repaired[4].anchor.anchor_abs_ms == pytest.approx(4110.0)
+    assert "korean_cvc_late_plain_cv_suffix_repair" in repaired[4].applied_rules
+    assert "korean_cvc_plain_obstruent_cv_cutoff_profile_repair" in repaired[4].applied_rules
+    assert repaired[8].timing == OtoTiming(3590.0, 160.0, -250.0, 60.0, 25.0)
+    assert repaired[8].anchor is not None
+    assert repaired[8].anchor.anchor_abs_ms == pytest.approx(3650.0)
+    assert "korean_cvc_late_plain_cv_suffix_repair" not in repaired[8].applied_rules
+    assert "korean_cvc_alternating_cv_profile_repair" in repaired[8].applied_rules
+    assert "korean_cvc_plain_obstruent_cv_cutoff_profile_repair" in repaired[8].applied_rules
+    assert repaired[12] == rows[12]
+
+
+def test_korean_cvc_initial_nasal_ng_pair_repairs_compressed_start():
+    rows = [
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ang",
+            timing=OtoTiming(920.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1000.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="nga",
+            timing=OtoTiming(4307.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4427.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ngi",
+            timing=OtoTiming(1279.5, 160.0, -3580.5, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1399.5, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ing",
+            timing=OtoTiming(1654.8, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1734.8, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="normal.wav",
+            alias="ang",
+            timing=OtoTiming(1160.0, 90.0, -180.0, 85.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1245.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="normal.wav",
+            alias="ngi",
+            timing=OtoTiming(1420.0, 135.0, -205.0, 50.0, 20.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1470.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="normal.wav",
+            alias="ing",
+            timing=OtoTiming(1718.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1798.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1160.0, 93.0, -180.0, 85.0, 35.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(1245.0)
+    assert "korean_cvc_initial_nasal_ng_pair_repair" in repaired[0].applied_rules
+    assert repaired[1] == rows[1]
+    assert repaired[2].timing == OtoTiming(1420.0, 135.0, -205.0, 50.0, 20.0)
+    assert repaired[2].anchor is not None
+    assert repaired[2].anchor.anchor_abs_ms == pytest.approx(1470.0)
+    assert "korean_cvc_initial_nasal_ng_pair_repair" in repaired[2].applied_rules
+    assert repaired[4] == rows[4]
+    assert repaired[5] == rows[5]
+
+
+def test_korean_cvc_pure_v_glide_sequence_repairs_compressed_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="ya.wav",
+            alias="ya",
+            timing=OtoTiming(890.0, 160.0, -980.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="v", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ya.wav",
+            alias="ye",
+            timing=OtoTiming(1210.0, 160.0, -810.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1330.0, role="v", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ya.wav",
+            alias="yeo",
+            timing=OtoTiming(1920.0, 160.0, -510.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2040.0, role="v", expected_phone="yeo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="wa",
+            timing=OtoTiming(940.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1060.0, role="v", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="we",
+            timing=OtoTiming(1380.0, 160.0, -460.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="v", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="wi",
+            timing=OtoTiming(1830.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1950.0, role="v", expected_phone="wi"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="weo",
+            timing=OtoTiming(2230.0, 160.0, -1470.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2350.0, role="v", expected_phone="weo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ya",
+            timing=OtoTiming(890.0, 160.0, -980.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="v", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ye",
+            timing=OtoTiming(1410.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1530.0, role="v", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="yeo",
+            timing=OtoTiming(1920.0, 160.0, -510.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2040.0, role="v", expected_phone="yeo"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1420.0, 180.0, -285.0, 60.0, 30.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1480.0)
+    assert "korean_cvc_pure_v_glide_sequence_repair" in repaired[1].applied_rules
+    assert repaired[6].timing == OtoTiming(2400.0, 216.0, -287.0, 45.0, 18.0)
+    assert repaired[6].anchor is not None
+    assert repaired[6].anchor.anchor_abs_ms == pytest.approx(2445.0)
+    assert "korean_cvc_pure_v_glide_sequence_repair" in repaired[6].applied_rules
+    assert repaired[8] == rows[8]
+
+
+def test_korean_cvc_standalone_vowel_start_profile_repairs_rejected_boundary_row():
+    rows = [
+        AdaptedOtoRow(
+            wav="ha.wav",
+            alias="i",
+            timing=OtoTiming(1409.469, 422.462, -560.531, 319.076, 161.724),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=1728.545,
+                role="v",
+                expected_phone="i",
+                vowel_start_abs_ms=1510.0,
+                vowel_end_abs_ms=1920.0,
+                vowel_nucleus_abs_ms=1728.545,
+            ),
+            warnings=("local_refine_rejected_slot_boundary",),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ha.wav",
+            alias="u",
+            timing=OtoTiming(1961.6, 263.6, -488.4, 58.4, 29.6),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=2050.0,
+                role="v",
+                expected_phone="u",
+                vowel_start_abs_ms=1980.0,
+                vowel_end_abs_ms=2400.0,
+                vowel_nucleus_abs_ms=2020.0,
+            ),
+            warnings=("local_refine_low_margin",),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1524.0, 150.0, -300.0, 25.0, 25.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(1549.0)
+    assert "korean_cvc_standalone_vowel_start_profile_repair" in repaired[0].applied_rules
+    assert repaired[1].timing == OtoTiming(1961.6, 263.6, -320.0, 58.4, 29.6)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(2050.0)
+    assert "korean_cvc_residual_standalone_v_cutoff_profile_repair" in repaired[1].applied_rules
+
+
+def test_korean_cvc_liquid_vc_late_rows_use_previous_cv_offset():
+    rows = [
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="la",
+            timing=OtoTiming(870.0, 160.0, -3890.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=990.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="al",
+            timing=OtoTiming(1050.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1130.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="li",
+            timing=OtoTiming(1380.0, 160.0, -3380.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="il",
+            timing=OtoTiming(1890.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1970.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="lu",
+            timing=OtoTiming(1980.0, 160.0, -2780.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2100.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="ul",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="other.wav",
+            alias="ul",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="ra",
+            timing=OtoTiming(1000.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="a r",
+            timing=OtoTiming(1370.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1450.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1] == rows[1]
+    assert repaired[3].timing == OtoTiming(1665.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[3].anchor is not None
+    assert repaired[3].anchor.anchor_abs_ms == pytest.approx(1745.0)
+    assert "korean_cvc_liquid_vc_previous_cv_repair" in repaired[3].applied_rules
+    assert "korean_cvc_compact_l_vc_after_profile_repair" in repaired[3].applied_rules
+    assert repaired[5].timing == OtoTiming(2050.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(2130.0)
+    assert "korean_cvc_liquid_vc_previous_cv_repair" in repaired[5].applied_rules
+    assert "korean_cvc_no_space_vc_cadence_repair" in repaired[5].applied_rules
+    assert repaired[6] == rows[6]
+    assert repaired[7] == rows[7]
+    assert repaired[8] == rows[8]
+
+
+def test_korean_cvc_r_liquid_vc_rows_use_next_cv_cadence():
+    rows = [
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="ra",
+            timing=OtoTiming(950.0, 160.0, -490.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1070.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="a r",
+            timing=OtoTiming(1370.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1450.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="ri",
+            timing=OtoTiming(1340.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1460.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="i r",
+            timing=OtoTiming(1850.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1930.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="ru",
+            timing=OtoTiming(1830.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1950.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="u r",
+            timing=OtoTiming(2350.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2430.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="re",
+            timing=OtoTiming(2350.0, 160.0, -580.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2470.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="e r",
+            timing=OtoTiming(2841.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2921.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="ro",
+            timing=OtoTiming(2810.0, 160.0, -670.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2930.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="o r",
+            timing=OtoTiming(3380.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3460.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="reu",
+            timing=OtoTiming(3350.0, 160.0, -640.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3470.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="eu r",
+            timing=OtoTiming(3900.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3980.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="reo",
+            timing=OtoTiming(3910.0, 160.0, -570.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4030.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ra.wav",
+            alias="eo r",
+            timing=OtoTiming(4400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4480.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ra",
+            timing=OtoTiming(950.0, 160.0, -490.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1070.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="a r",
+            timing=OtoTiming(1270.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1350.0, role="vc", expected_phone="r"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="ri",
+            timing=OtoTiming(1340.0, 160.0, -600.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1460.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1270.0, 145.0, -160.0, 135.0, 50.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1405.0)
+    assert "korean_cvc_r_liquid_vc_next_cv_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(1780.0, 128.0, -140.0, 120.0, 60.0)
+    assert repaired[5].timing == OtoTiming(2290.0, 126.0, -140.0, 118.0, 40.0)
+    assert repaired[7].timing == OtoTiming(2790.0, 116.0, -135.0, 108.0, 60.0)
+    assert repaired[9].timing == OtoTiming(3275.0, 163.0, -185.0, 155.0, 67.0)
+    assert repaired[11].timing == OtoTiming(3865.0, 96.0, -110.0, 88.0, 20.0)
+    assert repaired[13].timing == OtoTiming(4310.0, 150.0, -165.0, 142.0, 36.0)
+    assert repaired[15] == rows[15]
+
+
+def test_korean_cvc_terminal_cv_before_spaced_vc_repairs_late_geo_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="geu",
+            timing=OtoTiming(3560.0, 160.0, -380.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3680.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="geo",
+            timing=OtoTiming(4103.309, 160.0, -626.691, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4223.309, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ga.wav",
+            alias="eo g",
+            timing=OtoTiming(4323.309, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4403.309, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="seo",
+            timing=OtoTiming(4030.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4150.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="eo s",
+            timing=OtoTiming(4220.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4300.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggeo",
+            timing=OtoTiming(3920.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4040.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="eok",
+            timing=OtoTiming(4170.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4250.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing.offset == pytest.approx(3933.309)
+    assert repaired[1].timing.consonant == pytest.approx(160.0)
+    assert repaired[1].timing.cutoff == pytest.approx(-380.0)
+    assert repaired[1].timing.preutterance == pytest.approx(40.0)
+    assert repaired[1].timing.overlap == pytest.approx(20.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(3973.309)
+    assert "korean_cvc_terminal_cv_before_spaced_vc_repair" in repaired[1].applied_rules
+    assert repaired[3] == rows[3]
+    assert repaired[5].timing == OtoTiming(3920.0, 160.0, -240.0, 120.0, 85.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(4040.0)
+    assert "korean_cvc_residual_doubled_head_cv_cutoff_profile_repair" in repaired[5].applied_rules
+
+
+def test_korean_cvc_internal_i_k_midpoint_repairs_late_ik_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggi",
+            timing=OtoTiming(1380.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ik",
+            timing=OtoTiming(1860.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1940.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggu",
+            timing=OtoTiming(2000.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2120.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gu.wav",
+            alias="ggu",
+            timing=OtoTiming(2000.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2120.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gu.wav",
+            alias="uk",
+            timing=OtoTiming(2280.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2360.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gu.wav",
+            alias="gge",
+            timing=OtoTiming(2430.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2550.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bi.wav",
+            alias="bbi",
+            timing=OtoTiming(1610.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1730.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bi.wav",
+            alias="ip",
+            timing=OtoTiming(1810.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1890.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bi.wav",
+            alias="bbu",
+            timing=OtoTiming(1910.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2030.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1720.0, 142.0, -170.0, 118.0, 52.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1838.0)
+    assert "korean_cvc_internal_i_k_midpoint_repair" in repaired[1].applied_rules
+    assert "korean_cvc_internal_i_k_midpoint_repair" not in repaired[4].applied_rules
+    assert repaired[7] == rows[7]
+
+
+def test_korean_cvc_compact_k_vc_after_profile_resyncs_ik_and_uk_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggi",
+            timing=OtoTiming(1440.0, 160.0, -480.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ik",
+            timing=OtoTiming(1610.0, 135.0, -175.0, 105.0, 50.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1715.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggu",
+            timing=OtoTiming(1900.0, 160.0, -520.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1960.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="uk",
+            timing=OtoTiming(2135.0, 135.0, -175.0, 105.0, 50.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2240.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="gge",
+            timing=OtoTiming(2430.0, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2550.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="ki",
+            timing=OtoTiming(1440.0, 160.0, -470.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="i k",
+            timing=OtoTiming(1630.0, 150.0, -195.0, 115.0, 60.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1745.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="ku",
+            timing=OtoTiming(1940.0, 160.0, -470.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2000.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1720.0, 142.0, -170.0, 118.0, 52.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1838.0)
+    assert "korean_cvc_compact_k_vc_after_profile_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(2245.0, 129.0, -158.0, 80.0, 49.0)
+    assert repaired[3].anchor is not None
+    assert repaired[3].anchor.anchor_abs_ms == pytest.approx(2325.0)
+    assert "korean_cvc_compact_k_vc_after_profile_repair" in repaired[3].applied_rules
+    assert "korean_cvc_compact_k_vc_after_profile_repair" not in repaired[6].applied_rules
+
+
+def test_korean_cvc_nasal_ng_vc_rows_use_neighbor_cv_cadence():
+    rows = [
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ngi",
+            timing=OtoTiming(1000.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ing",
+            timing=OtoTiming(1130.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1210.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ngu",
+            timing=OtoTiming(1500.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1620.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ung",
+            timing=OtoTiming(1580.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1660.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="nge",
+            timing=OtoTiming(2020.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2140.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="eng",
+            timing=OtoTiming(2300.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2380.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ngeu",
+            timing=OtoTiming(2880.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="eung",
+            timing=OtoTiming(2980.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3060.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="ngeo",
+            timing=OtoTiming(3380.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3500.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang.wav",
+            alias="eong",
+            timing=OtoTiming(3900.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3980.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="spaced.wav",
+            alias="nga",
+            timing=OtoTiming(1000.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="spaced.wav",
+            alias="a ng",
+            timing=OtoTiming(1400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1480.0, role="vc", expected_phone="ng"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1370.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1450.0)
+    assert "korean_cvc_nasal_ng_vc_neighbor_cv_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(1880.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_ng_vc_neighbor_cv_repair" in repaired[3].applied_rules
+    assert repaired[5].timing == OtoTiming(2460.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_ng_vc_neighbor_cv_repair" in repaired[5].applied_rules
+    assert repaired[7].timing == OtoTiming(3060.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_ng_vc_neighbor_cv_repair" in repaired[7].applied_rules
+    assert repaired[9].timing == OtoTiming(3560.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_ng_vc_neighbor_cv_repair" in repaired[9].applied_rules
+    assert repaired[10] == rows[10]
+    assert repaired[11] == rows[11]
+
+
+def test_korean_cvc_nasal_vc_pair_cadence_repairs_duplicate_n_m_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="ma",
+            timing=OtoTiming(870.0, 160.0, -3890.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=990.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="am",
+            timing=OtoTiming(979.4, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1059.4, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="a m",
+            timing=OtoTiming(979.4, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1059.4, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="mi",
+            timing=OtoTiming(1350.0, 160.0, -3340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1470.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mam.wav",
+            alias="im",
+            timing=OtoTiming(1451.3, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1531.3, role="vc", expected_phone="m"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="na",
+            timing=OtoTiming(860.0, 160.0, -3890.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=980.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="an",
+            timing=OtoTiming(1080.0, 115.0, -175.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1160.0, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="a n",
+            timing=OtoTiming(1080.0, 115.0, -175.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1160.0, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="ni",
+            timing=OtoTiming(1410.0, 160.0, -3340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1530.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="in",
+            timing=OtoTiming(1477.8, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1557.8, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="i n",
+            timing=OtoTiming(1477.8, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1557.8, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="nu",
+            timing=OtoTiming(1840.0, 160.0, -2910.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1960.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="un",
+            timing=OtoTiming(1961.8, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2041.8, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="neu",
+            timing=OtoTiming(3350.0, 160.0, -1400.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3470.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="eun",
+            timing=OtoTiming(3689.7, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3769.7, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="eu n",
+            timing=OtoTiming(3689.7, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3769.7, role="vc", expected_phone="n"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="nan.wav",
+            alias="neo",
+            timing=OtoTiming(3870.0, 160.0, -880.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3990.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1070.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[2].timing == OtoTiming(1070.0, 120.0, -280.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_vc_pair_cadence_repair" in repaired[1].applied_rules
+    assert "korean_cvc_nasal_vc_pair_cadence_repair" in repaired[2].applied_rules
+    assert "korean_cvc_residual_spaced_m_vc_cutoff_profile_repair" in repaired[2].applied_rules
+    assert repaired[4] == rows[4]
+    assert repaired[9].timing == OtoTiming(1600.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[10].timing == OtoTiming(1600.0, 120.0, -260.0, 80.0, 45.0)
+    assert "korean_cvc_nasal_vc_pair_cadence_repair" in repaired[9].applied_rules
+    assert "korean_cvc_residual_spaced_n_vc_cutoff_profile_repair" in repaired[10].applied_rules
+    assert repaired[12] == rows[12]
+    assert repaired[14].timing == OtoTiming(3530.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[15].timing == OtoTiming(3530.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_residual_spaced_n_vc_cutoff_profile_repair" not in repaired[15].applied_rules
+
+
+def test_korean_cvc_terminal_obstruent_vc_uses_terminal_profile():
+    rows = [
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ddeo",
+            timing=OtoTiming(4060.0, 160.0, -250.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="eot",
+            timing=OtoTiming(4460.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4540.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="ggeo",
+            timing=OtoTiming(3920.0, 160.0, -390.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4040.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gga.wav",
+            alias="eok",
+            timing=OtoTiming(4380.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4460.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bba.wav",
+            alias="bbeo",
+            timing=OtoTiming(4060.0, 160.0, -280.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bba.wav",
+            alias="eop",
+            timing=OtoTiming(4122.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4202.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="spaced.wav",
+            alias="bbeo",
+            timing=OtoTiming(4060.0, 160.0, -280.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="spaced.wav",
+            alias="eo p",
+            timing=OtoTiming(4122.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4202.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(4210.0, 185.0, -245.0, 150.0, 65.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(4360.0)
+    assert "korean_cvc_terminal_obstruent_vc_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(4170.0, 105.0, -160.0, 70.0, 38.0)
+    assert repaired[3].anchor is not None
+    assert repaired[3].anchor.anchor_abs_ms == pytest.approx(4240.0)
+    assert "korean_cvc_terminal_obstruent_vc_repair" in repaired[3].applied_rules
+    assert repaired[5].timing == OtoTiming(4240.0, 95.0, -150.0, 70.0, 38.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(4310.0)
+    assert "korean_cvc_terminal_obstruent_vc_repair" in repaired[5].applied_rules
+    assert repaired[6] == rows[6]
+    assert repaired[7] == rows[7]
+
+
+def test_korean_cvc_terminal_spaced_obstruent_vc_uses_terminal_profile():
+    rows = [
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="peo",
+            timing=OtoTiming(3880.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4000.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="pa.wav",
+            alias="eo p",
+            timing=OtoTiming(4390.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4470.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="keo",
+            timing=OtoTiming(3930.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4050.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ka.wav",
+            alias="eo k",
+            timing=OtoTiming(4410.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4490.0, role="vc", expected_phone="k"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="compact.wav",
+            alias="bbeo",
+            timing=OtoTiming(4060.0, 160.0, -280.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="compact.wav",
+            alias="eop",
+            timing=OtoTiming(4240.0, 95.0, -150.0, 70.0, 38.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4310.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="peo",
+            timing=OtoTiming(3880.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4000.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="eo p",
+            timing=OtoTiming(4200.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4280.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(4140.0, 150.0, -215.0, 120.0, 90.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(4260.0)
+    assert "korean_cvc_terminal_spaced_obstruent_vc_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(4220.0, 125.0, -175.0, 82.0, 30.0)
+    assert repaired[3].anchor is not None
+    assert repaired[3].anchor.anchor_abs_ms == pytest.approx(4302.0)
+    assert "korean_cvc_terminal_spaced_obstruent_vc_repair" in repaired[3].applied_rules
+    assert "korean_cvc_terminal_spaced_obstruent_vc_repair" not in repaired[5].applied_rules
+    assert repaired[7] == rows[7]
+
+
+def test_korean_cvc_terminal_spaced_s_vc_uses_terminal_profile():
+    rows = [
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="seo",
+            timing=OtoTiming(3970.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4090.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sa.wav",
+            alias="eo s",
+            timing=OtoTiming(4420.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4500.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="seo",
+            timing=OtoTiming(3970.0, 160.0, -360.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4090.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="safe.wav",
+            alias="eo s",
+            timing=OtoTiming(4260.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4340.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(4295.0, 165.0, -190.0, 150.0, 50.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(4445.0)
+    assert "korean_cvc_terminal_spaced_obstruent_vc_repair" in repaired[1].applied_rules
+    assert repaired[3] == rows[3]
+
+
+def test_korean_cvc_cv_cutoff_caps_only_when_both_cutoff_modes_intrude_next_row():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ra.wav",
+                alias="ro",
+                timing=OtoTiming(2874.365, 160.0, -1185.635, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2934.365, role="cv", expected_phone="o"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ra.wav",
+                alias="o r",
+                timing=OtoTiming(3275.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3355.0, role="vc", expected_phone="r"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5087.7,
+    )
+
+    assert repaired[0].timing.offset == pytest.approx(2874.365)
+    assert repaired[0].timing.consonant == pytest.approx(160.0)
+    assert repaired[0].timing.cutoff == pytest.approx(-320.635)
+    assert repaired[0].timing.preutterance == pytest.approx(60.0)
+    assert repaired[0].timing.overlap == pytest.approx(25.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(2934.365)
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[0].applied_rules
+
+    rel_only = [
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="wa",
+            timing=OtoTiming(910.0, 160.0, -2760.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1030.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="we",
+            timing=OtoTiming(1380.0, 160.0, -620.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_rel_only = repair_cvvc_row_sequence(
+        rel_only,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3978.3,
+    )
+
+    assert skipped_rel_only[0].timing == rel_only[0].timing
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" not in skipped_rel_only[0].applied_rules
+
+    too_short = [
+        AdaptedOtoRow(
+            wav="short.wav",
+            alias="ba",
+            timing=OtoTiming(1000.0, 160.0, -1000.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="short.wav",
+            alias="bi",
+            timing=OtoTiming(1200.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1320.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_too_short = repair_cvvc_row_sequence(
+        too_short,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=2500.0,
+    )
+
+    assert skipped_too_short[0].timing == too_short[0].timing
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" not in skipped_too_short[0].applied_rules
+
+
+def test_korean_cvc_glide_cv_cutoff_caps_before_next_row():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ya.wav",
+                alias="ya",
+                timing=OtoTiming(890.0, 160.0, -1130.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="ya"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ya.wav",
+                alias="ye",
+                timing=OtoTiming(1420.0, 160.0, -600.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="ye"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4106.3,
+    )
+
+    assert repaired[0].timing == OtoTiming(890.0, 160.0, -330.0, 120.0, 85.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(1010.0)
+    assert "korean_cvc_glide_cv_cutoff_before_next_row_repair" in repaired[0].applied_rules
+
+    yoon_tail = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="jya.wav",
+                alias="jyu",
+                timing=OtoTiming(2940.0, 160.0, -590.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="u"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="jya.wav",
+                alias="jeui",
+                timing=OtoTiming(3480.0, 160.0, -300.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3540.0, role="cv", expected_phone="eui"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4127.7,
+    )
+
+    assert yoon_tail[0].timing == OtoTiming(2940.0, 160.0, -340.0, 60.0, 25.0)
+    assert "korean_cvc_glide_cv_cutoff_before_next_row_repair" in yoon_tail[0].applied_rules
+
+    rel_only = [
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="wa",
+            timing=OtoTiming(910.0, 160.0, -2760.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1030.0, role="cv", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="wa.wav",
+            alias="we",
+            timing=OtoTiming(1380.0, 160.0, -620.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_rel_only = repair_cvvc_row_sequence(
+        rel_only,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3978.3,
+    )
+
+    assert skipped_rel_only[0].timing == rel_only[0].timing
+    assert "korean_cvc_glide_cv_cutoff_before_next_row_repair" not in skipped_rel_only[0].applied_rules
+
+    too_short = [
+        AdaptedOtoRow(
+            wav="short-yoon.wav",
+            alias="sya",
+            timing=OtoTiming(1000.0, 160.0, -1000.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="short-yoon.wav",
+            alias="sye",
+            timing=OtoTiming(1200.0, 160.0, -500.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1320.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_too_short = repair_cvvc_row_sequence(
+        too_short,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=2500.0,
+    )
+
+    assert skipped_too_short[0].timing == too_short[0].timing
+    assert "korean_cvc_glide_cv_cutoff_before_next_row_repair" not in skipped_too_short[0].applied_rules
+
+
+def test_korean_cvc_doubled_cv_cutoff_uses_compact_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="dde.wav",
+                alias="dde",
+                timing=OtoTiming(2390.0, 160.0, -520.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2450.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="dde.wav",
+                alias="et",
+                timing=OtoTiming(2605.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2685.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4998.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(2390.0, 160.0, -220.0, 60.0, 25.0)
+    assert repaired[0].anchor is not None
+    assert repaired[0].anchor.anchor_abs_ms == pytest.approx(2450.0)
+    assert "korean_cvc_doubled_cv_cutoff_profile_repair" in repaired[0].applied_rules
+
+    high_pre = [
+        AdaptedOtoRow(
+            wav="bbu.wav",
+            alias="bbu",
+            timing=OtoTiming(1000.0, 160.0, -520.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bbu.wav",
+            alias="up",
+            timing=OtoTiming(1215.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1295.0, role="vc", expected_phone="p"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_high_pre = repair_cvvc_row_sequence(
+        high_pre,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert skipped_high_pre[0].timing == high_pre[0].timing
+    assert "korean_cvc_doubled_cv_cutoff_profile_repair" not in skipped_high_pre[0].applied_rules
+
+    short_cutoff = [
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="sse",
+            timing=OtoTiming(1000.0, 160.0, -300.0, 60.0, 25.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1060.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="sse.wav",
+            alias="es",
+            timing=OtoTiming(1210.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1290.0, role="vc", expected_phone="s"),
+            mode="template-bootstrap",
+        ),
+    ]
+    skipped_short_cutoff = repair_cvvc_row_sequence(
+        short_cutoff,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=2500.0,
+    )
+
+    assert skipped_short_cutoff[0].timing == short_cutoff[0].timing
+    assert "korean_cvc_doubled_cv_cutoff_profile_repair" not in skipped_short_cutoff[0].applied_rules
+
+    late_plain_doubled = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="jje.wav",
+                alias="jje",
+                timing=OtoTiming(2470.0, 160.0, -470.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2530.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="jje.wav",
+                alias="et",
+                timing=OtoTiming(3000.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3080.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5237.0,
+    )
+
+    assert late_plain_doubled[0].timing == OtoTiming(2470.0, 160.0, -220.0, 60.0, 25.0)
+    assert "korean_cvc_doubled_cv_cutoff_profile_repair" in late_plain_doubled[0].applied_rules
+
+
+def test_korean_cvc_plain_obstruent_cv_cutoff_uses_compact_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ta-to.wav",
+                alias="ta",
+                timing=OtoTiming(900.0, 160.0, -360.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1020.0, role="cv", expected_phone="a"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-to.wav",
+                alias="a t",
+                timing=OtoTiming(1300.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1380.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-to.wav",
+                alias="to",
+                timing=OtoTiming(1500.0, 160.0, -480.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1560.0, role="cv", expected_phone="o"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-to.wav",
+                alias="o t",
+                timing=OtoTiming(1660.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1740.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3500.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(1500.0, 160.0, -250.0, 60.0, 25.0)
+    assert "korean_cvc_plain_obstruent_cv_cutoff_profile_repair" in repaired[2].applied_rules
+
+    high_pre = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ta-high.wav",
+                alias="ta",
+                timing=OtoTiming(900.0, 160.0, -360.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1020.0, role="cv", expected_phone="a"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-high.wav",
+                alias="a t",
+                timing=OtoTiming(1300.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1380.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-high.wav",
+                alias="to",
+                timing=OtoTiming(1500.0, 160.0, -480.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1620.0, role="cv", expected_phone="o"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ta-high.wav",
+                alias="o t",
+                timing=OtoTiming(2300.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2380.0, role="vc", expected_phone="t"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4200.0,
+    )
+
+    assert "korean_cvc_plain_obstruent_cv_cutoff_profile_repair" not in high_pre[2].applied_rules
+
+
+def test_korean_cvc_residual_glide_cv_cutoff_uses_compact_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ba-bwi.wav",
+                alias="ba",
+                timing=OtoTiming(900.0, 160.0, -360.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1020.0, role="cv", expected_phone="a"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ba-bwi.wav",
+                alias="a b",
+                timing=OtoTiming(1300.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1380.0, role="vc", expected_phone="b"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ba-bwi.wav",
+                alias="bwi",
+                timing=OtoTiming(1500.0, 160.0, -530.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1560.0, role="cv", expected_phone="wi"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ba-bwi.wav",
+                alias="i b",
+                timing=OtoTiming(2030.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2110.0, role="vc", expected_phone="b"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3600.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(1500.0, 160.0, -260.0, 60.0, 25.0)
+    assert "korean_cvc_residual_glide_cv_cutoff_profile_repair" in repaired[2].applied_rules
+
+    early_row = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="early-bwi.wav",
+                alias="bwi",
+                timing=OtoTiming(1000.0, 160.0, -530.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1060.0, role="cv", expected_phone="wi"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="early-bwi.wav",
+                alias="i b",
+                timing=OtoTiming(1530.0, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1610.0, role="vc", expected_phone="b"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert early_row[0].timing == OtoTiming(1000.0, 160.0, -530.0, 60.0, 25.0)
+    assert "korean_cvc_residual_glide_cv_cutoff_profile_repair" not in early_row[0].applied_rules
+
+
+def test_korean_cvc_head_glide_cv_cutoff_uses_head_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="dya.wav",
+                alias="dye",
+                timing=OtoTiming(1380.0, 160.0, -590.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="dya.wav",
+                alias="dyeo",
+                timing=OtoTiming(1950.0, 160.0, -400.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2010.0, role="cv", expected_phone="eo"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3800.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1380.0, 160.0, -320.0, 120.0, 85.0)
+    assert "korean_cvc_head_glide_cv_cutoff_profile_repair" in repaired[0].applied_rules
+
+    compact_pre = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="compact-dye.wav",
+                alias="dye",
+                timing=OtoTiming(1380.0, 160.0, -590.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1440.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=3000.0,
+    )
+
+    assert compact_pre[0].timing == OtoTiming(1380.0, 160.0, -590.0, 60.0, 25.0)
+    assert "korean_cvc_head_glide_cv_cutoff_profile_repair" not in compact_pre[0].applied_rules
+
+
+def test_korean_cvc_sonorant_liquid_cv_huge_cutoff_uses_compact_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="ng.wav",
+                alias="ngu",
+                timing=OtoTiming(1850.0, 160.0, -3070.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1910.0, role="cv", expected_phone="u"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ng.wav",
+                alias="ngo",
+                timing=OtoTiming(2900.0, 160.0, -2020.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2960.0, role="cv", expected_phone="o"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4920.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1850.0, 160.0, -240.0, 60.0, 25.0)
+    assert repaired[1].timing == OtoTiming(2900.0, 160.0, -240.0, 60.0, 25.0)
+    assert "korean_cvc_sonorant_liquid_cv_huge_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_sonorant_liquid_cv_huge_cutoff_profile_repair" in repaired[1].applied_rules
+
+    nasal_m = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="m.wav",
+                alias="mye",
+                timing=OtoTiming(1490.0, 160.0, -2310.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1610.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4000.0,
+    )
+
+    assert nasal_m[0].timing == OtoTiming(1490.0, 160.0, -300.0, 120.0, 85.0)
+    assert "korean_cvc_sonorant_liquid_cv_huge_cutoff_profile_repair" not in nasal_m[0].applied_rules
+    assert "korean_cvc_mn_glide_cv_huge_cutoff_profile_repair" in nasal_m[0].applied_rules
+
+
+def test_korean_cvc_mn_glide_huge_cutoff_uses_tail_safe_profile():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="mya.wav",
+                alias="mya",
+                timing=OtoTiming(1000.0, 160.0, -2800.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1120.0, role="cv", expected_phone="a"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="nyu.wav",
+                alias="nyu",
+                timing=OtoTiming(3400.0, 160.0, -950.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3460.0, role="cv", expected_phone="yu"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="mweo.wav",
+                alias="mweo",
+                timing=OtoTiming(3900.0, 160.0, -560.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3960.0, role="cv", expected_phone="weo"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5200.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1000.0, 160.0, -300.0, 120.0, 85.0)
+    assert repaired[1].timing == OtoTiming(3400.0, 160.0, -300.0, 60.0, 25.0)
+    assert repaired[2].timing == OtoTiming(3900.0, 160.0, -370.0, 60.0, 25.0)
+    assert "korean_cvc_mn_glide_cv_huge_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_mn_glide_cv_huge_cutoff_profile_repair" in repaired[1].applied_rules
+    assert "korean_cvc_tail_weo_cv_cutoff_profile_repair" in repaired[2].applied_rules
+    assert "korean_cvc_residual_exact_cv_cutoff_profile_repair" in repaired[2].applied_rules
+
+
+def test_korean_cvc_tail_weo_cutoff_uses_subtype_profile_with_exclusions():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="weo.wav",
+                alias="dweo",
+                timing=OtoTiming(2460.0, 160.0, -520.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2520.0, role="cv", expected_phone="weo"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="hweo.wav",
+                alias="hweo",
+                timing=OtoTiming(2940.0, 160.0, -540.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="weo"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ggweo.wav",
+                alias="ggweo",
+                timing=OtoTiming(3420.0, 160.0, -510.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3480.0, role="cv", expected_phone="weo"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=4600.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(2460.0, 160.0, -260.0, 60.0, 25.0)
+    assert repaired[1].timing == OtoTiming(2940.0, 160.0, -540.0, 60.0, 25.0)
+    assert repaired[2].timing == OtoTiming(3420.0, 160.0, -510.0, 60.0, 25.0)
+    assert "korean_cvc_tail_weo_cv_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_tail_weo_cv_cutoff_profile_repair" not in repaired[1].applied_rules
+    assert "korean_cvc_tail_weo_cv_cutoff_profile_repair" not in repaired[2].applied_rules
+
+
+def test_korean_cvc_tail_wi_yoon_and_eui_cutoff_profiles():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="tail.wav",
+                alias="rwa",
+                timing=OtoTiming(900.0, 160.0, -220.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1020.0, role="cv", expected_phone="wa"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="tail.wav",
+                alias="rwe",
+                timing=OtoTiming(1420.0, 160.0, -220.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="we"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="tail.wav",
+                alias="rwi",
+                timing=OtoTiming(1950.0, 160.0, -670.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2010.0, role="cv", expected_phone="wi"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="gyu.wav",
+                alias="gyu",
+                timing=OtoTiming(2970.0, 160.0, -490.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3030.0, role="cv", expected_phone="u"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="meui.wav",
+                alias="meui",
+                timing=OtoTiming(3480.0, 160.0, -400.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=3540.0, role="cv", expected_phone="eui"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="eui.wav",
+                alias="eui",
+                timing=OtoTiming(3970.0, 160.0, -780.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=4090.0, role="cv", expected_phone="eui"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5200.0,
+    )
+
+    assert repaired[2].timing == OtoTiming(1950.0, 160.0, -300.0, 60.0, 25.0)
+    assert repaired[3].timing == OtoTiming(2970.0, 160.0, -300.0, 60.0, 25.0)
+    assert repaired[4].timing == OtoTiming(3480.0, 160.0, -260.0, 60.0, 25.0)
+    assert repaired[5].timing == OtoTiming(3970.0, 160.0, -560.0, 120.0, 85.0)
+    assert "korean_cvc_tail_wi_cv_cutoff_profile_repair" in repaired[2].applied_rules
+    assert "korean_cvc_tail_yoon_cv_cutoff_profile_repair" in repaired[3].applied_rules
+    assert "korean_cvc_tail_eui_compact_cv_cutoff_profile_repair" in repaired[4].applied_rules
+    assert "korean_cvc_standalone_eui_head_cutoff_profile_repair" in repaired[5].applied_rules
+
+
+def test_korean_cvc_residual_doubled_plain_cutoff_profiles():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="jji.wav",
+                alias="jji",
+                timing=OtoTiming(1420.0, 160.0, -450.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1540.0, role="cv", expected_phone="i"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="jjeo.wav",
+                alias="jjeo",
+                timing=OtoTiming(3980.0, 160.0, -440.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=4040.0, role="cv", expected_phone="eo"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ssi.wav",
+                alias="ssi",
+                timing=OtoTiming(1370.0, 160.0, -170.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1490.0, role="cv", expected_phone="i"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5600.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(1420.0, 160.0, -240.0, 120.0, 85.0)
+    assert repaired[1].timing == OtoTiming(3980.0, 160.0, -240.0, 60.0, 25.0)
+    assert repaired[2].timing == OtoTiming(1370.0, 160.0, -300.0, 120.0, 85.0)
+    assert "korean_cvc_residual_doubled_head_cv_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_residual_doubled_compact_cv_cutoff_profile_repair" in repaired[1].applied_rules
+    assert "korean_cvc_residual_ss_doubled_head_short_cutoff_profile_repair" in repaired[2].applied_rules
+
+
+def test_korean_cvc_residual_plain_and_sonorant_cutoff_profiles():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="plain.wav",
+                alias="cheo",
+                timing=OtoTiming(3900.0, 160.0, -440.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=4020.0, role="cv", expected_phone="eo"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="plain.wav",
+                alias="ge",
+                timing=OtoTiming(2430.0, 160.0, -220.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2490.0, role="cv", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="plain.wav",
+                alias="gweo",
+                timing=OtoTiming(2890.0, 160.0, -260.0, 60.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2950.0, role="cv", expected_phone="weo"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="ng.wav",
+                alias="nga",
+                timing=OtoTiming(4307.0, 160.0, -553.0, 120.0, 85.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=4427.0, role="cv", expected_phone="a"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5600.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(3900.0, 160.0, -340.0, 120.0, 85.0)
+    assert repaired[1].timing == OtoTiming(2430.0, 160.0, -380.0, 60.0, 25.0)
+    assert repaired[2].timing == OtoTiming(2890.0, 160.0, -260.0, 60.0, 25.0)
+    assert repaired[3].timing == OtoTiming(4307.0, 160.0, -170.0, 120.0, 85.0)
+    assert "korean_cvc_residual_plain_head_cv_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_residual_g_compact_cv_cutoff_profile_repair" in repaired[1].applied_rules
+    assert "korean_cvc_residual_g_compact_cv_cutoff_profile_repair" not in repaired[2].applied_rules
+    assert "korean_cvc_residual_sonorant_head_cv_cutoff_profile_repair" in repaired[3].applied_rules
+
+
+def test_korean_cvc_residual_vowel_and_nasal_vc_cutoff_profiles():
+    repaired = repair_cvvc_row_sequence(
+        [
+            AdaptedOtoRow(
+                wav="vowel.wav",
+                alias="e",
+                timing=OtoTiming(2423.2, 124.8, -516.8, 116.8, 59.2),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=2540.0, role="v", expected_phone="e"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="vowel.wav",
+                alias="i",
+                timing=OtoTiming(1480.0, 80.0, -300.0, 25.0, 25.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1505.0, role="v", expected_phone="i"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="m-vc.wav",
+                alias="a m",
+                timing=OtoTiming(1057.1, 120.0, -154.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1137.1, role="vc", expected_phone="m"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="n-vc.wav",
+                alias="a n",
+                timing=OtoTiming(1080.0, 120.0, -175.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1160.0, role="vc", expected_phone="n"),
+                mode="template-bootstrap",
+            ),
+            AdaptedOtoRow(
+                wav="an.wav",
+                alias="an",
+                timing=OtoTiming(1080.0, 120.0, -175.0, 80.0, 45.0),
+                source_timing=None,
+                anchor=OtoAnchor(anchor_abs_ms=1160.0, role="vc", expected_phone="n"),
+                mode="template-bootstrap",
+            ),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5600.0,
+    )
+
+    assert repaired[0].timing == OtoTiming(2423.2, 124.8, -320.0, 116.8, 59.2)
+    assert repaired[1].timing == OtoTiming(1480.0, 80.0, -300.0, 25.0, 25.0)
+    assert repaired[2].timing == OtoTiming(1057.1, 120.0, -280.0, 80.0, 45.0)
+    assert repaired[3].timing == OtoTiming(1080.0, 120.0, -260.0, 80.0, 45.0)
+    assert repaired[4].timing == OtoTiming(1080.0, 120.0, -360.0, 80.0, 45.0)
+    assert "korean_cvc_residual_standalone_v_cutoff_profile_repair" in repaired[0].applied_rules
+    assert "korean_cvc_residual_standalone_v_cutoff_profile_repair" not in repaired[1].applied_rules
+    assert "korean_cvc_residual_spaced_m_vc_cutoff_profile_repair" in repaired[2].applied_rules
+    assert "korean_cvc_residual_spaced_n_vc_cutoff_profile_repair" in repaired[3].applied_rules
+    assert "korean_cvc_residual_compact_an_cutoff_profile_repair" in repaired[4].applied_rules
+
+
+def test_korean_cvc_residual_exact_cv_cutoff_profiles():
+    def row(alias: str, cutoff: float, pre: float, overlap: float) -> AdaptedOtoRow:
+        return AdaptedOtoRow(
+            wav=f"{alias}.wav",
+            alias=alias,
+            timing=OtoTiming(1200.0, 160.0, cutoff, pre, overlap),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1200.0 + pre, role="cv", expected_phone=alias),
+            mode="template-bootstrap",
+        )
+
+    repaired = repair_cvvc_row_sequence(
+        [
+            row("beu", -200.0, 70.0, 35.0),
+            row("peui", -340.0, 60.0, 25.0),
+            row("lwe", -320.0, 120.0, 85.0),
+            row("mweo", -260.0, 60.0, 25.0),
+            row("ddye", -420.0, 120.0, 85.0),
+            row("ddyu", -300.0, 60.0, 25.0),
+            row("kye", -420.0, 120.0, 85.0),
+            row("ngya", -380.0, 120.0, 85.0),
+            row("pya", -320.0, 120.0, 85.0),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5600.0,
+    )
+
+    assert repaired[0].timing.cutoff == pytest.approx(-350.0)
+    assert repaired[1].timing.cutoff == pytest.approx(-200.0)
+    assert repaired[2].timing.cutoff == pytest.approx(-200.0)
+    assert repaired[3].timing.cutoff == pytest.approx(-370.0)
+    assert repaired[4].timing.cutoff == pytest.approx(-215.0)
+    assert repaired[5].timing.cutoff == pytest.approx(-190.0)
+    assert repaired[6].timing.cutoff == pytest.approx(-310.0)
+    assert repaired[7].timing.cutoff == pytest.approx(-270.0)
+    assert repaired[8].timing.cutoff == pytest.approx(-320.0)
+    for index in range(8):
+        assert "korean_cvc_residual_exact_cv_cutoff_profile_repair" in repaired[index].applied_rules
+    assert "korean_cvc_residual_exact_cv_cutoff_profile_repair" not in repaired[8].applied_rules
+
+
+def test_korean_cvc_residual_exact_pre_fixed_profiles():
+    def row(alias: str, offset: float, consonant: float, cutoff: float, pre: float, overlap: float) -> AdaptedOtoRow:
+        return AdaptedOtoRow(
+            wav=f"{alias}.wav",
+            alias=alias,
+            timing=OtoTiming(offset, consonant, cutoff, pre, overlap),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=offset + pre, role="cv", expected_phone=alias),
+            warnings=("source_timing_discarded",),
+            mode="template-bootstrap",
+        )
+
+    repaired = repair_cvvc_row_sequence(
+        [
+            row("ba", 840.0, 160.0, -360.0, 120.0, 85.0),
+            row("bbya", 1430.0, 160.0, -300.0, 120.0, 85.0),
+            row("e", 2423.2, 305.8, -320.0, 116.8, 59.2),
+            row("o", 2944.0, 245.0, -320.0, 56.0, 34.4),
+            row("e g", 2730.0, 120.0, -154.0, 80.0, 45.0),
+            row("ryu", 2995.0, 160.0, -240.0, 60.0, 25.0),
+            row("eui", 3350.0, 160.0, -560.0, 120.0, 85.0),
+            row("pya", 1430.0, 160.0, -300.0, 120.0, 85.0),
+        ],
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5600.0,
+    )
+
+    assert repaired[0].timing.as_tuple() == pytest.approx(OtoTiming(935.0, 120.0, -265.0, 25.0, 12.0).as_tuple())
+    assert repaired[1].timing.as_tuple() == pytest.approx(OtoTiming(1430.0, 180.0, -300.0, 25.0, 12.0).as_tuple())
+    assert repaired[2].timing.as_tuple() == pytest.approx(OtoTiming(2505.0, 150.0, -238.2, 35.0, 35.0).as_tuple())
+    assert repaired[3].timing.as_tuple() == pytest.approx(OtoTiming(2944.0, 150.0, -320.0, 56.0, 34.4).as_tuple())
+    assert repaired[4].timing.as_tuple() == pytest.approx(OtoTiming(2730.0, 200.0, -208.0, 170.0, 135.0).as_tuple())
+    assert repaired[5].timing.as_tuple() == pytest.approx(OtoTiming(2995.0, 320.0, -328.0, 60.0, 25.0).as_tuple())
+    assert repaired[6].timing.as_tuple() == pytest.approx(OtoTiming(3430.0, 320.0, -560.0, 40.0, 15.0).as_tuple())
+    assert repaired[7].timing.as_tuple() == pytest.approx(OtoTiming(1430.0, 160.0, -300.0, 120.0, 85.0).as_tuple())
+    for index in range(7):
+        assert "korean_cvc_residual_exact_profile_repair" in repaired[index].applied_rules
+    assert "korean_cvc_residual_exact_profile_repair" not in repaired[7].applied_rules
+
+
+def test_korean_cvc_compact_cv_sequence_gap_repairs_yoon_rows():
+    rows = [
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jya",
+            timing=OtoTiming(920.0, 160.0, -570.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1040.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jye",
+            timing=OtoTiming(1180.0, 160.0, -310.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1300.0, role="cv", expected_phone="e"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jyeo",
+            timing=OtoTiming(1880.0, 160.0, -620.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2000.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jyo",
+            timing=OtoTiming(2420.0, 160.0, -540.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2540.0, role="cv", expected_phone="o"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jyu",
+            timing=OtoTiming(2880.0, 160.0, -590.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3000.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="jya.wav",
+            alias="jeui",
+            timing=OtoTiming(3160.0, 160.0, -310.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3280.0, role="cv", expected_phone="eui"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gwa.wav",
+            alias="gwa",
+            timing=OtoTiming(870.0, 160.0, -620.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=990.0, role="cv", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gwa.wav",
+            alias="gwe",
+            timing=OtoTiming(1230.0, 160.0, -260.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1350.0, role="cv", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gwa.wav",
+            alias="gwi",
+            timing=OtoTiming(1920.0, 160.0, -530.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2040.0, role="cv", expected_phone="wi"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="gwa.wav",
+            alias="gweo",
+            timing=OtoTiming(2430.0, 160.0, -430.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2550.0, role="cv", expected_phone="weo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mixed.wav",
+            alias="ga",
+            timing=OtoTiming(1030.0, 160.0, -490.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1150.0, role="cv", expected_phone="a"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mixed.wav",
+            alias="a g",
+            timing=OtoTiming(1140.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1220.0, role="vc", expected_phone="g"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="mixed.wav",
+            alias="gi",
+            timing=OtoTiming(1180.0, 160.0, -340.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1300.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing.offset == pytest.approx(1400.0)
+    assert repaired[1].timing.preutterance == pytest.approx(120.0)
+    assert repaired[1].timing.overlap == pytest.approx(85.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1520.0)
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[1].applied_rules
+    assert "korean_cvc_compact_cv_sequence_profile_repair" not in repaired[1].applied_rules
+    assert repaired[5].timing.offset == pytest.approx(3480.0)
+    assert repaired[5].timing.preutterance == pytest.approx(60.0)
+    assert repaired[5].timing.overlap == pytest.approx(25.0)
+    assert repaired[5].anchor is not None
+    assert repaired[5].anchor.anchor_abs_ms == pytest.approx(3540.0)
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[5].applied_rules
+    assert "korean_cvc_compact_cv_sequence_profile_repair" in repaired[5].applied_rules
+    assert repaired[7].timing.offset == pytest.approx(1395.0)
+    assert repaired[7].timing.preutterance == pytest.approx(120.0)
+    assert repaired[7].timing.overlap == pytest.approx(85.0)
+    assert repaired[7].anchor is not None
+    assert repaired[7].anchor.anchor_abs_ms == pytest.approx(1515.0)
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[7].applied_rules
+    assert "korean_cvc_compact_cv_sequence_profile_repair" not in repaired[7].applied_rules
+    assert repaired[10].timing == OtoTiming(940.0, 180.0, -490.0, 70.0, 35.0)
+    assert "korean_cvc_initial_cv_onset_repair" in repaired[10].applied_rules
+    assert repaired[11] == rows[11]
+    assert repaired[12] == rows[12]
+
+
+def test_korean_cvc_compact_cv_sequence_gap_repairs_unaliased_head_and_reverse_gap():
+    rows = [
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="lya",
+            timing=OtoTiming(1590.0, 160.0, -400.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1710.0, role="cv", expected_phone="ya"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="lye",
+            timing=OtoTiming(2030.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="ye"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="lyeo",
+            timing=OtoTiming(2410.0, 160.0, -570.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2530.0, role="cv", expected_phone="yeo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="lyo",
+            timing=OtoTiming(2870.0, 160.0, -640.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2990.0, role="cv", expected_phone="yo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="lyu",
+            timing=OtoTiming(3370.0, 160.0, -700.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3490.0, role="cv", expected_phone="yu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="al'ryal'ryel'ryeol'lyol'ryul'reuil.wav",
+            alias="leui",
+            timing=OtoTiming(3950.0, 160.0, -290.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4070.0, role="cv", expected_phone="eui"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bwa'bwe'bwi'bweo.wav",
+            alias="bwa",
+            timing=OtoTiming(940.0, 180.0, -290.0, 70.0, 35.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1010.0, role="cv", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bwa'bwe'bwi'bweo.wav",
+            alias="bwe",
+            timing=OtoTiming(1620.0, 160.0, -220.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1740.0, role="cv", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bwa'bwe'bwi'bweo.wav",
+            alias="bwi",
+            timing=OtoTiming(1890.0, 160.0, -420.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2010.0, role="cv", expected_phone="wi"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="bwa'bwe'bwi'bweo.wav",
+            alias="bweo",
+            timing=OtoTiming(2420.0, 160.0, -450.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2540.0, role="cv", expected_phone="weo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang'wang'weng'wing'weong.wav",
+            alias="ngwa",
+            timing=OtoTiming(1390.0, 160.0, -2130.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1510.0, role="cv", expected_phone="wa"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang'wang'weng'wing'weong.wav",
+            alias="ngwe",
+            timing=OtoTiming(1810.0, 160.0, -1710.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1930.0, role="cv", expected_phone="we"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang'wang'weng'wing'weong.wav",
+            alias="ngwi",
+            timing=OtoTiming(2310.0, 160.0, -1210.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2430.0, role="cv", expected_phone="wi"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ang'wang'weng'wing'weong.wav",
+            alias="ngweo",
+            timing=OtoTiming(2890.0, 160.0, -630.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3010.0, role="cv", expected_phone="weo"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[0].timing.offset == pytest.approx(1410.0)
+    assert repaired[1].timing.offset == pytest.approx(1910.0)
+    assert repaired[1].timing.preutterance == pytest.approx(120.0)
+    assert repaired[1].timing.overlap == pytest.approx(85.0)
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[0].applied_rules
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[1].applied_rules
+    assert "korean_cvc_compact_cv_sequence_profile_repair" not in repaired[1].applied_rules
+    assert repaired[7].timing.offset == pytest.approx(1390.0)
+    assert repaired[7].timing.preutterance == pytest.approx(120.0)
+    assert repaired[7].timing.overlap == pytest.approx(85.0)
+    assert "korean_cvc_compact_cv_sequence_gap_repair" in repaired[7].applied_rules
+    assert "korean_cvc_compact_cv_sequence_profile_repair" not in repaired[7].applied_rules
+    assert repaired[8].timing == OtoTiming(1950.0, 160.0, -300.0, 60.0, 25.0)
+    assert repaired[8].anchor is not None
+    assert repaired[8].anchor.anchor_abs_ms == pytest.approx(2010.0)
+    assert "korean_cvc_compact_cv_sequence_profile_repair" in repaired[8].applied_rules
+    assert "korean_cvc_tail_wi_cv_cutoff_profile_repair" in repaired[8].applied_rules
+    assert repaired[10].timing == OtoTiming(1390.0, 160.0, -340.0, 120.0, 85.0)
+    assert repaired[10].anchor is not None
+    assert repaired[10].anchor.anchor_abs_ms == pytest.approx(1510.0)
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[10].applied_rules
+    assert repaired[11].timing == OtoTiming(1810.0, 160.0, -320.0, 120.0, 85.0)
+    assert repaired[11].anchor is not None
+    assert repaired[11].anchor.anchor_abs_ms == pytest.approx(1930.0)
+    assert "korean_cvc_head_glide_cv_cutoff_profile_repair" in repaired[11].applied_rules
+    assert repaired[12].timing == OtoTiming(2370.0, 160.0, -300.0, 60.0, 25.0)
+    assert repaired[12].anchor is not None
+    assert repaired[12].anchor.anchor_abs_ms == pytest.approx(2430.0)
+    assert "korean_cvc_compact_cv_sequence_profile_repair" in repaired[12].applied_rules
+    assert "korean_cvc_tail_wi_cv_cutoff_profile_repair" in repaired[12].applied_rules
+
+
+def test_korean_cvc_alternating_cv_profile_repairs_long_cutoff_obstruent_rows_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="a b",
+            timing=OtoTiming(1280.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1360.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bi",
+            timing=OtoTiming(1380.0, 160.0, -550.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1500.0, role="cv", expected_phone="i"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="i b",
+            timing=OtoTiming(1840.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1920.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="bu",
+            timing=OtoTiming(2030.0, 160.0, -400.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2150.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ba.wav",
+            alias="u b",
+            timing=OtoTiming(2400.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2480.0, role="vc", expected_phone="b"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="il",
+            timing=OtoTiming(1600.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=1680.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="lu",
+            timing=OtoTiming(1980.0, 160.0, -1010.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2100.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="ul",
+            timing=OtoTiming(2150.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2230.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(1440.0, 160.0, -320.0, 60.0, 25.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(1500.0)
+    assert "korean_cvc_alternating_cv_profile_repair" in repaired[1].applied_rules
+    assert "korean_cvc_cv_cutoff_before_next_row_repair" in repaired[1].applied_rules
+    assert repaired[3] == rows[3]
+    assert repaired[6].timing == OtoTiming(1980.0, 160.0, -240.0, 120.0, 85.0)
+    assert "korean_cvc_sonorant_liquid_cv_huge_cutoff_profile_repair" in repaired[6].applied_rules
+
+
+def test_korean_cvc_no_space_vc_cadence_repairs_late_l_and_eu_t_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="lu",
+            timing=OtoTiming(1980.0, 160.0, -1010.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2100.0, role="cv", expected_phone="u"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="ul",
+            timing=OtoTiming(2150.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=2230.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="leu",
+            timing=OtoTiming(3450.0, 160.0, -580.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3570.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="eul",
+            timing=OtoTiming(3620.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3700.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="leo",
+            timing=OtoTiming(4000.0, 160.0, -480.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4120.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ral.wav",
+            alias="eol",
+            timing=OtoTiming(4170.0, 120.0, -154.0, 80.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4250.0, role="vc", expected_phone="l"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ddeu",
+            timing=OtoTiming(3550.0, 160.0, -280.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3670.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="eut",
+            timing=OtoTiming(3805.0, 145.0, -195.0, 115.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3920.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="dda.wav",
+            alias="ddeo",
+            timing=OtoTiming(4060.0, 160.0, -240.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="teu",
+            timing=OtoTiming(3550.0, 160.0, -280.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3670.0, role="cv", expected_phone="eu"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="eu t",
+            timing=OtoTiming(3805.0, 145.0, -195.0, 115.0, 45.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=3920.0, role="vc", expected_phone="t"),
+            mode="template-bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="ta.wav",
+            alias="teo",
+            timing=OtoTiming(4060.0, 160.0, -240.0, 120.0, 85.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4180.0, role="cv", expected_phone="eo"),
+            mode="template-bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="korean", format_type="cvc", alias_type="auto"),
+        file_duration_ms=5000.0,
+    )
+
+    assert repaired[1].timing == OtoTiming(2050.0, 120.0, -154.0, 80.0, 45.0)
+    assert repaired[1].anchor is not None
+    assert repaired[1].anchor.anchor_abs_ms == pytest.approx(2130.0)
+    assert "korean_cvc_no_space_vc_cadence_repair" in repaired[1].applied_rules
+    assert repaired[3].timing == OtoTiming(3540.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_no_space_vc_cadence_repair" in repaired[3].applied_rules
+    assert repaired[5].timing == OtoTiming(4065.0, 120.0, -154.0, 80.0, 45.0)
+    assert "korean_cvc_no_space_vc_cadence_repair" in repaired[5].applied_rules
+    assert repaired[7].timing == OtoTiming(3700.0, 145.0, -195.0, 115.0, 45.0)
+    assert "korean_cvc_no_space_vc_cadence_repair" in repaired[7].applied_rules
+    assert repaired[10] == rows[10]
+
+
+def test_slot_viterbi_sonorant_phone_change_uses_spectral_shape_delta_when_event_is_late():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.05 for _ in times],
+        "flux_likelihood": [0.05 for _ in times],
+        "sonorant_onset_likelihood": [0.04 for _ in times],
+        "spectral_shape_delta_likelihood": [0.03 for _ in times],
+        "voicing": [0.86 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.74 if 100.0 <= time_ms <= 260.0 else 0.20
+        class_probs["consonant"][idx] = 0.24 if 120.0 <= time_ms <= 160.0 else 0.08
+        event_scores["phone_change"][idx] = max(
+            event_scores["phone_change"][idx],
+            0.28 * math.exp(-0.5 * ((time_ms - 250.0) / 8.0) ** 2),
+        )
+        acoustic_scores["spectral_shape_delta_likelihood"][idx] = max(
+            acoustic_scores["spectral_shape_delta_likelihood"][idx],
+            0.96 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [ExpectedSlot(slot_index=0, phone_index=1, phone="n", role="vc", event_label="phone_change")]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    assert result.assignments[0].selected_time_ms == pytest.approx(140.0, abs=6.0)
+
+
+def test_slot_viterbi_vv_uses_vowel_boundary_when_nucleus_event_is_late():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.04 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.04 for _ in times],
+        "vowel_boundary_likelihood": [0.03 for _ in times],
+        "spectral_shape_delta_likelihood": [0.03 for _ in times],
+        "voicing": [0.84 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+        "nucleus_likelihood": [0.08 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.84 if 80.0 <= time_ms <= 300.0 else 0.12
+        event_scores["vowel_nucleus"][idx] = max(
+            event_scores["vowel_nucleus"][idx],
+            0.56 * math.exp(-0.5 * ((time_ms - 260.0) / 8.0) ** 2),
+        )
+        acoustic_scores["vowel_boundary_likelihood"][idx] = max(
+            acoustic_scores["vowel_boundary_likelihood"][idx],
+            0.96 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    slots = [ExpectedSlot(slot_index=0, phone_index=1, phone="i", role="vv", event_label="vowel_nucleus")]
+
+    result = assign_slots_viterbi(posterior, expected_slots=slots, min_event_score=0.03)
+
+    assert result.ok
+    assert result.assignments[0].selected_time_ms == pytest.approx(140.0, abs=6.0)
+
+
+def test_acoustic_aux_sonorant_onset_sees_spectral_shape_change_without_volume_rise(tmp_path):
+    wav_path = tmp_path / "same_level_shape_change.wav"
+    sample_rate = 16000
+    duration_s = 0.45
+    switch = int(sample_rate * 0.22)
+    samples: list[int] = []
+    for idx in range(int(sample_rate * duration_s)):
+        freq = 440.0 if idx < switch else 180.0
+        value = int(9000 * math.sin(2.0 * math.pi * freq * idx / sample_rate))
+        samples.append(value)
+    with wave.open(str(wav_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(np.asarray(samples, dtype="<i2").tobytes())
+
+    batch = extract_features(wav_path, encoder="acoustic-aux")
+    times = np.asarray(batch.times_ms, dtype=np.float32)
+    sonorant = np.asarray(batch.acoustic_scores["sonorant_onset_likelihood"], dtype=np.float32)
+    shape_delta = np.asarray(batch.acoustic_scores["spectral_shape_delta_likelihood"], dtype=np.float32)
+    search = np.where((times >= 120.0) & (times <= 300.0))[0]
+    peak_time = float(times[search[int(np.argmax(sonorant[search]))]])
+
+    assert float(np.max(shape_delta[search])) > 0.35
+    assert peak_time == pytest.approx(220.0, abs=45.0)
+
+
+def test_acoustic_aux_vowel_boundary_sees_same_level_vowel_change(tmp_path):
+    wav_path = tmp_path / "same_level_vowel_change.wav"
+    sample_rate = 16000
+    duration_s = 0.45
+    switch = int(sample_rate * 0.22)
+    samples: list[int] = []
+    for idx in range(int(sample_rate * duration_s)):
+        freq = 360.0 if idx < switch else 620.0
+        value = int(9000 * math.sin(2.0 * math.pi * freq * idx / sample_rate))
+        samples.append(value)
+    with wave.open(str(wav_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(np.asarray(samples, dtype="<i2").tobytes())
+
+    batch = extract_features(wav_path, encoder="acoustic-aux")
+    times = np.asarray(batch.times_ms, dtype=np.float32)
+    boundary = np.asarray(batch.acoustic_scores["vowel_boundary_likelihood"], dtype=np.float32)
+    search = np.where((times >= 120.0) & (times <= 300.0))[0]
+    peak_time = float(times[search[int(np.argmax(boundary[search]))]])
+
+    assert float(np.max(boundary[search])) > 0.30
+    assert peak_time == pytest.approx(220.0, abs=45.0)
+
+
 def test_acoustic_aux_features_preserve_absolute_gate_tracks(tmp_path):
     wav_path = tmp_path / "tone.wav"
     _write_tone_wav(wav_path, duration_s=0.35)
@@ -202,7 +5559,7 @@ def test_acoustic_aux_features_preserve_absolute_gate_tracks(tmp_path):
     assert acoustic.features.shape[1] == 29
     assert aux.features.shape[1] > acoustic.features.shape[1]
     assert aux.times_ms.shape[0] == aux.features.shape[0]
-    assert {"rms", "spectral_flux", "voicing", "silence_likelihood", "transition_likelihood"}.issubset(aux.acoustic_scores)
+    assert {"rms", "spectral_flux", "voicing", "silence_likelihood", "transition_likelihood", "vowel_boundary_likelihood"}.issubset(aux.acoustic_scores)
     assert float(np.max(aux.acoustic_scores["rms"])) > 0.0
     assert float(np.max(aux.acoustic_scores["voicing"])) >= 0.0
 
@@ -516,8 +5873,26 @@ def test_template_vowel_rows_define_vowel_nucleus_slots_in_row_order():
     ]
     slots = expected_slots_for_template_rows([row for row in rows if row is not None], ["a", "a", "i"])
     assert [(slot.phone_index, slot.event_label) for slot in slots] == [
+        (0, "vowel_nucleus"),
         (1, "vowel_nucleus"),
         (2, "vowel_nucleus"),
+    ]
+
+
+def test_initial_bare_vowel_alias_does_not_shift_to_duplicate_vv_target():
+    rows = [
+        OtoTemplateRow("_a.wav", "\u3042", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("_a.wav", "a \u3042", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("_a.wav", "a \u3044", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+
+    assert _assign_alias_target_indices(rows, ["a", "a", "i"]) == [0, 1, 2]
+
+    slots = expected_slots_for_template_rows(rows, ["a", "a", "i"])
+    assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
+        (0, "v", "vowel_nucleus"),
+        (1, "vv", "vowel_nucleus"),
+        (2, "vv", "vowel_nucleus"),
     ]
 
 
@@ -530,9 +5905,41 @@ def test_template_terminal_dash_row_does_not_reject_hsmm_sequence():
     slots = expected_slots_for_template_rows([row for row in rows if row is not None], ["a", "a"])
 
     assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
-        (1, "cv_head", "cv_boundary"),
+        (0, "cv_head", "cv_boundary"),
         (1, "vv", "vowel_nucleus"),
     ]
+
+
+def test_initial_vowel_cv_head_does_not_shift_to_following_duplicate_vv_target():
+    rows = [
+        OtoTemplateRow("_a.wav", "- \u3042", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("_a.wav", "a \u3042", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("_a.wav", "a \u3044", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("_a.wav", "a -", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+
+    assert _assign_alias_target_indices(rows, ["a", "a", "i"]) == [0, 1, 2, 1]
+
+    slots = expected_slots_for_template_rows(rows, ["a", "a", "i"])
+    assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
+        (0, "cv_head", "cv_boundary"),
+        (1, "vv", "vowel_nucleus"),
+        (2, "vv", "vowel_nucleus"),
+    ]
+
+
+def test_hold_release_suffix_aliases_are_not_assigned_to_hsmm_phone_slots():
+    rows = [
+        OtoTemplateRow("_aa_hh.wav", "\u3042L", OtoTiming(10.0, 20.0, -30.0, 15.0, 5.0)),
+        OtoTemplateRow("_aa_hh.wav", "a H", OtoTiming(40.0, 50.0, -60.0, 25.0, 10.0)),
+    ]
+
+    assert _alias_phone_sequence("\u3042L") == ["a"]
+    assert _is_nonphonetic_special_alias("\u3042L")
+    assert _is_nonphonetic_special_alias("a H")
+    assert not _is_nonphonetic_special_alias("a h")
+    assert _assign_alias_target_indices(rows, ["a", "a"]) == [None, None]
+    assert expected_slots_for_template_rows(rows, ["a", "a"]) == []
 
 
 def test_cvvc_vv_alias_targeting_vowel_after_onset_uses_cv_boundary_slot():
@@ -591,6 +5998,172 @@ def test_japanese_n_onset_aliases_do_not_treat_n_as_vowel_transition():
     ]
 
 
+def test_japanese_moraic_n_transition_rows_use_vowel_slots_before_spaced_n_aliases():
+    rows = [
+        OtoTemplateRow("n-i-n-e-n.wav", "- n", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("n-i-n-e-n.wav", "n i", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("n-i-n-e-n.wav", "i n", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("n-i-n-e-n.wav", "n e", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("n-i-n-e-n.wav", "e n", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("n-i-n-e-n.wav", "n -", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+
+    assert _assign_alias_target_indices(rows, ["n", "i", "n", "e", "n"]) == [0, 1, 2, 3, 4, 4]
+
+    slots = expected_slots_for_template_rows(rows, ["n", "i", "n", "e", "n"])
+    assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
+        (0, "v", "vowel_nucleus"),
+        (1, "vcv", "cv_boundary"),
+        (2, "vv", "vowel_nucleus"),
+        (3, "vcv", "cv_boundary"),
+        (4, "vv", "vowel_nucleus"),
+    ]
+
+
+def test_japanese_moraic_n_anchor_refine_pulls_late_nucleus_to_sonorant_onset():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.05 for _ in times],
+        "flux_likelihood": [0.04 for _ in times],
+        "sonorant_onset_likelihood": [0.03 for _ in times],
+        "spectral_shape_delta_likelihood": [0.03 for _ in times],
+        "voicing": [0.88 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+        "nucleus_likelihood": [0.05 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.72 if 80.0 <= time_ms <= 260.0 else 0.18
+        event_scores["vowel_nucleus"][idx] = max(
+            event_scores["vowel_nucleus"][idx],
+            0.82 * math.exp(-0.5 * ((time_ms - 220.0) / 8.0) ** 2),
+        )
+        acoustic_scores["sonorant_onset_likelihood"][idx] = max(
+            acoustic_scores["sonorant_onset_likelihood"][idx],
+            0.90 * math.exp(-0.5 * ((time_ms - 130.0) / 8.0) ** 2),
+        )
+        acoustic_scores["spectral_shape_delta_likelihood"][idx] = max(
+            acoustic_scores["spectral_shape_delta_likelihood"][idx],
+            0.92 * math.exp(-0.5 * ((time_ms - 130.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    rows = [
+        OtoTemplateRow("a-n-a.wav", "a n", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("a-n-a.wav", "n a", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+    decoded = [
+        {
+            "label": "vowel_nucleus",
+            "selected_time_ms": 220.0,
+            "score": 0.82,
+            "expected_phone": "n",
+            "expected_phone_index": 1,
+            "frame_index": 22,
+            "source": "filename_hsmm",
+        },
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": 310.0,
+            "score": 0.70,
+            "expected_phone": "a",
+            "expected_phone_index": 2,
+            "frame_index": 31,
+            "source": "filename_hsmm",
+        },
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded,
+        rows,
+        expected_phones=["a", "n", "a"],
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[0] is not None
+    assert anchors[0].anchor_abs_ms == pytest.approx(130.0, abs=6.0)
+    assert "sonorant_onset_local_refine" in anchors[0].warnings
+
+
+def test_japanese_vv_anchor_refine_uses_vowel_boundary_not_late_nucleus():
+    times = [float(idx * 10) for idx in range(41)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    acoustic_scores = {
+        "transition_likelihood": [0.04 for _ in times],
+        "vowel_boundary_likelihood": [0.03 for _ in times],
+        "spectral_shape_delta_likelihood": [0.03 for _ in times],
+        "voicing": [0.88 for _ in times],
+        "silence_likelihood": [0.08 for _ in times],
+        "nucleus_likelihood": [0.06 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.76 if 70.0 <= time_ms <= 310.0 else 0.18
+        event_scores["vowel_nucleus"][idx] = max(
+            event_scores["vowel_nucleus"][idx],
+            0.86 * math.exp(-0.5 * ((time_ms - 250.0) / 8.0) ** 2),
+        )
+        acoustic_scores["vowel_boundary_likelihood"][idx] = max(
+            acoustic_scores["vowel_boundary_likelihood"][idx],
+            0.94 * math.exp(-0.5 * ((time_ms - 140.0) / 8.0) ** 2),
+        )
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    rows = [OtoTemplateRow("a-i.wav", "a i", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))]
+    decoded = [
+        {
+            "label": "vowel_nucleus",
+            "selected_time_ms": 250.0,
+            "score": 0.86,
+            "expected_phone": "i",
+            "expected_phone_index": 1,
+            "frame_index": 25,
+            "source": "filename_hsmm",
+        }
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        decoded,
+        rows,
+        expected_phones=["a", "i"],
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[0] is not None
+    assert anchors[0].anchor_abs_ms == pytest.approx(140.0, abs=6.0)
+    assert "vowel_boundary_local_refine" in anchors[0].warnings
+
+
+def test_japanese_cvvc_moraic_n_suffix_alias_targets_n_slot():
+    rows = [
+        OtoTemplateRow("kan.wav", "a \u3093ng", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("pan.wav", "a \u3093m", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("tan.wav", "a \u3093n", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+    phones = ["k", "a", "n", "k", "a"]
+
+    assert [_alias_phone_sequence(row.alias) for row in rows] == [["a", "n"], ["a", "n"], ["a", "n"]]
+    assert _assign_alias_target_indices(rows, phones) == [2, 2, 2]
+
+    slots = expected_slots_for_template_rows(rows[:1], phones)
+    assert [(slot.phone_index, slot.role, slot.event_label) for slot in slots] == [
+        (2, "vv", "vowel_nucleus"),
+    ]
+
+
 def test_cvvc_template_rows_share_auxiliary_cv_targets_in_order():
     rows = [
         parse_template_oto_line("a-ka.wav=- a,0,0,0,0,0"),
@@ -634,6 +6207,20 @@ def test_cvvc_alias_targets_keep_kw_source_rows_on_split_kana_slots():
 
     slots = expected_slots_for_template_rows(rows, ["k", "w", "a", "k", "w", "i", "k", "u", "k", "w", "e"])
     assert (slots[0].phone_index, slots[0].event_label) == (0, "phone_change")
+
+
+def test_cvvc_alias_targets_ignore_separated_pitch_suffix_tokens():
+    rows = [
+        OtoTemplateRow("ka.wav", "a k_S", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("ka.wav", "i k_S", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("ka.wav", "ka_S", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+        OtoTemplateRow("ka.wav", "ki_A4", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
+    ]
+    phones = ["k", "a", "k", "i", "k", "a"]
+
+    assert _alias_type_for_row("a k_S", "auto") == "vc"
+    assert _alias_phone_sequence("ki_A4") == ["k", "i"]
+    assert _assign_alias_target_indices(rows, phones) == [2, 4, 1, 3]
 
 
 def test_cvvc_alias_targets_allow_vc_then_kana_cv_backtrack_for_palatal_series():
@@ -706,7 +6293,8 @@ def test_cvvc_single_tail_cv_block_prefers_late_repeat_target():
     assert _assign_alias_target_indices(rows, ["h", "a", "h", "a", "i", "h", "a"]) == [0, 1, 2, 5, 6]
 
 
-def test_japanese_cvvc_following_cv_block_cutoff_cap_preserves_offset_and_companion_timing():
+def test_japanese_cvvc_following_cv_block_cutoff_cap_preserves_offset_and_companion_timing(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
     transition = AdaptedOtoRow(
         wav="case.wav",
         alias="a k",
@@ -750,9 +6338,11 @@ def test_japanese_cvvc_following_cv_block_cutoff_cap_preserves_offset_and_compan
     assert repaired_kana.timing.overlap == pytest.approx(115.0)
     assert repaired_kana.timing.consonant == pytest.approx(190.0)
     assert repaired_kana.timing.cutoff == pytest.approx(-400.0)
-    assert repaired_romaji.timing == repaired_kana.timing
+    assert repaired_romaji.timing.preutterance == pytest.approx(150.0)
+    assert repaired_romaji.timing.overlap == pytest.approx(115.0)
     assert repaired_short.timing.cutoff == pytest.approx(-360.0)
     assert "cvvc_following_cv_block_cutoff_cap" in repaired_kana.applied_rules
+    assert "cvvc_cv_role_profile_repair" not in repaired_kana.applied_rules
     assert any(
         warning.startswith("cvvc_following_cv_block_cutoff_capped:1200.0->400.0")
         for warning in repaired_kana.warnings
@@ -820,7 +6410,8 @@ def test_japanese_cvvc_cv_sequence_cutoff_caps_before_next_cv():
     )
 
 
-def test_japanese_cvvc_cv_sequence_cutoff_keeps_near_next_cv_tail():
+def test_japanese_cvvc_cv_sequence_cutoff_keeps_near_next_cv_tail(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
     first_cv = AdaptedOtoRow(
         wav="case.wav",
         alias="\u304d",
@@ -843,8 +6434,13 @@ def test_japanese_cvvc_cv_sequence_cutoff_keeps_near_next_cv_tail():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired_first.timing == first_cv.timing
+    assert repaired_first.timing.offset == pytest.approx(first_cv.timing.offset)
+    assert repaired_first.timing.consonant == pytest.approx(first_cv.timing.consonant)
+    assert repaired_first.timing.cutoff == pytest.approx(first_cv.timing.cutoff)
+    assert repaired_first.timing.preutterance == pytest.approx(70.0)
+    assert repaired_first.timing.overlap == pytest.approx(25.0)
     assert "cvvc_cv_sequence_next_cv_cutoff_cap" not in repaired_first.applied_rules
+    assert "cvvc_cv_role_profile_repair" in repaired_first.applied_rules
 
 
 def test_japanese_cvvc_cv_next_transition_cutoff_caps_before_next_vc():
@@ -1062,6 +6658,57 @@ def test_template_anchor_assignment_allows_first_target_at_zero_ms():
     assert anchors[0].expected_phone_index == 0
 
 
+def test_template_anchor_assignment_rejects_leading_noise_for_later_sonorant_target():
+    times = [float(idx * 10) for idx in range(61)]
+    class_probs = {label: [0.02 for _ in times] for label in FRAME_LABELS}
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    acoustic_scores = {
+        "silence_likelihood": [0.04 for _ in times],
+        "voicing": [0.55 for _ in times],
+        "transition_likelihood": [0.02 for _ in times],
+        "nucleus_likelihood": [0.02 for _ in times],
+    }
+    for idx, time_ms in enumerate(times):
+        class_probs["vowel"][idx] = 0.72 if 250.0 <= time_ms <= 460.0 else 0.05
+        class_probs["consonant"][idx] = 0.32 if 210.0 <= time_ms <= 280.0 else 0.05
+    event_scores["phone_change"][0] = 0.98
+    acoustic_scores["silence_likelihood"][0] = 0.92
+    acoustic_scores["voicing"][0] = 0.05
+    posterior = FramePosterior(
+        wav_path="ko-liquid.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores=acoustic_scores,
+    )
+    rows = [OtoTemplateRow("ko-liquid.wav", "a r", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        [
+            {
+                "label": "phone_change",
+                "selected_time_ms": 0.0,
+                "time_ms": 0.0,
+                "score": 0.98,
+                "expected_phone": "r",
+                "expected_phone_index": 1,
+                "slot_index": 0,
+                "frame_index": 0,
+                "source": "filename_hsmm",
+            }
+        ],
+        rows,
+        expected_phones=["a", "r", "a"],
+        use_source_timing_prior=False,
+    )
+
+    assert anchors[0] is not None
+    assert anchors[0].anchor_abs_ms > 100.0
+    assert "leading_sonorant_noise_candidate_rejected" in anchors[0].warnings
+    assert "synthetic_anchor:no_candidate" in anchors[0].warnings
+
+
 def test_cvvc_template_backtrack_anchor_is_not_monotonic_repaired():
     from core.mfa_free_oto.workflow import _repair_anchor_monotonicity
 
@@ -1145,6 +6792,50 @@ def test_template_yoon_vc_alias_targets_first_consonant_of_cluster():
         (4, "cv_boundary"),
         (7, "cv_boundary"),
     ]
+
+
+def test_cvvc_template_timeline_slots_sort_cv_first_rows_by_phone_order():
+    lines = [
+        "_cvfirst.wav=- \u304b,0,0,0,0,0",
+        "_cvfirst.wav=\u304d,0,0,0,0,0",
+        "_cvfirst.wav=\u304f,0,0,0,0,0",
+        "_cvfirst.wav=\u3051,0,0,0,0,0",
+        "_cvfirst.wav=\u3053,0,0,0,0,0",
+        "_cvfirst.wav=\u304b,0,0,0,0,0",
+        "_cvfirst.wav=a k,0,0,0,0,0",
+        "_cvfirst.wav=i k,0,0,0,0,0",
+        "_cvfirst.wav=u k,0,0,0,0,0",
+        "_cvfirst.wav=e k,0,0,0,0,0",
+        "_cvfirst.wav=o k,0,0,0,0,0",
+        "_cvfirst.wav=n k,0,0,0,0,0",
+    ]
+    rows = []
+    for line in lines:
+        row = parse_template_oto_line(line)
+        assert row is not None
+        rows.append(row)
+    phones = ["k", "a", "k", "i", "k", "u", "k", "e", "k", "o", "k", "a", "n", "k", "a"]
+
+    row_slots = expected_slots_for_template_rows(rows, phones)
+    assert [slot.phone_index for slot in row_slots[:6]] == [1, 3, 5, 7, 9, 11]
+
+    timeline_slots = timeline_expected_slots_for_template_rows(rows, phones)
+    assert [(slot.phone_index, slot.event_label) for slot in timeline_slots] == [
+        (1, "cv_boundary"),
+        (2, "phone_change"),
+        (3, "cv_boundary"),
+        (4, "phone_change"),
+        (5, "cv_boundary"),
+        (6, "phone_change"),
+        (7, "cv_boundary"),
+        (8, "phone_change"),
+        (9, "cv_boundary"),
+        (10, "phone_change"),
+        (11, "cv_boundary"),
+        (13, "phone_change"),
+        (14, "cv_boundary"),
+    ]
+    assert [slot.slot_index for slot in timeline_slots] == list(range(len(timeline_slots)))
 
 
 def test_template_alias_consonant_equivalents_cover_bank_spellings():
@@ -1610,6 +7301,46 @@ def test_japanese_cvvc_following_yoon_repair_uses_repaired_vc_pre_abs():
     assert "cvvc_following_cv_block_cutoff_cap" in repaired_romaji.applied_rules
 
 
+def test_japanese_cvvc_following_yoon_repair_can_use_unrepaired_yoon_vc_anchor():
+    anchor_vc = AdaptedOtoRow(
+        wav="case.wav",
+        alias="u gy",
+        timing=OtoTiming(offset=1910.0, consonant=125.0, cutoff=-151.0, preutterance=85.0, overlap=50.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_cv = AdaptedOtoRow(
+        wav="case.wav",
+        alias="\u304e\u3047",
+        timing=OtoTiming(offset=2360.0, consonant=190.0, cutoff=-530.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    romaji_vcv = AdaptedOtoRow(
+        wav="case.wav",
+        alias="gy e",
+        timing=OtoTiming(offset=2360.0, consonant=190.0, cutoff=-530.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+
+    _previous, repaired_kana, repaired_romaji = repair_cvvc_row_sequence(
+        [anchor_vc, late_cv, romaji_vcv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_kana.timing.offset == pytest.approx(1995.0)
+    assert repaired_kana.timing.preutterance == pytest.approx(70.0)
+    assert repaired_kana.timing.overlap == pytest.approx(60.0)
+    assert repaired_kana.timing.consonant == pytest.approx(170.0)
+    assert repaired_romaji.timing == repaired_kana.timing
+    assert "cvvc_following_yoon_repair" in repaired_kana.applied_rules
+    assert "cvvc_following_yoon_repair" in repaired_romaji.applied_rules
+
+
 def test_japanese_cvvc_post_yoon_vc_repair_uses_previous_yoon_cv_offset():
     repaired_yoon = AdaptedOtoRow(
         wav="case.wav",
@@ -2010,6 +7741,60 @@ def test_japanese_vcv_hsmm_lead_uses_source_event_label():
     assert "hsmm_anchor_lead:620.0->320.0" in nucleus.warnings
 
 
+def test_japanese_vcv_local_refined_hsmm_anchor_does_not_apply_second_lead():
+    adapted = bootstrap_row(
+        "vcv.wav",
+        "a ti",
+        OtoAnchor(
+            anchor_abs_ms=500.0,
+            score=0.78,
+            refined_from_abs_ms=620.0,
+            local_refine_delta_ms=-120.0,
+            vowel_end_abs_ms=980.0,
+            source_event_label="vowel_nucleus",
+            warnings=(
+                "slot_decoded_event",
+                "event_source:filename_hsmm",
+                "local_refined_anchor:620.0->500.0",
+                "vowel_boundary_local_refine",
+            ),
+        ),
+        file_duration_ms=1400.0,
+        config=OtoAdapterConfig(language="japanese", format_type="vcv", alias_type="vcv"),
+    )
+
+    assert adapted.timing.offset == pytest.approx(350.0)
+    assert "hsmm_anchor_lead_skipped_after_local_refine" in adapted.warnings
+    assert not any(warning.startswith("hsmm_anchor_lead:") for warning in adapted.warnings)
+
+
+def test_japanese_cvvc_vv_local_refined_hsmm_anchor_does_not_apply_second_lead():
+    adapted = bootstrap_row(
+        "cvvc.wav",
+        "a i",
+        OtoAnchor(
+            anchor_abs_ms=710.0,
+            score=0.78,
+            refined_from_abs_ms=790.0,
+            local_refine_delta_ms=-80.0,
+            vowel_end_abs_ms=940.0,
+            source_event_label="vv_boundary",
+            warnings=(
+                "slot_decoded_event",
+                "event_source:filename_hsmm",
+                "local_refined_anchor:790.0->710.0",
+                "vowel_boundary_local_refine",
+            ),
+        ),
+        file_duration_ms=1400.0,
+        config=OtoAdapterConfig(language="japanese", format_type="cvvc", alias_type="vv"),
+    )
+
+    assert adapted.timing.offset + adapted.timing.preutterance == pytest.approx(710.0)
+    assert "hsmm_anchor_lead_skipped_after_local_refine" in adapted.warnings
+    assert not any(warning.startswith("hsmm_anchor_lead:") for warning in adapted.warnings)
+
+
 def test_vcv_cv_head_bootstrap_uses_initial_row_profile():
     adapted = bootstrap_row(
         "vcv.wav",
@@ -2128,7 +7913,150 @@ def test_japanese_cvvc_initial_vowel_cv_head_cutoff_uses_next_vc_offset():
     )
 
 
-def test_japanese_cvvc_initial_consonant_cv_head_uses_following_cv():
+def test_japanese_cvvc_initial_vowel_cv_head_repairs_late_nasal_target():
+    initial = AdaptedOtoRow(
+        wav="case.wav",
+        alias="- e",
+        timing=OtoTiming(offset=610.0, consonant=160.0, cutoff=-348.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=730.0,
+            score=0.72,
+            vowel_start_abs_ms=430.0,
+            expected_phone_index=1,
+            expected_phone="n",
+            source_event_label="phone_change",
+        ),
+        mode="bootstrap",
+    )
+    next_vc = AdaptedOtoRow(
+        wav="case.wav",
+        alias="e n",
+        timing=OtoTiming(offset=690.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=770.0,
+            score=0.72,
+            vowel_start_abs_ms=430.0,
+            expected_phone_index=1,
+            expected_phone="n",
+            source_event_label="phone_change",
+        ),
+        mode="bootstrap",
+    )
+
+    repaired, _next_vc = repair_cvvc_row_sequence(
+        [initial, next_vc],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired.timing.offset == pytest.approx(350.0)
+    assert repaired.timing.preutterance == pytest.approx(80.0)
+    assert repaired.timing.consonant == pytest.approx(220.0)
+    assert "cvvc_initial_vowel_cv_head_onset_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_initial_vowel_first_v_seeds_pure_vowel_jump_cascade():
+    initial = AdaptedOtoRow(
+        wav="case.wav",
+        alias="- i1",
+        timing=OtoTiming(offset=400.0, consonant=220.0, cutoff=-320.0, preutterance=80.0, overlap=40.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_first_v = AdaptedOtoRow(
+        wav="case.wav",
+        alias="i2",
+        timing=OtoTiming(offset=1190.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+    late_vc = AdaptedOtoRow(
+        wav="case.wav",
+        alias="i n",
+        timing=OtoTiming(offset=1240.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_n = AdaptedOtoRow(
+        wav="case.wav",
+        alias="n2",
+        timing=OtoTiming(offset=1267.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+
+    _initial, repaired_first_v, repaired_vc, repaired_n = repair_cvvc_row_sequence(
+        [initial, late_first_v, late_vc, late_n],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_first_v.timing.offset == pytest.approx(510.0)
+    assert repaired_first_v.timing.preutterance == pytest.approx(90.0)
+    assert repaired_first_v.timing.overlap == pytest.approx(45.0)
+    assert repaired_first_v.timing.consonant == pytest.approx(100.0)
+    assert repaired_vc.timing.offset == pytest.approx(760.0)
+    assert repaired_vc.timing.preutterance == pytest.approx(110.0)
+    assert repaired_n.timing.offset == pytest.approx(870.0)
+    assert "cvvc_initial_vowel_first_v_repair" in repaired_first_v.applied_rules
+    assert "cvvc_pure_vowel_jump_repair" in repaired_vc.applied_rules
+    assert "cvvc_pure_vowel_jump_v_repair" in repaired_n.applied_rules
+
+
+def test_japanese_cvvc_initial_vowel_first_v_keeps_close_row():
+    initial = AdaptedOtoRow(
+        wav="case.wav",
+        alias="- i1",
+        timing=OtoTiming(offset=400.0, consonant=220.0, cutoff=-320.0, preutterance=80.0, overlap=40.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    close_first_v = AdaptedOtoRow(
+        wav="case.wav",
+        alias="i2",
+        timing=OtoTiming(offset=500.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+    transition = AdaptedOtoRow(
+        wav="case.wav",
+        alias="i n",
+        timing=OtoTiming(offset=760.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    following_n = AdaptedOtoRow(
+        wav="case.wav",
+        alias="n2",
+        timing=OtoTiming(offset=870.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+
+    _initial, repaired_first_v, repaired_transition, repaired_n = repair_cvvc_row_sequence(
+        [initial, close_first_v, transition, following_n],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_first_v.timing == close_first_v.timing
+    assert repaired_transition.timing == transition.timing
+    assert repaired_n.timing == following_n.timing
+    assert "cvvc_initial_vowel_first_v_repair" not in repaired_first_v.applied_rules
+
+
+def test_japanese_cvvc_initial_consonant_cv_head_uses_following_cv_lead():
     initial = AdaptedOtoRow(
         wav="case.wav",
         alias="- z",
@@ -2167,7 +8095,7 @@ def test_japanese_cvvc_initial_consonant_cv_head_uses_following_cv():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired.timing.offset == pytest.approx(1242.0)
+    assert repaired.timing.offset == pytest.approx(882.0)
     assert repaired.timing.preutterance == pytest.approx(35.0)
     assert repaired.timing.overlap == pytest.approx(10.0)
     assert repaired.timing.consonant == pytest.approx(65.0)
@@ -2177,13 +8105,17 @@ def test_japanese_cvvc_initial_consonant_cv_head_uses_following_cv():
         warning.startswith("cvvc_initial_consonant_cv_head_following_cv_reference:")
         for warning in repaired.warnings
     )
+    assert any(
+        warning.startswith("cvvc_initial_consonant_cv_head_following_cv_lead:")
+        for warning in repaired.warnings
+    )
     assert not any(
         warning.startswith("cvvc_initial_consonant_cv_head_shift_capped:")
         for warning in repaired.warnings
     )
 
 
-def test_japanese_cvvc_initial_consonant_cv_head_still_caps_large_shift():
+def test_japanese_cvvc_initial_consonant_cv_head_keeps_lead_on_large_shift():
     initial = AdaptedOtoRow(
         wav="case.wav",
         alias="- z",
@@ -2214,12 +8146,9 @@ def test_japanese_cvvc_initial_consonant_cv_head_still_caps_large_shift():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired.timing.offset == pytest.approx(1350.0)
+    assert repaired.timing.offset == pytest.approx(1140.0)
     assert "cvvc_initial_consonant_cv_head_following_cv_repair" in repaired.applied_rules
-    assert any(
-        warning.startswith("cvvc_initial_consonant_cv_head_shift_capped:750.0->600.0")
-        for warning in repaired.warnings
-    )
+    assert not any(warning.startswith("cvvc_initial_consonant_cv_head_shift_capped:") for warning in repaired.warnings)
 
 
 def test_japanese_cvvc_initial_consonant_cv_head_uses_immediate_vowel_head():
@@ -2253,7 +8182,7 @@ def test_japanese_cvvc_initial_consonant_cv_head_uses_immediate_vowel_head():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired.timing.offset == pytest.approx(660.0)
+    assert repaired.timing.offset == pytest.approx(300.0)
     assert repaired.timing.preutterance == pytest.approx(35.0)
     assert repaired.timing.overlap == pytest.approx(10.0)
     assert repaired.timing.consonant == pytest.approx(65.0)
@@ -2265,7 +8194,35 @@ def test_japanese_cvvc_initial_consonant_cv_head_uses_immediate_vowel_head():
     )
 
 
-def test_japanese_cvvc_initial_consonant_cv_head_keeps_small_following_cv_gap():
+def test_japanese_cvvc_initial_consonant_cv_head_keeps_plausible_numeric_suffix_offset():
+    initial = AdaptedOtoRow(
+        wav="case.wav",
+        alias="- h1",
+        timing=OtoTiming(offset=360.0, consonant=160.0, cutoff=-168.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    following_cv = AdaptedOtoRow(
+        wav="case.wav",
+        alias="\u3075\u3041",
+        timing=OtoTiming(offset=980.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+
+    repaired, _following_cv = repair_cvvc_row_sequence(
+        [initial, following_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired.timing == initial.timing
+    assert "cvvc_initial_consonant_cv_head_following_cv_repair" not in repaired.applied_rules
+
+
+def test_japanese_cvvc_initial_consonant_cv_head_keeps_small_following_cv_gap(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
     initial = AdaptedOtoRow(
         wav="case.wav",
         alias="- sh",
@@ -2296,8 +8253,44 @@ def test_japanese_cvvc_initial_consonant_cv_head_keeps_small_following_cv_gap():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired.timing == initial.timing
+    assert repaired.timing.offset == pytest.approx(initial.timing.offset)
+    assert repaired.timing.consonant == pytest.approx(174.84)
+    assert repaired.timing.preutterance == pytest.approx(108.0)
+    assert repaired.timing.overlap == pytest.approx(74.52)
     assert "cvvc_initial_consonant_cv_head_following_cv_repair" not in repaired.applied_rules
+    assert "cvvc_cv_head_role_profile_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_initial_consonant_cv_head_profile_repairs_anchor_row_without_moving_offset():
+    row = AdaptedOtoRow(
+        wav="case.wav",
+        alias="- m",
+        timing=OtoTiming(offset=932.0, consonant=160.0, cutoff=-168.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=1052.0,
+            score=0.8,
+            role="cv_head",
+            source_event_label="phone_change",
+        ),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired.timing.offset == pytest.approx(932.0)
+    assert repaired.timing.preutterance == pytest.approx(35.0)
+    assert repaired.timing.overlap == pytest.approx(10.0)
+    assert repaired.timing.consonant == pytest.approx(65.0)
+    assert repaired.timing.cutoff == pytest.approx(-95.0)
+    assert "cvvc_initial_consonant_cv_head_profile_repair" in repaired.applied_rules
+    assert any(
+        warning.startswith("cvvc_initial_consonant_cv_head_profile_repaired:")
+        for warning in repaired.warnings
+    )
 
 
 def test_japanese_cvvc_pure_vowel_sequence_uses_terminal_reference_grid():
@@ -2361,6 +8354,376 @@ def test_japanese_cvvc_pure_vowel_sequence_uses_terminal_reference_grid():
         assert "cvvc_pure_vowel_sequence_row_repair" in repaired.applied_rules
     assert "cvvc_pure_vowel_sequence_head_repair" in repaired_head.applied_rules
     assert "cvvc_pure_vowel_sequence_head_cutoff_repair" in repaired_head.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_sequence_skips_grid_when_it_crosses_hsmm_anchors():
+    initial = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="- a",
+        timing=OtoTiming(offset=160.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=280.0, score=0.55, role="cv_head"),
+        mode="bootstrap",
+    )
+    vv_a = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a a",
+        timing=OtoTiming(offset=610.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=770.0, score=0.55, role="vv"),
+        mode="bootstrap",
+    )
+    vv_i = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a i",
+        timing=OtoTiming(offset=1180.0, consonant=160.0, cutoff=-1200.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1340.0, score=0.55, role="vv"),
+        mode="bootstrap",
+    )
+    vv_a2 = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="i a",
+        timing=OtoTiming(offset=1650.0, consonant=160.0, cutoff=-900.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1810.0, score=0.55, role="vv"),
+        mode="bootstrap",
+    )
+    terminal = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a -",
+        timing=OtoTiming(offset=3980.0, consonant=320.0, cutoff=-480.0, preutterance=200.0, overlap=100.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=3060.0, score=0.55, role="vcv"),
+        mode="bootstrap",
+        applied_rules=("japanese_cvvc_terminal_silence_vowel_end_anchor",),
+    )
+
+    repaired_head, repaired_a, repaired_i, repaired_a2, _terminal = repair_cvvc_row_sequence(
+        [initial, vv_a, vv_i, vv_a2, terminal],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_head.timing.offset == pytest.approx(160.0)
+    assert repaired_a.timing.offset == pytest.approx(610.0)
+    assert repaired_i.timing.offset == pytest.approx(1180.0)
+    assert repaired_a2.timing.offset == pytest.approx(1650.0)
+    for repaired in (repaired_head, repaired_a, repaired_i, repaired_a2):
+        assert "cvvc_pure_vowel_sequence_row_repair" not in repaired.applied_rules
+        assert "cvvc_pure_vowel_sequence_head_repair" not in repaired.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_sequence_overrides_low_confidence_anchors():
+    initial = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="- a",
+        timing=OtoTiming(offset=160.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=280.0,
+            score=0.55,
+            role="cv_head",
+            local_refine_margin=0.01,
+            warnings=("local_refine_low_margin",),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    vv_a = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a a",
+        timing=OtoTiming(offset=610.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=770.0,
+            score=0.55,
+            role="vv",
+            local_refine_margin=0.01,
+            warnings=("local_refine_low_margin",),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    vv_i = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a i",
+        timing=OtoTiming(offset=1180.0, consonant=160.0, cutoff=-1200.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=1340.0,
+            score=0.55,
+            role="vv",
+            boundary_confidence=0.25,
+            warnings=("low_boundary_confidence:0.250",),
+        ),
+        mode="bootstrap",
+        warnings=("low_boundary_confidence:0.250",),
+    )
+    vv_a2 = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="i a",
+        timing=OtoTiming(offset=1650.0, consonant=160.0, cutoff=-900.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=1810.0,
+            score=0.55,
+            role="vv",
+            warnings=("synthetic_anchor:no_candidate",),
+        ),
+        mode="bootstrap",
+        warnings=("synthetic_anchor:no_candidate",),
+    )
+    terminal = AdaptedOtoRow(
+        wav="_a-a-i-a.wav",
+        alias="a -",
+        timing=OtoTiming(offset=3980.0, consonant=320.0, cutoff=-480.0, preutterance=200.0, overlap=100.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=3060.0, score=0.55, role="vcv"),
+        mode="bootstrap",
+        applied_rules=("japanese_cvvc_terminal_silence_vowel_end_anchor",),
+    )
+
+    repaired_head, repaired_a, repaired_i, repaired_a2, _terminal = repair_cvvc_row_sequence(
+        [initial, vv_a, vv_i, vv_a2, terminal],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_head.timing.offset == pytest.approx(2430.0)
+    assert repaired_a.timing.offset == pytest.approx(2550.0)
+    assert repaired_i.timing.offset == pytest.approx(3050.0)
+    assert repaired_a2.timing.offset == pytest.approx(3550.0)
+    for repaired in (repaired_a, repaired_i, repaired_a2):
+        assert repaired.timing.preutterance == pytest.approx(300.0)
+        assert repaired.timing.overlap == pytest.approx(100.0)
+        assert "cvvc_pure_vowel_sequence_row_repair" in repaired.applied_rules
+    assert "cvvc_pure_vowel_sequence_head_repair" in repaired_head.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_sequence_uses_filename_hsmm_grid_when_terminal_grid_is_late():
+    initial = AdaptedOtoRow(
+        wav="_o-u-n-a-n-n-u.wav",
+        alias="- o",
+        timing=OtoTiming(offset=160.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=280.0,
+            score=0.35,
+            role="cv_head",
+            source_event_label="vv_boundary",
+            warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    vv_u = AdaptedOtoRow(
+        wav="_o-u-n-a-n-n-u.wav",
+        alias="o u",
+        timing=OtoTiming(offset=590.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=900.0,
+            score=0.35,
+            role="vv",
+            source_event_label="vv_boundary",
+            warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    u_n = AdaptedOtoRow(
+        wav="_o-u-n-a-n-n-u.wav",
+        alias="u n",
+        timing=OtoTiming(offset=820.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=1120.0,
+            score=0.35,
+            role="vv",
+            source_event_label="vv_boundary",
+            warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    n_a = AdaptedOtoRow(
+        wav="_o-u-n-a-n-n-u.wav",
+        alias="n a",
+        timing=OtoTiming(offset=1260.0, consonant=160.0, cutoff=-900.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=1560.0,
+            score=0.35,
+            role="vcv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+    terminal = AdaptedOtoRow(
+        wav="_o-u-n-a-n-n-u.wav",
+        alias="a -",
+        timing=OtoTiming(offset=3950.0, consonant=320.0, cutoff=-480.0, preutterance=200.0, overlap=100.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2612.0, score=0.5, role="vcv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+        applied_rules=("japanese_cvvc_terminal_silence_vowel_end_anchor",),
+    )
+
+    repaired_head, repaired_u, repaired_n, repaired_a, _terminal = repair_cvvc_row_sequence(
+        [initial, vv_u, u_n, n_a, terminal],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_head.timing.offset == pytest.approx(160.0)
+    assert repaired_head.timing.cutoff == pytest.approx(-360.0)
+    assert repaired_u.timing.offset == pytest.approx(600.0)
+    assert repaired_n.timing.offset == pytest.approx(820.0)
+    assert repaired_a.timing.offset == pytest.approx(1260.0)
+    for repaired in (repaired_u, repaired_n, repaired_a):
+        assert repaired.timing.preutterance == pytest.approx(300.0)
+        assert repaired.timing.overlap == pytest.approx(100.0)
+        assert repaired.timing.consonant == pytest.approx(420.0)
+        assert repaired.timing.cutoff == pytest.approx(-600.0)
+        assert "cvvc_pure_vowel_sequence_row_repair" in repaired.applied_rules
+        assert any("filename_hsmm" in warning for warning in repaired.warnings)
+    assert "cvvc_pure_vowel_sequence_head_cutoff_repair" in repaired_head.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_sequence_terminal_cadence_overrides_early_filename_hsmm():
+    wav = "_a-a-i-a-u-a-e.wav"
+    rows = [
+        AdaptedOtoRow(
+            wav=wav,
+            alias="- \u3042",
+            timing=OtoTiming(offset=140.0, consonant=160.0, cutoff=-360.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=260.0,
+                score=0.35,
+                role="cv_head",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="a \u3042",
+            timing=OtoTiming(offset=590.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=890.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="a \u3044",
+            timing=OtoTiming(offset=1100.0, consonant=160.0, cutoff=-3500.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=1400.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="i \u3042",
+            timing=OtoTiming(offset=1160.0, consonant=160.0, cutoff=-2900.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=1460.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="a \u3046",
+            timing=OtoTiming(offset=1680.0, consonant=160.0, cutoff=-2500.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=1980.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="u \u3042",
+            timing=OtoTiming(offset=2150.0, consonant=160.0, cutoff=-2100.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=2450.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="a \u3048",
+            timing=OtoTiming(offset=2440.0, consonant=160.0, cutoff=-1800.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=2740.0,
+                score=0.35,
+                role="vv",
+                source_event_label="vv_boundary",
+                warnings=("event_source:filename_hsmm", "local_refine_low_margin"),
+            ),
+            mode="bootstrap",
+            warnings=("local_refine_low_margin",),
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="e -",
+            timing=OtoTiming(offset=4310.0, consonant=210.0, cutoff=-1500.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=OtoAnchor(anchor_abs_ms=4420.0, score=0.55, role="vcv", source_event_label="vowel_nucleus"),
+            mode="bootstrap",
+            applied_rules=("japanese_cvvc_terminal_silence_vowel_end_anchor",),
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired[0].timing.offset == pytest.approx(140.0)
+    expected_offsets = [1110.0, 1610.0, 2110.0, 2610.0, 3110.0, 3610.0]
+    for row, expected in zip(repaired[1:-1], expected_offsets):
+        assert row.timing.offset == pytest.approx(expected)
+        assert row.timing.preutterance == pytest.approx(300.0)
+        assert row.timing.overlap == pytest.approx(100.0)
+        assert row.timing.consonant == pytest.approx(420.0)
+        assert row.timing.cutoff == pytest.approx(-600.0)
+        assert "cvvc_pure_vowel_sequence_row_repair" in row.applied_rules
+        assert "cvvc_pure_vowel_sequence_terminal_reference:terminal_cadence" in row.warnings
 
 
 def test_japanese_cvvc_pure_vowel_sequence_keeps_existing_head_cutoff_when_not_short():
@@ -2463,7 +8826,8 @@ def test_japanese_cvvc_pure_vowel_sequence_includes_moraic_n_transition_rows():
         assert "cvvc_pure_vowel_sequence_row_repair" in repaired.applied_rules
 
 
-def test_japanese_cvvc_pure_vowel_sequence_requires_terminal_anchor_rule():
+def test_japanese_cvvc_pure_vowel_sequence_requires_terminal_anchor_rule(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
     initial = AdaptedOtoRow(
         wav="_a-a-i-a.wav",
         alias="- a",
@@ -2502,7 +8866,11 @@ def test_japanese_cvvc_pure_vowel_sequence_requires_terminal_anchor_rule():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired_head.timing == initial.timing
+    assert repaired_head.timing.offset == pytest.approx(initial.timing.offset)
+    assert repaired_head.timing.consonant == pytest.approx(174.84)
+    assert repaired_head.timing.preutterance == pytest.approx(108.0)
+    assert repaired_head.timing.overlap == pytest.approx(74.52)
+    assert "cvvc_cv_head_role_profile_repair" in repaired_head.applied_rules
     assert repaired_a.timing == vv_a.timing
     assert repaired_i.timing == vv_i.timing
 
@@ -2565,12 +8933,12 @@ def test_japanese_cvvc_pure_vowel_onset_sequence_uses_reliable_vowel_start_grid(
 
     assert repaired_head.timing.offset == pytest.approx(1040.0)
     assert repaired_head.timing.cutoff == pytest.approx(-840.0)
-    assert repaired_aa.timing.offset == pytest.approx(1410.0)
-    assert repaired_a.timing.offset == pytest.approx(1660.0)
-    assert repaired_ai.timing.offset == pytest.approx(1910.0)
+    assert repaired_aa.timing.offset == pytest.approx(1290.0)
+    assert repaired_a.timing.offset == pytest.approx(1540.0)
+    assert repaired_ai.timing.offset == pytest.approx(1790.0)
     assert repaired_r.timing.offset == pytest.approx(4800.0)
-    assert repaired_aa.timing.preutterance == pytest.approx(250.0)
-    assert repaired_aa.timing.overlap == pytest.approx(83.0)
+    assert repaired_aa.timing.preutterance == pytest.approx(300.0)
+    assert repaired_aa.timing.overlap == pytest.approx(100.0)
     assert repaired_a.timing.preutterance == pytest.approx(0.0)
     assert repaired_a.timing.overlap == pytest.approx(0.0)
     assert "cvvc_pure_vowel_onset_head_repair" in repaired_head.applied_rules
@@ -2578,6 +8946,161 @@ def test_japanese_cvvc_pure_vowel_onset_sequence_uses_reliable_vowel_start_grid(
     assert "cvvc_pure_vowel_onset_transition_repair" in repaired_aa.applied_rules
     assert "cvvc_pure_vowel_onset_v_repair" in repaired_a.applied_rules
     assert "cvvc_pure_vowel_onset_trailing_r_repair" in repaired_r.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_onset_sequence_shortens_pitch_suffix_terminal_tail():
+    reliable_anchor = OtoAnchor(
+        anchor_abs_ms=1400.0,
+        score=0.4,
+        role="vv",
+        vowel_start_abs_ms=1160.0,
+        vowel_end_abs_ms=4900.0,
+    )
+    initial = AdaptedOtoRow(
+        wav="_a-a-i.wav",
+        alias="- a_S",
+        timing=OtoTiming(offset=640.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    vv_a = AdaptedOtoRow(
+        wav="_a-a-i.wav",
+        alias="a a_S",
+        timing=OtoTiming(offset=600.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=reliable_anchor,
+        mode="bootstrap",
+    )
+    vv_i = AdaptedOtoRow(
+        wav="_a-a-i.wav",
+        alias="a i_S",
+        timing=OtoTiming(offset=1240.0, consonant=160.0, cutoff=-1200.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=reliable_anchor,
+        mode="bootstrap",
+    )
+    terminal = AdaptedOtoRow(
+        wav="_a-a-i.wav",
+        alias="i -_S",
+        timing=OtoTiming(offset=3045.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=reliable_anchor,
+        mode="bootstrap",
+    )
+
+    repaired_head, repaired_aa, repaired_ai, repaired_terminal = repair_cvvc_row_sequence(
+        [initial, vv_a, vv_i, terminal],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6000.0,
+    )
+
+    assert repaired_head.timing.offset == pytest.approx(1040.0)
+    assert repaired_aa.timing.offset == pytest.approx(1290.0)
+    assert repaired_ai.timing.offset == pytest.approx(1790.0)
+    assert repaired_terminal.timing.offset == pytest.approx(2135.0)
+    assert repaired_terminal.timing.consonant == pytest.approx(260.0)
+    assert repaired_terminal.timing.cutoff == pytest.approx(-430.0)
+    assert repaired_terminal.timing.preutterance == pytest.approx(180.0)
+    assert repaired_terminal.timing.overlap == pytest.approx(100.0)
+    assert "cvvc_pure_vowel_onset_pitch_terminal_repair" in repaired_terminal.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_onset_u_head_delays_first_transition_only():
+    reliable_anchor = OtoAnchor(
+        anchor_abs_ms=1400.0,
+        score=0.4,
+        role="vv",
+        vowel_start_abs_ms=990.0,
+        vowel_end_abs_ms=4900.0,
+    )
+    rows = [
+        AdaptedOtoRow(
+            wav="_u-u-e-u.wav",
+            alias="- u_S",
+            timing=OtoTiming(offset=640.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_u-u-e-u.wav",
+            alias="u u_S",
+            timing=OtoTiming(offset=600.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_u-u-e-u.wav",
+            alias="u e_S",
+            timing=OtoTiming(offset=1240.0, consonant=160.0, cutoff=-1200.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_u-u-e-u.wav",
+            alias="e u_S",
+            timing=OtoTiming(offset=1740.0, consonant=160.0, cutoff=-1200.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_u-u-e-u.wav",
+            alias="u -_S",
+            timing=OtoTiming(offset=3045.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6000.0,
+    )
+
+    assert [row.timing.offset for row in repaired[1:4]] == pytest.approx([1260.0, 1620.0, 2120.0])
+    assert "cvvc_pure_vowel_onset_head_phone_first_transition_repair" in repaired[1].applied_rules
+    assert "cvvc_pure_vowel_onset_transition_repair" in repaired[2].applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_onset_moraic_n_alternation_uses_compact_cadence():
+    reliable_anchor = OtoAnchor(
+        anchor_abs_ms=1400.0,
+        score=0.4,
+        role="vv",
+        vowel_start_abs_ms=1040.0,
+        vowel_end_abs_ms=4900.0,
+    )
+    aliases = ["- n_S", "n n_S", "n a_S", "a n_S", "n i_S", "i n_S", "n u_S", "u -_S"]
+    rows = [
+        AdaptedOtoRow(
+            wav="_n-n-a-n-i-n-u.wav",
+            alias=alias,
+            timing=OtoTiming(offset=600.0 + (index * 120.0), consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=reliable_anchor,
+            mode="bootstrap",
+        )
+        for index, alias in enumerate(aliases)
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6000.0,
+    )
+
+    assert [row.timing.offset for row in repaired[1:7]] == pytest.approx(
+        [1170.0, 1550.0, 2170.0, 2550.0, 3290.0, 3670.0]
+    )
+    assert repaired[-1].timing.offset == pytest.approx(4015.0)
+    for row in repaired[1:7]:
+        assert "cvvc_pure_vowel_onset_n_alternation_repair" in row.applied_rules
 
 
 def test_japanese_cvvc_terminal_release_r_uses_late_file_tail_without_lowercase_r():
@@ -2609,8 +9132,8 @@ def test_japanese_cvvc_terminal_release_r_uses_late_file_tail_without_lowercase_
     assert repaired_release_r.timing.offset == pytest.approx(4754.467)
     assert repaired_release_r.timing.consonant == pytest.approx(420.0)
     assert repaired_release_r.timing.cutoff == pytest.approx(-600.0)
-    assert repaired_release_r.timing.preutterance == pytest.approx(250.0)
-    assert repaired_release_r.timing.overlap == pytest.approx(83.0)
+    assert repaired_release_r.timing.preutterance == pytest.approx(300.0)
+    assert repaired_release_r.timing.overlap == pytest.approx(100.0)
     assert "cvvc_terminal_release_r_tail_repair" in repaired_release_r.applied_rules
 
 
@@ -2680,11 +9203,11 @@ def test_japanese_cvvc_pure_vowel_onset_sequence_repairs_headless_transition_blo
         file_duration_ms=6000.0,
     )
 
-    assert repaired_first.timing.offset == pytest.approx(1980.0)
-    assert repaired_second.timing.offset == pytest.approx(2480.0)
-    assert repaired_third.timing.offset == pytest.approx(2980.0)
-    assert repaired_first.timing.preutterance == pytest.approx(250.0)
-    assert repaired_first.timing.overlap == pytest.approx(83.0)
+    assert repaired_first.timing.offset == pytest.approx(1860.0)
+    assert repaired_second.timing.offset == pytest.approx(2360.0)
+    assert repaired_third.timing.offset == pytest.approx(2860.0)
+    assert repaired_first.timing.preutterance == pytest.approx(300.0)
+    assert repaired_first.timing.overlap == pytest.approx(100.0)
     assert "cvvc_pure_vowel_onset_transition_repair" in repaired_first.applied_rules
 
 
@@ -2736,6 +9259,46 @@ def test_japanese_cvvc_headless_vc_onset_sequence_repairs_early_consonant_transi
     assert repaired_first.timing.overlap == pytest.approx(83.0)
     assert "cvvc_headless_vc_onset_repair" in repaired_first.applied_rules
     assert "cvvc_pure_vowel_onset_transition_repair" not in repaired_first.applied_rules
+
+
+def test_japanese_cvvc_headless_vc_onset_sequence_skips_short_block_when_grid_passes_anchors():
+    def anchor(anchor_abs_ms: float, next_vowel_abs_ms: float) -> OtoAnchor:
+        return OtoAnchor(
+            anchor_abs_ms=anchor_abs_ms,
+            score=0.6,
+            role="vc",
+            vowel_start_abs_ms=anchor_abs_ms,
+            vowel_end_abs_ms=anchor_abs_ms + 220.0,
+            next_vowel_abs_ms=next_vowel_abs_ms,
+        )
+
+    first = AdaptedOtoRow(
+        wav="_ho-ha-n-ha.wav",
+        alias="o h",
+        timing=OtoTiming(offset=540.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=anchor(910.0, 1400.0),
+        mode="bootstrap",
+    )
+    second = AdaptedOtoRow(
+        wav="_ho-ha-n-ha.wav",
+        alias="n h",
+        timing=OtoTiming(offset=2210.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=anchor(2340.0, 2580.0),
+        mode="bootstrap",
+    )
+
+    repaired_first, repaired_second = repair_cvvc_row_sequence(
+        [first, second],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=4200.0,
+    )
+
+    assert repaired_first.timing == first.timing
+    assert repaired_second.timing == second.timing
+    assert "cvvc_headless_vc_onset_repair" not in repaired_first.applied_rules
+    assert "cvvc_headless_vc_onset_repair" not in repaired_second.applied_rules
 
 
 def test_japanese_cvvc_headless_vc_onset_sequence_preserves_special_breath_aliases():
@@ -2850,6 +9413,1489 @@ def test_japanese_cvvc_headless_vc_onset_sequence_prefers_first_following_vowel_
     assert repaired_second.timing.offset == pytest.approx(2336.5)
     assert repaired_third.timing.offset == pytest.approx(3336.5)
     assert any("cvvc_headless_vc_onset_reference:1086.5" in item for item in repaired_first.warnings)
+
+
+def test_japanese_cvvc_cv_role_profile_repair_runs_by_default(monkeypatch):
+    monkeypatch.delenv("UTOA_ENABLE_JA_CVVC_REFERENCE_REPAIRS", raising=False)
+    row = AdaptedOtoRow(
+        wav="_ka-ki-ku.wav",
+        alias="ku",
+        timing=OtoTiming(offset=1780.0, consonant=190.0, cutoff=-480.0, preutterance=150.0, overlap=115.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1980.0, score=0.6, role="cv_boundary", source_event_label="cv_boundary"),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(1860.0)
+    assert repaired.timing.consonant == pytest.approx(150.0)
+    assert repaired.timing.cutoff == pytest.approx(-360.0)
+    assert repaired.timing.preutterance == pytest.approx(70.0)
+    assert repaired.timing.overlap == pytest.approx(25.0)
+    assert "cvvc_cv_role_profile_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_cv_role_profile_calibrates_profile_preserving_anchor(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
+    row = AdaptedOtoRow(
+        wav="_ka-ki-ku.wav",
+        alias="ku",
+        timing=OtoTiming(offset=1780.0, consonant=190.0, cutoff=-480.0, preutterance=150.0, overlap=115.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1980.0, score=0.6, role="cv_boundary", source_event_label="cv_boundary"),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(1860.0)
+    assert repaired.timing.consonant == pytest.approx(150.0)
+    assert repaired.timing.cutoff == pytest.approx(-360.0)
+    assert repaired.timing.preutterance == pytest.approx(70.0)
+    assert repaired.timing.overlap == pytest.approx(25.0)
+    assert "cvvc_cv_role_profile_repair" in repaired.applied_rules
+    assert any(
+        "cvvc_cv_role_profile_repaired:offset=1780.0->1860.0,consonant=190.0->150.0,"
+        "cutoff=-480.0->-360.0,pre=150.0->70.0,overlap=115.0->25.0" in item
+        for item in repaired.warnings
+    )
+
+
+def test_japanese_cvvc_cv_role_profile_keeps_existing_narrow_cv_profile():
+    row = AdaptedOtoRow(
+        wav="_rya-ryo.wav",
+        alias="ryo",
+        timing=OtoTiming(offset=1380.0, consonant=150.0, cutoff=-1990.0, preutterance=50.0, overlap=40.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=3120.0, score=0.6, role="cv"),
+        mode="bootstrap",
+        applied_rules=("cvvc_following_yoon_repair",),
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=4200.0,
+    )
+
+    assert repaired.timing == row.timing
+    assert "cvvc_cv_role_profile_repair" not in repaired.applied_rules
+
+
+def test_japanese_cvvc_cv_head_role_profile_calibrates_default_profile_without_moving_offset(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
+    row = AdaptedOtoRow(
+        wav="_fi_fu_fe_fo.wav",
+        alias="- fe",
+        timing=OtoTiming(offset=1400.0, consonant=160.0, cutoff=-190.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1520.0, score=0.6, role="cv_head"),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3400.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(1400.0)
+    assert repaired.timing.consonant == pytest.approx(174.84)
+    assert repaired.timing.cutoff == pytest.approx(-240.0)
+    assert repaired.timing.preutterance == pytest.approx(108.0)
+    assert repaired.timing.overlap == pytest.approx(74.52)
+    assert "cvvc_cv_head_role_profile_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_cv_head_role_profile_keeps_existing_narrow_head_profile():
+    row = AdaptedOtoRow(
+        wav="_fi_fu_fe_fo.wav",
+        alias="- fo",
+        timing=OtoTiming(offset=3060.0, consonant=174.84, cutoff=-274.36, preutterance=108.0, overlap=74.52),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=3168.0, score=0.6, role="cv_head"),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3600.0,
+    )
+
+    assert repaired.timing == row.timing
+    assert "cvvc_cv_head_role_profile_repair" not in repaired.applied_rules
+
+
+def test_japanese_cvvc_headed_cv_vowel_nucleus_gets_extra_lead_without_profile_change():
+    head = AdaptedOtoRow(
+        wav="_gya-gi-gyu.wav",
+        alias="- gya",
+        timing=OtoTiming(offset=460.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_cv = AdaptedOtoRow(
+        wav="_gya-gi-gyu.wav",
+        alias="gye",
+        timing=OtoTiming(offset=2360.0, consonant=190.0, cutoff=-530.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2560.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    _head, repaired = repair_cvvc_row_sequence(
+        [head, late_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(1880.0)
+    assert repaired.timing.consonant == pytest.approx(late_cv.timing.consonant)
+    assert repaired.timing.cutoff == pytest.approx(late_cv.timing.cutoff)
+    assert repaired.timing.preutterance == pytest.approx(late_cv.timing.preutterance)
+    assert repaired.timing.overlap == pytest.approx(late_cv.timing.overlap)
+    assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_headed_cv_vowel_nucleus_stays_after_previous_cv_pre():
+    head = AdaptedOtoRow(
+        wav="_ka-ki-ku-ke.wav",
+        alias="- ka",
+        timing=OtoTiming(offset=420.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    previous_cv = AdaptedOtoRow(
+        wav="_ka-ki-ku-ke.wav",
+        alias="ku",
+        timing=OtoTiming(offset=1780.0, consonant=190.0, cutoff=-425.0, preutterance=150.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1980.0, score=0.5, role="cv", source_event_label="cv_boundary"),
+        mode="bootstrap",
+    )
+    late_vc = AdaptedOtoRow(
+        wav="_ka-ki-ku-ke.wav",
+        alias="u k",
+        timing=OtoTiming(offset=2300.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2370.0, score=0.5, role="vc", source_event_label="phone_change"),
+        mode="bootstrap",
+    )
+    next_cv = AdaptedOtoRow(
+        wav="_ka-ki-ku-ke.wav",
+        alias="ke",
+        timing=OtoTiming(offset=2360.0, consonant=190.0, cutoff=-565.0, preutterance=150.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2560.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    _head, kept_previous, repaired_vc, repaired_cv = repair_cvvc_row_sequence(
+        [head, previous_cv, late_vc, next_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    previous_pre_abs = kept_previous.timing.offset + kept_previous.timing.preutterance
+    assert repaired_cv.timing.offset == pytest.approx(previous_pre_abs + 65.0)
+    assert repaired_vc.timing.offset == pytest.approx(repaired_cv.timing.offset - 160.0)
+    assert repaired_vc.timing.offset + repaired_vc.timing.preutterance >= previous_pre_abs + 40.0
+    assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired_cv.applied_rules
+    assert "cvvc_headed_cv_previous_vowel_order_guard_repair" in repaired_cv.applied_rules
+    assert "cvvc_headed_regular_vc_from_next_cv_repair" in repaired_vc.applied_rules
+
+
+def test_japanese_cvvc_headed_cv_vowel_nucleus_order_guard_keeps_cv_after_previous_vc_pre():
+    head = AdaptedOtoRow(
+        wav="_na-ni-nu.wav",
+        alias="- na",
+        timing=OtoTiming(offset=400.0, consonant=174.84, cutoff=-240.0, preutterance=108.0, overlap=74.52),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    previous_vc = AdaptedOtoRow(
+        wav="_na-ni-nu.wav",
+        alias="i q",
+        timing=OtoTiming(offset=1405.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1530.0, score=0.5, role="vc", source_event_label="phone_change"),
+        mode="bootstrap",
+    )
+    late_cv = AdaptedOtoRow(
+        wav="_na-ni-nu.wav",
+        alias="nu",
+        timing=OtoTiming(offset=1820.0, consonant=190.0, cutoff=-565.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2020.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    _head, _previous_vc, repaired = repair_cvvc_row_sequence(
+        [head, previous_vc, late_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(1820.0)
+    assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired.applied_rules
+    assert "cvvc_headed_cv_vowel_nucleus_order_guard_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_headed_cv_vowel_nucleus_keeps_unheaded_rows():
+    row = AdaptedOtoRow(
+        wav="gya-gi-gyu.wav",
+        alias="gye",
+        timing=OtoTiming(offset=2360.0, consonant=190.0, cutoff=-530.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2560.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    (kept,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert kept.timing == row.timing
+    assert "cvvc_headed_cv_vowel_nucleus_repair" not in kept.applied_rules
+
+
+def test_japanese_cvvc_headed_regular_vc_backfills_from_next_cv():
+    head = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="- ma",
+        timing=OtoTiming(offset=380.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_vc = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="i m",
+        timing=OtoTiming(offset=1815.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1940.0, score=0.5, role="vc", source_event_label="phone_change"),
+        mode="bootstrap",
+    )
+    next_cv = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="mu",
+        timing=OtoTiming(offset=1690.0, consonant=190.0, cutoff=-425.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2130.0, score=0.5, role="cv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+
+    _head, repaired_vc, _next_cv = repair_cvvc_row_sequence(
+        [head, late_vc, next_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired_vc.timing.offset == pytest.approx(1530.0)
+    assert repaired_vc.timing.consonant == pytest.approx(185.0)
+    assert repaired_vc.timing.cutoff == pytest.approx(-205.0)
+    assert repaired_vc.timing.preutterance == pytest.approx(135.0)
+    assert repaired_vc.timing.overlap == pytest.approx(50.0)
+    assert "cvvc_headed_regular_vc_from_next_cv_repair" in repaired_vc.applied_rules
+
+
+def test_japanese_cvvc_headed_regular_vc_keeps_safe_pre_before_next_cv():
+    head = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="- ma",
+        timing=OtoTiming(offset=380.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    safe_vc = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="i m",
+        timing=OtoTiming(offset=1400.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1525.0, score=0.5, role="vc", source_event_label="phone_change"),
+        mode="bootstrap",
+    )
+    next_cv = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="mu",
+        timing=OtoTiming(offset=1600.0, consonant=190.0, cutoff=-425.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2040.0, score=0.5, role="cv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+
+    _head, kept_vc, _next_cv = repair_cvvc_row_sequence(
+        [head, safe_vc, next_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert kept_vc.timing == safe_vc.timing
+    assert "cvvc_headed_regular_vc_from_next_cv_repair" not in kept_vc.applied_rules
+
+
+def test_japanese_cvvc_obstruent_grid_repairs_late_cascade():
+    rows = [
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="- s",
+            timing=OtoTiming(offset=670.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="si",
+            timing=OtoTiming(offset=290.0, consonant=190.0, cutoff=-430.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="i s",
+            timing=OtoTiming(offset=540.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="sa",
+            timing=OtoTiming(offset=700.0, consonant=190.0, cutoff=-370.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="a s",
+            timing=OtoTiming(offset=1235.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=80.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="su",
+            timing=OtoTiming(offset=1380.0, consonant=190.0, cutoff=-370.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="u s",
+            timing=OtoTiming(offset=1520.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_si-sa-su-se.wav",
+            alias="se",
+            timing=OtoTiming(offset=1680.0, consonant=190.0, cutoff=-410.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _cv1, kept_vc, _cv2, repaired_vc, repaired_cv, repaired_vc2, repaired_cv2 = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert kept_vc.timing.offset == pytest.approx(540.0)
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in kept_vc.applied_rules
+    assert repaired_vc.timing.offset == pytest.approx(890.0)
+    assert repaired_cv.timing.offset == pytest.approx(1050.0)
+    assert repaired_vc2.timing.offset == pytest.approx(1270.0)
+    assert repaired_cv2.timing.offset == pytest.approx(1430.0)
+    assert "cvvc_obstruent_grid_late_cascade_repair" in repaired_vc.applied_rules
+    assert "cvvc_obstruent_grid_late_cascade_repair" in repaired_cv.applied_rules
+    assert any("cvvc_obstruent_grid_first_step:410.0" in warning for warning in repaired_vc.warnings)
+
+
+def test_japanese_cvvc_obstruent_grid_skips_sonorant_and_moraic_n_contexts():
+    rows = [
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="- w",
+            timing=OtoTiming(offset=640.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="wa",
+            timing=OtoTiming(offset=290.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="a w",
+            timing=OtoTiming(offset=1235.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="wi",
+            timing=OtoTiming(offset=700.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="n s",
+            timing=OtoTiming(offset=1800.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-n-sa.wav",
+            alias="sa",
+            timing=OtoTiming(offset=1900.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _cv1, repaired_glide, _cv2, repaired_n_vc, repaired_n_cv = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_glide.applied_rules
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_n_vc.applied_rules
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_n_cv.applied_rules
+
+
+def test_japanese_cvvc_obstruent_grid_skips_excessive_backshift():
+    rows = [
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="- k",
+            timing=OtoTiming(offset=600.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="ka",
+            timing=OtoTiming(offset=300.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="a k",
+            timing=OtoTiming(offset=2500.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="ki",
+            timing=OtoTiming(offset=700.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="i k",
+            timing=OtoTiming(offset=2600.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku.wav",
+            alias="ku",
+            timing=OtoTiming(offset=2700.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _ka, repaired_ak, _ki, repaired_ik, repaired_ku = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3600.0,
+    )
+
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_ak.applied_rules
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_ik.applied_rules
+    assert "cvvc_obstruent_grid_late_cascade_repair" not in repaired_ku.applied_rules
+
+
+def test_japanese_cvvc_tail_moraic_n_repairs_late_cascade():
+    rows = [
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="- k",
+            timing=OtoTiming(offset=350.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="\u304b1",
+            timing=OtoTiming(offset=2260.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="a n3",
+            timing=OtoTiming(offset=2780.0, consonant=160.0, cutoff=-430.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="\u30937",
+            timing=OtoTiming(offset=3254.0, consonant=80.0, cutoff=-106.0, preutterance=56.0, overlap=35.8),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="n k",
+            timing=OtoTiming(offset=3300.0, consonant=195.0, cutoff=-221.0, preutterance=155.0, overlap=120.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="\u304b2",
+            timing=OtoTiming(offset=3460.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_kikakukekokakanka.wav",
+            alias="a -3",
+            timing=OtoTiming(offset=3650.0, consonant=210.0, cutoff=-337.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _anchor, repaired_an, repaired_n, repaired_nk, repaired_ka, repaired_terminal = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert repaired_an.timing.offset == pytest.approx(2490.0)
+    assert repaired_n.timing.offset == pytest.approx(2600.0)
+    assert repaired_nk.timing.offset == pytest.approx(2810.0)
+    assert repaired_ka.timing.offset == pytest.approx(2960.0)
+    assert repaired_terminal.timing.offset == pytest.approx(3150.0)
+    assert "cvvc_tail_moraic_n_late_cascade_repair" in repaired_an.applied_rules
+    assert "cvvc_tail_moraic_n_late_cascade_repair" in repaired_nk.applied_rules
+    assert any("cvvc_tail_moraic_n_role:n_vc" in warning for warning in repaired_nk.warnings)
+
+
+def test_japanese_cvvc_tail_yoon_repairs_late_vc_cascade():
+    rows = [
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="- gy",
+            timing=OtoTiming(offset=350.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u3087",
+            timing=OtoTiming(offset=1710.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="o gy",
+            timing=OtoTiming(offset=2620.0, consonant=160.0, cutoff=-410.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u30831",
+            timing=OtoTiming(offset=2780.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="a n6",
+            timing=OtoTiming(offset=2760.0, consonant=160.0, cutoff=-430.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u309310",
+            timing=OtoTiming(offset=3130.0, consonant=80.0, cutoff=-106.0, preutterance=56.0, overlap=35.8),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="n gy",
+            timing=OtoTiming(offset=3290.0, consonant=195.0, cutoff=-221.0, preutterance=155.0, overlap=120.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u30832",
+            timing=OtoTiming(offset=3520.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="a -6",
+            timing=OtoTiming(offset=3650.0, consonant=210.0, cutoff=-337.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    (
+        _head,
+        _anchor,
+        repaired_o_gy,
+        repaired_gya,
+        repaired_an,
+        repaired_n,
+        repaired_n_gy,
+        repaired_final,
+        repaired_terminal,
+    ) = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert repaired_o_gy.timing.offset == pytest.approx(2060.0)
+    assert repaired_gya.timing.offset == pytest.approx(2210.0)
+    assert repaired_an.timing.offset == pytest.approx(2470.0)
+    assert repaired_n.timing.offset == pytest.approx(2580.0)
+    assert repaired_n_gy.timing.offset == pytest.approx(2770.0)
+    assert repaired_final.timing.offset == pytest.approx(2910.0)
+    assert repaired_terminal.timing.offset == pytest.approx(3110.0)
+    assert "cvvc_tail_yoon_late_cascade_repair" in repaired_o_gy.applied_rules
+    assert "cvvc_tail_yoon_late_cascade_repair" in repaired_n_gy.applied_rules
+    assert any("cvvc_tail_yoon_role:n_vc" in warning for warning in repaired_n_gy.warnings)
+
+
+def test_japanese_cvvc_tail_yoon_requires_late_yoon_vc_gate():
+    rows = [
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="- gy",
+            timing=OtoTiming(offset=350.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u3087",
+            timing=OtoTiming(offset=1710.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="o gy",
+            timing=OtoTiming(offset=2240.0, consonant=160.0, cutoff=-410.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u30831",
+            timing=OtoTiming(offset=2380.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="a n6",
+            timing=OtoTiming(offset=2760.0, consonant=160.0, cutoff=-430.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u309310",
+            timing=OtoTiming(offset=3130.0, consonant=80.0, cutoff=-106.0, preutterance=56.0, overlap=35.8),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="n gy",
+            timing=OtoTiming(offset=3290.0, consonant=195.0, cutoff=-221.0, preutterance=155.0, overlap=120.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_gyagigyugegyogyangya.wav",
+            alias="\u304e\u30832",
+            timing=OtoTiming(offset=3520.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _anchor, kept_o_gy, *_rest = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert kept_o_gy.timing.offset == pytest.approx(2240.0)
+    assert "cvvc_tail_yoon_late_cascade_repair" not in kept_o_gy.applied_rules
+
+
+def test_japanese_cvvc_initial_u_to_w_sequence_repairs_split_vc_drift():
+    rows = [
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="- u",
+            timing=OtoTiming(offset=430.0, consonant=220.0, cutoff=-320.0, preutterance=80.0, overlap=40.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u30462",
+            timing=OtoTiming(offset=154.0, consonant=80.0, cutoff=-106.0, preutterance=56.0, overlap=35.84),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="u w",
+            timing=OtoTiming(offset=115.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u308f",
+            timing=OtoTiming(offset=275.0, consonant=190.0, cutoff=-400.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="a w",
+            timing=OtoTiming(offset=450.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u3046\u3043",
+            timing=OtoTiming(offset=610.0, consonant=190.0, cutoff=-425.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="i w",
+            timing=OtoTiming(offset=1435.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u3046\u3047",
+            timing=OtoTiming(offset=1580.0, consonant=190.0, cutoff=-525.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="e w",
+            timing=OtoTiming(offset=2025.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u3092",
+            timing=OtoTiming(offset=2080.0, consonant=190.0, cutoff=-910.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="o w",
+            timing=OtoTiming(offset=2280.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_uwawiwewowanwa.wav",
+            alias="\u308f1",
+            timing=OtoTiming(offset=2440.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    (
+        _head,
+        repaired_u,
+        repaired_u_w,
+        repaired_wa,
+        repaired_a_w,
+        repaired_wi,
+        repaired_i_w,
+        repaired_we,
+        repaired_e_w,
+        repaired_wo,
+        repaired_o_w,
+        repaired_trailing_wa,
+    ) = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3700.0,
+    )
+
+    assert repaired_u.timing.offset == pytest.approx(540.0)
+    assert repaired_u_w.timing.offset == pytest.approx(556.0)
+    assert repaired_wa.timing.offset == pytest.approx(757.0)
+    assert repaired_a_w.timing.offset == pytest.approx(992.0)
+    assert repaired_wi.timing.offset == pytest.approx(1132.0)
+    assert repaired_i_w.timing.offset == pytest.approx(1322.0)
+    assert repaired_we.timing.offset == pytest.approx(1477.0)
+    assert repaired_e_w.timing.offset == pytest.approx(1682.0)
+    assert repaired_wo.timing.offset == pytest.approx(1828.0)
+    assert repaired_o_w.timing.offset == pytest.approx(2027.0)
+    assert repaired_trailing_wa.timing.offset == pytest.approx(2175.0)
+    assert "cvvc_initial_w_glide_sequence_repair" in repaired_u_w.applied_rules
+    assert "cvvc_initial_w_glide_sequence_repair" in repaired_e_w.applied_rules
+
+
+def test_japanese_cvvc_initial_w_head_sequence_repairs_split_vc_drift():
+    rows = [
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="- \u308f",
+            timing=OtoTiming(offset=430.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="a w",
+            timing=OtoTiming(offset=510.0, consonant=120.0, cutoff=-146.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="\u3046\u3043",
+            timing=OtoTiming(offset=685.0, consonant=210.0, cutoff=-400.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="i w",
+            timing=OtoTiming(offset=1170.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="\u3046\u3045",
+            timing=OtoTiming(offset=1330.0, consonant=190.0, cutoff=-545.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="u w",
+            timing=OtoTiming(offset=1950.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="\u3046\u3047",
+            timing=OtoTiming(offset=2110.0, consonant=190.0, cutoff=-245.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="e w",
+            timing=OtoTiming(offset=2540.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="\u3046\u3049",
+            timing=OtoTiming(offset=2700.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="o w",
+            timing=OtoTiming(offset=3090.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wawiwuwewowanwa.wav",
+            alias="\u308f",
+            timing=OtoTiming(offset=3250.0, consonant=190.0, cutoff=-405.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    (
+        _head,
+        repaired_a_w,
+        repaired_wi,
+        kept_i_w,
+        kept_wu,
+        repaired_u_w,
+        repaired_we,
+        repaired_e_w,
+        repaired_wo,
+        repaired_o_w,
+        repaired_trailing_wa,
+    ) = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3700.0,
+    )
+
+    assert repaired_a_w.timing.offset == pytest.approx(785.0)
+    assert repaired_wi.timing.offset == pytest.approx(910.0)
+    assert kept_i_w.timing.offset == pytest.approx(1170.0)
+    assert kept_wu.timing.offset == pytest.approx(1330.0)
+    assert repaired_u_w.timing.offset == pytest.approx(1485.0)
+    assert repaired_we.timing.offset == pytest.approx(1616.0)
+    assert repaired_e_w.timing.offset == pytest.approx(1870.0)
+    assert repaired_wo.timing.offset == pytest.approx(2022.0)
+    assert repaired_o_w.timing.offset == pytest.approx(2235.0)
+    assert repaired_trailing_wa.timing.offset == pytest.approx(2381.0)
+    assert "cvvc_initial_w_glide_sequence_repair" in repaired_a_w.applied_rules
+    assert "cvvc_initial_w_glide_sequence_repair" in repaired_e_w.applied_rules
+
+
+def test_japanese_cvvc_tail_moraic_n_requires_late_vowel_n_gate():
+    rows = [
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="- sh",
+            timing=OtoTiming(offset=320.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="\u3057\u30831",
+            timing=OtoTiming(offset=1935.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="a n10",
+            timing=OtoTiming(offset=2282.0, consonant=160.0, cutoff=-410.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="\u309314",
+            timing=OtoTiming(offset=2650.0, consonant=100.0, cutoff=-106.0, preutterance=90.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="n sh",
+            timing=OtoTiming(offset=2660.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="\u3057\u30832",
+            timing=OtoTiming(offset=2820.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_shashishusheshoshansha.wav",
+            alias="a -10",
+            timing=OtoTiming(offset=3130.0, consonant=210.0, cutoff=-337.0, preutterance=110.0, overlap=100.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _anchor, kept_an, kept_n, kept_nsh, kept_sha, kept_terminal = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert kept_an.timing.offset == pytest.approx(2282.0)
+    assert kept_n.timing.offset == pytest.approx(2650.0)
+    assert kept_nsh.timing.offset == pytest.approx(2660.0)
+    assert kept_sha.timing.offset == pytest.approx(2820.0)
+    assert kept_terminal.timing.offset == pytest.approx(3130.0)
+    assert "cvvc_tail_moraic_n_late_cascade_repair" not in kept_nsh.applied_rules
+
+
+def test_japanese_cvvc_tail_moraic_n_requires_late_transition_gate():
+    rows = [
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="- h",
+            timing=OtoTiming(offset=360.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="\u306f2",
+            timing=OtoTiming(offset=1985.0, consonant=190.0, cutoff=-198.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="a n26",
+            timing=OtoTiming(offset=2412.0, consonant=160.0, cutoff=-410.0, preutterance=120.0, overlap=85.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="\u309328",
+            timing=OtoTiming(offset=2844.0, consonant=80.0, cutoff=-106.0, preutterance=56.0, overlap=35.8),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="n h",
+            timing=OtoTiming(offset=2690.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_fafifufefanfua.wav",
+            alias="\u306f3",
+            timing=OtoTiming(offset=2850.0, consonant=190.0, cutoff=-200.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    _head, _anchor, kept_an, kept_n, kept_nh, kept_ha = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert kept_an.timing.offset == pytest.approx(2412.0)
+    assert kept_n.timing.offset == pytest.approx(2844.0)
+    assert kept_nh.timing.offset == pytest.approx(2690.0)
+    assert kept_ha.timing.offset == pytest.approx(2850.0)
+    assert "cvvc_tail_moraic_n_late_cascade_repair" not in kept_nh.applied_rules
+
+
+def test_japanese_cvvc_tail_moraic_n_wrap_repairs_grouped_vc_target():
+    wav = "sa-si-su-se-so-sa-N-sa.wav"
+    rows = [
+        AdaptedOtoRow(
+            wav=wav,
+            alias="- s",
+            timing=OtoTiming(offset=800.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="a s",
+            timing=OtoTiming(offset=885.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="i s",
+            timing=OtoTiming(offset=1736.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="u s",
+            timing=OtoTiming(offset=2285.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="e s",
+            timing=OtoTiming(offset=2825.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="o s",
+            timing=OtoTiming(offset=3676.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="n s",
+            timing=OtoTiming(offset=825.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u3059\u3043",
+            timing=OtoTiming(offset=985.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u3059",
+            timing=OtoTiming(offset=1420.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u305b",
+            timing=OtoTiming(offset=2030.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u305d",
+            timing=OtoTiming(offset=2560.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u3055",
+            timing=OtoTiming(offset=3310.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=4800.0,
+    )
+    repaired_ns = next(row for row in repaired if row.alias == "n s")
+
+    assert repaired_ns.timing.offset == pytest.approx(4010.0)
+    assert "cvvc_tail_moraic_n_wrap_repair" in repaired_ns.applied_rules
+    assert any(warning.startswith("cvvc_tail_moraic_n_wrap:825.0->4010.0") for warning in repaired_ns.warnings)
+    assert "cvvc_tail_moraic_n_wrap_reference:\u3055" in repaired_ns.warnings
+
+
+def test_japanese_cvvc_tail_moraic_n_wrap_keeps_near_reference_vc():
+    wav = "sa-N-sa.wav"
+    rows = [
+        AdaptedOtoRow(
+            wav=wav,
+            alias="n s",
+            timing=OtoTiming(offset=2690.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u3055",
+            timing=OtoTiming(offset=2850.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    kept_ns, _cv = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3990.0,
+    )
+
+    assert kept_ns.timing.offset == pytest.approx(2690.0)
+    assert "cvvc_tail_moraic_n_wrap_repair" not in kept_ns.applied_rules
+
+
+def test_japanese_cvvc_tail_moraic_n_wrap_allows_sonorant_right_context():
+    wav = "wa-wi-we-wo-wa-u-wa-N-wa.wav"
+    rows = [
+        AdaptedOtoRow(
+            wav=wav,
+            alias="n w",
+            timing=OtoTiming(offset=825.0, consonant=185.0, cutoff=-205.0, preutterance=135.0, overlap=50.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav=wav,
+            alias="\u308f",
+            timing=OtoTiming(offset=3310.0, consonant=190.0, cutoff=-455.0, preutterance=150.0, overlap=115.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired_nw, _cv = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=4800.0,
+    )
+
+    assert repaired_nw.timing.offset == pytest.approx(4010.0)
+    assert "cvvc_tail_moraic_n_wrap_repair" in repaired_nw.applied_rules
+
+
+def test_japanese_cvvc_unrepaired_vv_long_cutoff_uses_short_profile(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
+    vv = AdaptedOtoRow(
+        wav="_aaiauea.wav",
+        alias="a i",
+        timing=OtoTiming(offset=1190.0, consonant=160.0, cutoff=-3060.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1310.0, score=0.5, role="vv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+    vcv = AdaptedOtoRow(
+        wav="_aaiauea.wav",
+        alias="n a",
+        timing=OtoTiming(offset=1340.0, consonant=160.0, cutoff=-2350.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1460.0, score=0.5, role="vcv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+    nasal_vv = AdaptedOtoRow(
+        wav="_aaiauea.wav",
+        alias="i ん",
+        timing=OtoTiming(offset=1110.0, consonant=160.0, cutoff=-3420.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1230.0, score=0.5, role="vv", source_event_label="vv_boundary"),
+        mode="bootstrap",
+    )
+
+    repaired_vv, repaired_vcv, repaired_nasal = repair_cvvc_row_sequence(
+        [vv, vcv, nasal_vv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=5400.0,
+    )
+
+    expected_offsets = {"a i": 1190.0, "n a": 1340.0, "i ん": 1110.0}
+    for repaired in (repaired_vv, repaired_vcv, repaired_nasal):
+        assert repaired.timing.offset == pytest.approx(expected_offsets[repaired.alias])
+        assert repaired.timing.consonant == pytest.approx(181.0)
+        assert repaired.timing.cutoff == pytest.approx(-255.0)
+        assert repaired.timing.preutterance == pytest.approx(118.0)
+        assert repaired.timing.overlap == pytest.approx(90.0)
+        assert "cvvc_unrepaired_vv_long_cutoff_profile_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_unrepaired_vv_long_cutoff_keeps_headed_or_grid_rows():
+    head = AdaptedOtoRow(
+        wav="_aaiauea.wav",
+        alias="- a",
+        timing=OtoTiming(offset=380.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    headed_vv = AdaptedOtoRow(
+        wav="_aaiauea.wav",
+        alias="a i",
+        timing=OtoTiming(offset=1190.0, consonant=160.0, cutoff=-3060.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1310.0, score=0.5, role="vv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+    grid_vv = AdaptedOtoRow(
+        wav="aaiauea.wav",
+        alias="i a",
+        timing=OtoTiming(offset=1550.0, consonant=420.0, cutoff=-600.0, preutterance=300.0, overlap=100.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1360.0, score=0.5, role="vv", source_event_label="vv_boundary"),
+        mode="bootstrap",
+        applied_rules=("cvvc_pure_vowel_sequence_row_repair",),
+    )
+
+    _head, kept_headed, kept_grid = repair_cvvc_row_sequence(
+        [head, headed_vv, grid_vv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=5400.0,
+    )
+
+    assert kept_headed.timing == headed_vv.timing
+    assert kept_grid.timing == grid_vv.timing
+    assert "cvvc_unrepaired_vv_long_cutoff_profile_repair" not in kept_headed.applied_rules
+    assert "cvvc_unrepaired_vv_long_cutoff_profile_repair" not in kept_grid.applied_rules
 
 
 def test_japanese_cvvc_regular_pair_onset_sequence_repairs_early_vc_cv_prefix():
@@ -3196,6 +11242,766 @@ def test_japanese_cvvc_grouped_vc_block_allows_unknown_cv_phone_when_vc_block_ma
     assert "cvvc_grouped_vc_first_offset_repair" in repaired[0].applied_rules
 
 
+def test_japanese_cvvc_headless_pitch_suffix_cv_block_regrids_compressed_cv_only():
+    rows = [
+        AdaptedOtoRow(
+            wav="_nya-nyu-nye-nyo-nya.wav",
+            alias="nyu_S",
+            timing=OtoTiming(offset=930.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_nya-nyu-nye-nyo-nya.wav",
+            alias="nye_S",
+            timing=OtoTiming(offset=1180.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_nya-nyu-nye-nyo-nya.wav",
+            alias="nyo_S",
+            timing=OtoTiming(offset=1420.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_nya-nyu-nye-nyo-nya.wav",
+            alias="nya_S",
+            timing=OtoTiming(offset=1870.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=5400.0,
+    )
+
+    assert [row.timing.offset for row in repaired] == pytest.approx([1430.0, 1930.0, 2430.0, 2930.0])
+    assert all("cvvc_headless_pitch_suffix_cv_grid_repair" in row.applied_rules for row in repaired)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_grouped_vc_cv_block_regrids_from_cv_block():
+    rows = [
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="a d_S",
+            timing=OtoTiming(offset=1020.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="i d_S",
+            timing=OtoTiming(offset=1400.0, consonant=130.0, cutoff=-156.0, preutterance=90.0, overlap=55.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="u d_S",
+            timing=OtoTiming(offset=2300.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=135.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="e d_S",
+            timing=OtoTiming(offset=3310.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=135.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="o d_S",
+            timing=OtoTiming(offset=4370.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="di_S",
+            timing=OtoTiming(offset=1059.716, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="du_S",
+            timing=OtoTiming(offset=1920.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="de_S",
+            timing=OtoTiming(offset=2900.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="do_S",
+            timing=OtoTiming(offset=3570.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_da-di-du-de-do-da-N-da.wav",
+            alias="da_S",
+            timing=OtoTiming(offset=4400.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1489.858, 1989.858, 2489.858, 2989.858, 3489.858]
+    expected_vc = [1264.858, 1764.858, 2264.858, 2764.858, 3264.858]
+    assert [row.timing.offset for row in repaired[:5]] == pytest.approx(expected_vc)
+    assert [row.timing.offset for row in repaired[5:]] == pytest.approx(expected_cv)
+    assert all("cvvc_headless_pitch_suffix_vc_grid_repair" in row.applied_rules for row in repaired[:5])
+    assert all("cvvc_headless_pitch_suffix_cv_grid_repair" in row.applied_rules for row in repaired[5:])
+
+
+def test_japanese_cvvc_headless_pitch_suffix_block_allows_initial_cv_head_dash():
+    rows = [
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="- w_S",
+            timing=OtoTiming(offset=882.761, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="a w_S",
+            timing=OtoTiming(offset=930.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="i w_S",
+            timing=OtoTiming(offset=1766.54, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="e w_S",
+            timing=OtoTiming(offset=1910.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="o w_S",
+            timing=OtoTiming(offset=2860.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="u w_S",
+            timing=OtoTiming(offset=4820.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="n w_S",
+            timing=OtoTiming(offset=4979.731, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u3046\u3043_S",
+            timing=OtoTiming(offset=966.839, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u3046\u3047_S",
+            timing=OtoTiming(offset=1890.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u3092_S",
+            timing=OtoTiming(offset=2430.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u308f_S",
+            timing=OtoTiming(offset=2930.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1428.4195, 1928.4195, 2428.4195, 2928.4195]
+    expected_vc = [1203.4195, 1703.4195, 2203.4195, 2703.4195]
+    expected_extra_vc = [3678.4195, 4678.4195]
+    assert repaired[0].timing.offset == pytest.approx(882.761)
+    assert [row.timing.offset for row in repaired[1:5]] == pytest.approx(expected_vc)
+    assert [row.timing.offset for row in repaired[7:]] == pytest.approx(expected_cv)
+    assert [row.timing.offset for row in repaired[5:7]] == pytest.approx(expected_extra_vc)
+    assert all("cvvc_headless_pitch_suffix_extra_vc_grid_repair" in row.applied_rules for row in repaired[5:7])
+    assert "cvvc_headless_pitch_suffix_cv_grid_repair" in repaired[7].applied_rules
+
+
+def test_japanese_cvvc_headless_pitch_suffix_cv_block_regrids_large_internal_gap():
+    rows = [
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias="\u304d_S",
+            timing=OtoTiming(offset=946.824, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias="\u304f_S",
+            timing=OtoTiming(offset=1430.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias="\u3051_S",
+            timing=OtoTiming(offset=2420.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias="\u3053_S",
+            timing=OtoTiming(offset=3000.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias="\u304b_S",
+            timing=OtoTiming(offset=4380.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    assert [row.timing.offset for row in repaired] == pytest.approx(
+        [1446.824, 1946.824, 2446.824, 2946.824, 3446.824]
+    )
+    assert all("cvvc_headless_pitch_suffix_cv_grid_repair" in row.applied_rules for row in repaired)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_cv_block_keeps_aligned_first_cv_on_tail_gap():
+    rows = [
+        AdaptedOtoRow(
+            wav="_tsa-tsi-tsu-tse-tso-tsa-N-tsu.wav",
+            alias="\u3064\u3043_S",
+            timing=OtoTiming(offset=1425.878, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_tsa-tsi-tsu-tse-tso-tsa-N-tsu.wav",
+            alias="\u3064_S",
+            timing=OtoTiming(offset=1890.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_tsa-tsi-tsu-tse-tso-tsa-N-tsu.wav",
+            alias="\u3064\u3047_S",
+            timing=OtoTiming(offset=2460.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_tsa-tsi-tsu-tse-tso-tsa-N-tsu.wav",
+            alias="\u3064\u3049_S",
+            timing=OtoTiming(offset=3280.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_tsa-tsi-tsu-tse-tso-tsa-N-tsu.wav",
+            alias="\u3064\u3041_S",
+            timing=OtoTiming(offset=4220.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    assert [row.timing.offset for row in repaired] == pytest.approx(
+        [1425.878, 1925.878, 2425.878, 2925.878, 3425.878]
+    )
+    assert all("cvvc_headless_pitch_suffix_cv_grid_repair" in row.applied_rules for row in repaired)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_s_block_uses_earlier_grid_base():
+    rows = [
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="- s_S",
+            timing=OtoTiming(offset=963.1, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="a s_S",
+            timing=OtoTiming(offset=1003.1, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="i s_S",
+            timing=OtoTiming(offset=1380.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="u s_S",
+            timing=OtoTiming(offset=1750.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=135.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="e s_S",
+            timing=OtoTiming(offset=2320.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=135.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="o s_S",
+            timing=OtoTiming(offset=3320.0, consonant=210.0, cutoff=-236.0, preutterance=170.0, overlap=135.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="\u3059\u3043_S",
+            timing=OtoTiming(offset=1105.533, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="\u3059_S",
+            timing=OtoTiming(offset=1470.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="\u305b_S",
+            timing=OtoTiming(offset=1920.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="\u305d_S",
+            timing=OtoTiming(offset=2910.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_sa-si-su-se-so-sa-N-sa.wav",
+            alias="\u3055_S",
+            timing=OtoTiming(offset=4300.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1450.533, 1950.533, 2450.533, 2950.533, 3450.533]
+    expected_vc = [1225.533, 1725.533, 2225.533, 2725.533, 3225.533]
+    assert repaired[0].timing.offset == pytest.approx(1425.533)
+    assert [row.timing.offset for row in repaired[1:6]] == pytest.approx(expected_vc)
+    assert [row.timing.offset for row in repaired[6:]] == pytest.approx(expected_cv)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_r_block_uses_later_grid_base_without_moving_head():
+    rows = [
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="- r_S",
+            timing=OtoTiming(offset=962.158, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="a r_S",
+            timing=OtoTiming(offset=1002.2, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="i r_S",
+            timing=OtoTiming(offset=1450.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="u r_S",
+            timing=OtoTiming(offset=1930.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="e r_S",
+            timing=OtoTiming(offset=2910.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="o r_S",
+            timing=OtoTiming(offset=3450.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="\u308a_S",
+            timing=OtoTiming(offset=1383.671, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="\u308b_S",
+            timing=OtoTiming(offset=1480.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="\u308c_S",
+            timing=OtoTiming(offset=2420.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="\u308d_S",
+            timing=OtoTiming(offset=2950.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ra-ri-ru-re-ro-ra-N-ra.wav",
+            alias="\u3089_S",
+            timing=OtoTiming(offset=4200.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1508.671, 2008.671, 2508.671, 3008.671, 3508.671]
+    expected_vc = [1283.671, 1783.671, 2283.671, 2783.671, 3283.671]
+    assert repaired[0].timing.offset == pytest.approx(962.158)
+    assert [row.timing.offset for row in repaired[1:6]] == pytest.approx(expected_vc)
+    assert [row.timing.offset for row in repaired[6:]] == pytest.approx(expected_cv)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_m_block_uses_compressed_sonorant_step():
+    def row(alias: str, offset: float, role_profile: str = "vc") -> AdaptedOtoRow:
+        if role_profile == "head":
+            timing = OtoTiming(offset=offset, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0)
+        elif role_profile == "cv":
+            timing = OtoTiming(offset=offset, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0)
+        else:
+            timing = OtoTiming(offset=offset, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0)
+        return AdaptedOtoRow(
+            wav="_ma-mi-mu-me-mo-ma-N-ma.wav",
+            alias=alias,
+            timing=timing,
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        )
+
+    rows = [
+        row("- m_S", 932.793, "head"),
+        row("a m_S", 972.8),
+        row("i m_S", 1410.0),
+        row("u m_S", 1930.0),
+        row("e m_S", 2910.0),
+        row("o m_S", 3350.0),
+        row("n m_S", 4398.9),
+        row("\u307f_S", 1023.945, "cv"),
+        row("\u3080_S", 1480.0, "cv"),
+        row("\u3081_S", 2390.0, "cv"),
+        row("\u3082_S", 3260.0, "cv"),
+        row("\u307e_S", 4350.0, "cv"),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1523.945, 1988.945, 2453.945, 2918.945, 3383.945]
+    expected_vc = [1298.945, 1763.945, 2228.945, 2693.945, 3158.945]
+    assert repaired[0].timing.offset == pytest.approx(1498.945)
+    assert [row.timing.offset for row in repaired[1:6]] == pytest.approx(expected_vc)
+    assert repaired[6].timing.offset == pytest.approx(4208.945)
+    assert [row.timing.offset for row in repaired[7:]] == pytest.approx(expected_cv)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_f_block_uses_earlier_base_and_vc_profile():
+    def row(alias: str, offset: float, role_profile: str = "vc") -> AdaptedOtoRow:
+        if role_profile == "head":
+            timing = OtoTiming(offset=930.0, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0)
+        elif role_profile == "cv":
+            timing = OtoTiming(offset=offset, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0)
+        else:
+            timing = OtoTiming(offset=offset, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0)
+        return AdaptedOtoRow(
+            wav="_fa-fi-fu-fe-fo-fa-N-fu.wav",
+            alias=alias,
+            timing=timing,
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        )
+
+    rows = [
+        row("- f_S", 930.0, "head"),
+        row("a f_S", 970.0),
+        row("i f_S", 1400.0),
+        row("u f_S", 1930.0),
+        row("e f_S", 2910.0),
+        row("o f_S", 3350.0),
+        row("\u3075\u3043_S", 1007.7, "cv"),
+        row("\u3075_S", 1480.0, "cv"),
+        row("\u3075\u3047_S", 2390.0, "cv"),
+        row("\u3075\u3049_S", 3260.0, "cv"),
+        row("\u3075\u3041_S", 4350.0, "cv"),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    expected_cv = [1427.7, 1927.7, 2427.7, 2927.7, 3427.7]
+    expected_vc = [1202.7, 1702.7, 2202.7, 2702.7, 3202.7]
+    assert repaired[0].timing.offset == pytest.approx(1402.7)
+    assert [row.timing.offset for row in repaired[1:6]] == pytest.approx(expected_vc)
+    assert [row.timing.preutterance for row in repaired[1:6]] == pytest.approx([200.0] * 5)
+    assert [row.timing.overlap for row in repaired[1:6]] == pytest.approx([50.0] * 5)
+    assert [row.timing.consonant for row in repaired[1:6]] == pytest.approx([230.0] * 5)
+    assert [row.timing.cutoff for row in repaired[1:6]] == pytest.approx([-270.0] * 5)
+    assert all("cvvc_headless_pitch_suffix_vc_profile_repair" in row.applied_rules for row in repaired[1:6])
+    assert [row.timing.offset for row in repaired[6:]] == pytest.approx(expected_cv)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_cv_head_follows_delayed_grid_cv():
+    rows = [
+        AdaptedOtoRow(
+            wav="_ma-mi-mu-me-mo-ma-N-ma.wav",
+            alias="- m_S",
+            timing=OtoTiming(offset=932.793, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_ma-mi-mu-me-mo-ma-N-ma.wav",
+            alias="a m_S",
+            timing=OtoTiming(offset=1298.945, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            applied_rules=("cvvc_headless_pitch_suffix_vc_grid_repair",),
+        ),
+        AdaptedOtoRow(
+            wav="_ma-mi-mu-me-mo-ma-N-ma.wav",
+            alias="\u307f_S",
+            timing=OtoTiming(offset=1523.945, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            applied_rules=("cvvc_headless_pitch_suffix_cv_grid_repair",),
+        ),
+        AdaptedOtoRow(
+            wav="_ma-mi-mu-me-mo-ma-N-ma.wav",
+            alias="\u3080_S",
+            timing=OtoTiming(offset=2023.945, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            applied_rules=("cvvc_headless_pitch_suffix_cv_grid_repair",),
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    assert repaired[0].timing.offset == pytest.approx(1498.945)
+    assert "cvvc_headless_pitch_suffix_cv_head_grid_repair" in repaired[0].applied_rules
+    assert any("cvvc_headless_pitch_suffix_cv_head_grid_reference" in item for item in repaired[0].warnings)
+
+
+def test_japanese_cvvc_headless_pitch_suffix_cv_head_keeps_glide_head():
+    rows = [
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="- w_S",
+            timing=OtoTiming(offset=882.761, consonant=65.0, cutoff=-95.0, preutterance=35.0, overlap=10.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u3046\u3043_S",
+            timing=OtoTiming(offset=1428.420, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            applied_rules=("cvvc_headless_pitch_suffix_cv_grid_repair",),
+        ),
+        AdaptedOtoRow(
+            wav="_wa-wi-we-wo-wa-u-wa-N-wa.wav",
+            alias="\u3046\u3047_S",
+            timing=OtoTiming(offset=1928.420, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+            source_timing=None,
+            anchor=None,
+            mode="bootstrap",
+            applied_rules=("cvvc_headless_pitch_suffix_cv_grid_repair",),
+        ),
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    assert repaired[0].timing.offset == pytest.approx(882.761)
+    assert "cvvc_headless_pitch_suffix_cv_head_grid_repair" not in repaired[0].applied_rules
+
+
 def test_japanese_cvvc_vc_cutoff_order_extends_invalid_tail():
     row = AdaptedOtoRow(
         wav="ka.wav",
@@ -3457,7 +12263,8 @@ def test_japanese_cvvc_initial_vowel_cv_head_onset_uses_next_vc_vowel_start_when
     )
 
 
-def test_japanese_cvvc_initial_vowel_cv_head_onset_requires_first_phone_index():
+def test_japanese_cvvc_initial_vowel_cv_head_onset_requires_first_phone_index(monkeypatch):
+    _enable_ja_cvvc_reference_repairs(monkeypatch)
     rows = [
         AdaptedOtoRow(
             wav="_a-a-i.wav",
@@ -3492,8 +12299,9 @@ def test_japanese_cvvc_initial_vowel_cv_head_onset_requires_first_phone_index():
     )
 
     assert repaired_head.timing.offset == pytest.approx(1490.0)
-    assert repaired_head.timing.preutterance == pytest.approx(120.0)
+    assert repaired_head.timing.preutterance == pytest.approx(108.0)
     assert "cvvc_initial_vowel_cv_head_onset_repair" not in repaired_head.applied_rules
+    assert "cvvc_cv_head_role_profile_repair" in repaired_head.applied_rules
 
 
 def test_japanese_cvvc_terminal_release_r_copies_matching_terminal_timing():
@@ -3616,6 +12424,38 @@ def test_japanese_cvvc_vc_next_vowel_local_repair_requires_local_refine_warning(
     assert "cvvc_vc_next_vowel_local_repair" not in repaired.applied_rules
 
 
+def test_japanese_cvvc_vc_next_vowel_local_repair_skips_sonorant_coda():
+    row = AdaptedOtoRow(
+        wav="_ni-na-nu-ne-no-nan-na.wav",
+        alias="o n",
+        timing=OtoTiming(offset=3115.0, consonant=210.0, cutoff=-236.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=3240.0,
+            score=0.45,
+            role="vc",
+            next_vowel_abs_ms=3702.0,
+            warnings=("local_refine_low_margin",),
+        ),
+        mode="bootstrap",
+        warnings=("local_refine_low_margin",),
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6000.0,
+    )
+
+    assert repaired.timing.offset == pytest.approx(3115.0)
+    assert repaired.timing.preutterance == pytest.approx(80.0)
+    assert "cvvc_vc_next_vowel_local_repair" not in repaired.applied_rules
+    assert not any(
+        warning.startswith("cvvc_vc_next_vowel_local_repaired")
+        for warning in repaired.warnings
+    )
+
+
 def test_japanese_cvvc_cv_rejected_next_vowel_repair_moves_early_cv_offset():
     row = AdaptedOtoRow(
         wav="wa-wi-we.wav",
@@ -3702,7 +12542,7 @@ def test_japanese_cvvc_terminal_standalone_vowel_uses_terminal_reference():
         OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert repaired.timing.offset == pytest.approx(3700.0)
+    assert repaired.timing.offset == pytest.approx(3360.0)
     assert repaired.timing.consonant == pytest.approx(125.0)
     assert repaired.timing.cutoff == pytest.approx(-260.0)
     assert repaired.timing.preutterance == pytest.approx(30.0)
@@ -3710,14 +12550,70 @@ def test_japanese_cvvc_terminal_standalone_vowel_uses_terminal_reference():
     assert "cvvc_terminal_standalone_v_repair" in repaired.applied_rules
 
 
+def test_japanese_cvvc_terminal_standalone_vowel_does_not_move_inner_repeated_vowels():
+    early_vowel = AdaptedOtoRow(
+        wav="_a-n-a.wav",
+        alias="\u3042",
+        timing=OtoTiming(offset=500.0, consonant=100.0, cutoff=-240.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    vc = AdaptedOtoRow(
+        wav="_a-n-a.wav",
+        alias="a n",
+        timing=OtoTiming(offset=720.0, consonant=120.0, cutoff=-160.0, preutterance=90.0, overlap=55.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    final_vowel = AdaptedOtoRow(
+        wav="_a-n-a.wav",
+        alias="\u30424",
+        timing=OtoTiming(offset=2944.0, consonant=100.0, cutoff=-240.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    terminal = AdaptedOtoRow(
+        wav="_a-n-a.wav",
+        alias="a -",
+        timing=OtoTiming(offset=3094.0, consonant=320.0, cutoff=-480.0, preutterance=200.0, overlap=100.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("japanese_cvvc_terminal_silence_vowel_end_anchor",),
+    )
+
+    repaired_early, _vc, repaired_final, _terminal = repair_cvvc_row_sequence(
+        [early_vowel, vc, final_vowel, terminal],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_early.timing == early_vowel.timing
+    assert "cvvc_terminal_standalone_v_repair" not in repaired_early.applied_rules
+    assert repaired_final.timing.offset == pytest.approx(2854.0)
+    assert "cvvc_terminal_standalone_v_repair" in repaired_final.applied_rules
+
+
 def test_japanese_cvvc_alias_pitch_suffix_is_ignored_for_phone_matching():
     assert _alias_phone_sequence("i bA3") == ["i", "b"]
     assert _alias_phone_sequence("n nyA3") == ["n", "n", "y"]
     assert _alias_phone_sequence("u vA3") == ["u", "v"]
     assert _alias_phone_sequence("\u3042A3") == ["a"]
+    assert _alias_phone_sequence("br1") == []
+    assert _alias_phone_sequence("A3") == []
     assert _alias_type_for_row("i bA3", "auto") == "vc"
     assert _alias_type_for_row("u vA3", "auto") == "vc"
     assert _alias_type_for_row("\u3042A3", "auto") == "v"
+
+
+def test_japanese_cvvc_initial_cv_head_duplicate_suffix_is_local_only():
+    assert _alias_phone_sequence("- i1") == []
+    assert _alias_phone_sequence("a k2") == ["a"]
+    assert _cvvc_initial_cv_head_vowel_token("- i1") == "i"
+    assert _cvvc_initial_cv_head_phone_sequence("- k1") == ["k"]
+    assert _cvvc_initial_cv_head_phone_sequence("- g1") == ["g"]
 
 
 def test_japanese_cvvc_initial_spaced_cv_offset_uses_matching_kana_cv_offset():
@@ -3810,6 +12706,78 @@ def test_japanese_cvvc_pure_vowel_transition_repairs_short_nucleus_following_v_r
     assert repaired_romaji_v.timing == repaired_kana_v.timing
     assert "cvvc_pure_vowel_transition_repair" in repaired_vv.applied_rules
     assert "cvvc_pure_vowel_v_repair" in repaired_kana_v.applied_rules
+
+
+def test_japanese_cvvc_pure_vowel_jump_repairs_late_transition_cascade():
+    previous_v = AdaptedOtoRow(
+        wav="case.wav",
+        alias="e",
+        timing=OtoTiming(offset=1280.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+    late_vv = AdaptedOtoRow(
+        wav="case.wav",
+        alias="e e",
+        timing=OtoTiming(offset=2460.0, consonant=160.0, cutoff=-760.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2580.0, role="vv", expected_phone_index=3),
+        mode="bootstrap",
+    )
+    late_v = AdaptedOtoRow(
+        wav="case.wav",
+        alias="\u3048",
+        timing=OtoTiming(offset=2490.0, consonant=100.0, cutoff=-360.0, preutterance=90.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2580.0, role="v", expected_phone_index=3),
+        mode="bootstrap",
+        applied_rules=("cvvc_standalone_vowel_compact_profile",),
+    )
+
+    repaired_previous, repaired_vv, repaired_v = repair_cvvc_row_sequence(
+        [previous_v, late_vv, late_v],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert repaired_previous.timing == previous_v.timing
+    assert repaired_vv.timing.offset == pytest.approx(1530.0)
+    assert repaired_vv.timing.preutterance == pytest.approx(110.0)
+    assert repaired_vv.timing.overlap == pytest.approx(100.0)
+    assert repaired_vv.timing.consonant == pytest.approx(210.0)
+    assert repaired_vv.timing.cutoff == pytest.approx(-600.0)
+    assert repaired_v.timing.offset == pytest.approx(1640.0)
+    assert repaired_v.timing.preutterance == pytest.approx(90.0)
+    assert "cvvc_pure_vowel_jump_repair" in repaired_vv.applied_rules
+    assert "cvvc_pure_vowel_jump_v_repair" in repaired_v.applied_rules
+
+
+def test_japanese_cvvc_standalone_vowel_uses_compact_profile_for_stale_span():
+    adapted = bootstrap_row(
+        "_a.wav",
+        "\u30421",
+        OtoAnchor(
+            anchor_abs_ms=1560.0,
+            score=0.72,
+            role="v",
+            vowel_nucleus_abs_ms=650.0,
+            vowel_start_abs_ms=500.0,
+            vowel_end_abs_ms=3170.0,
+            expected_phone_index=2,
+            source_event_label="cv_boundary",
+        ),
+        file_duration_ms=3960.0,
+        config=OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    assert adapted.timing.offset == pytest.approx(1470.0)
+    assert adapted.timing.preutterance == pytest.approx(90.0)
+    assert adapted.timing.overlap == pytest.approx(45.0)
+    assert adapted.timing.consonant == pytest.approx(100.0)
+    assert adapted.timing.cutoff == pytest.approx(-360.0)
+    assert "cvvc_standalone_vowel_compact_profile" in adapted.applied_rules
+    assert "cvvc_standalone_vowel_stale_nucleus:650.0->1560.0" in adapted.warnings
 
 
 def test_japanese_cvvc_ry_yoon_sequence_keeps_sonorant_context():
@@ -4040,12 +13008,36 @@ def test_japanese_cvvc_terminal_silence_uses_vowel_end_anchor():
         config=OtoAdapterConfig(language="japanese", format_type="cvvc", alias_type="auto"),
     )
 
-    assert adapted.timing.offset == pytest.approx(3970.0)
-    assert adapted.timing.preutterance == pytest.approx(200.0)
+    assert adapted.timing.offset == pytest.approx(4310.0)
+    assert adapted.timing.preutterance == pytest.approx(110.0)
     assert adapted.timing.overlap == pytest.approx(100.0)
-    assert adapted.timing.consonant == pytest.approx(320.0)
-    assert adapted.timing.cutoff == pytest.approx(-480.0)
+    assert adapted.timing.consonant == pytest.approx(210.0)
+    assert adapted.timing.cutoff == pytest.approx(-1590.0)
     assert "terminal_silence_vowel_end_anchored:4400.0" in adapted.warnings
+    assert "japanese_cvvc_terminal_silence_vowel_end_anchor" in adapted.applied_rules
+
+
+def test_japanese_cvvc_terminal_silence_accepts_duplicate_suffix():
+    adapted = bootstrap_row(
+        "a.wav",
+        "a -8",
+        OtoAnchor(
+            anchor_abs_ms=3000.0,
+            score=0.9,
+            role="vc",
+            vowel_end_abs_ms=3200.0,
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        file_duration_ms=3980.0,
+        config=OtoAdapterConfig(language="japanese", format_type="cvvc", alias_type="auto"),
+    )
+
+    assert adapted.timing.offset == pytest.approx(3110.0)
+    assert adapted.timing.preutterance == pytest.approx(110.0)
+    assert adapted.timing.overlap == pytest.approx(100.0)
+    assert adapted.timing.consonant == pytest.approx(210.0)
+    assert adapted.timing.cutoff == pytest.approx(-870.0)
     assert "japanese_cvvc_terminal_silence_vowel_end_anchor" in adapted.applied_rules
 
 
@@ -4384,11 +13376,12 @@ def test_no_mfa_lightgbm_safety_filter_preserves_terminal_and_caps_overlap(tmp_p
     assert report["restored_terminal_rows"] == 1
     assert report["restored_breath_rows"] == 1
     assert report["capped_cv_pre_overlap_rows"] == 1
-    assert report["capped_overlap_rows"] == 2
+    assert report["restored_vv_overlap_rows"] == 1
+    assert report["capped_overlap_rows"] == 1
     assert lines[0] == "a.wav=V -,4000,320,-90,200,100"
     assert lines[1] == "br1.wav=br1,2191.38,185.713,-186.713,167.309,15.058"
     assert lines[2] == "a.wav=a k,980,220,-240,170,65"
-    assert lines[3] == "a.wav=a \u3042,1420,250,-260,180,105"
+    assert lines[3] == "a.wav=a \u3042,1420,250,-260,180,85"
     assert lines[4] == "a.wav=\u304b,1810,190,-290,70,25"
 
 
@@ -4923,7 +13916,7 @@ def test_no_mfa_lightgbm_safety_filter_shifts_collapsed_underscore_kana_slot1_of
     ]
 
 
-def test_no_mfa_lightgbm_safety_filter_shifts_delayed_underscore_kana_slots(tmp_path):
+def test_no_mfa_lightgbm_safety_filter_does_not_create_delayed_underscore_slot_shift(tmp_path):
     from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
 
     delayed_lines = [
@@ -4961,27 +13954,52 @@ def test_no_mfa_lightgbm_safety_filter_shifts_delayed_underscore_kana_slots(tmp_
         format_type="cvvc",
     )
 
-    assert report["shifted_underscore_kana_delayed_slot_rows"] == 6
-    assert post.read_text(encoding="utf-8").splitlines() == [
+    assert report["shifted_underscore_kana_delayed_slot_rows"] == 0
+    assert post.read_text(encoding="utf-8").splitlines() == lines
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_ml_late_underscore_kana_slots(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+
+    pre_lines = [
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=- f,580,160,-168,70,25",
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=a f,1105.24,190,-220,150,50",
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3043,1170,190,-229.8,70,25",
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=i f,1319.8,190,-220,150,50",
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075,1500,190,-360,70,25",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=u f,1640.95,190,-220,150,50",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3047,1820,190,-360,70,25",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=e f,2209.3,190,-220,150,50",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3049,2370,190,-360,70,25",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=o f,2578.31,190,-220,150,50",
-        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3041,2700,190,-360,70,25",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=u f,2140.95,190,-220,150,50",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3047,2320,190,-360,70,25",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=e f,2709.3,190,-220,150,50",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3049,2870,190,-360,70,25",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=o f,3078.31,190,-220,150,50",
+        "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3041,3200,190,-360,70,25",
         "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=n f,3526.6,190,-220,150,50",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=a ts,619.6,190,-220,150,50",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=\u3064\u3043,670,190,-360,70,25",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=i ts,1301.27,190,-220,150,50",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=\u3064,1360,190,-360,70,25",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=u ts,1746.69,190,-220,150,50",
-        "_\u3064\u3041\u3064\u3043\u3064\u3064\u3047\u3064\u3049\u3064\u3041\u3093\u3064\u3041.wav=\u3064\u3047,1930,190,-360,70,25",
     ]
+    post_lines = list(pre_lines)
+    post_lines[5] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=u f,2640.95,190,-220,150,50"
+    post_lines[6] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3047,2820,190,-360,70,25"
+    post_lines[7] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=e f,3209.3,190,-220,150,50"
+    post_lines[8] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3049,3370,190,-360,70,25"
+    post_lines[9] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=o f,3578.31,190,-220,150,50"
+    post_lines[10] = "_\u3075\u3041\u3075\u3043\u3075\u3075\u3047\u3075\u3049\u3075\u3041\u3093\u3075\u3041.wav=\u3075\u3041,3700,190,-360,70,25"
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("\n".join(pre_lines) + "\n", encoding="utf-8")
+    post.write_text("\n".join(post_lines) + "\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["shifted_underscore_kana_delayed_slot_rows"] == 6
+    repaired_lines = post.read_text(encoding="utf-8").splitlines()
+    for index in range(5, 11):
+        pre_offset = float(pre_lines[index].split(",", 2)[1])
+        repaired_offset = float(repaired_lines[index].split(",", 2)[1])
+        assert repaired_offset == pytest.approx(pre_offset)
 
 
 def test_no_mfa_lightgbm_safety_filter_restores_initial_standalone_vowel_profile(tmp_path):
@@ -5020,6 +14038,114 @@ def test_no_mfa_lightgbm_safety_filter_restores_initial_standalone_vowel_profile
     assert report["restored_initial_standalone_vowel_rows"] == 1
     assert report["changed_rows"] == 1
     assert post.read_text(encoding="utf-8").splitlines()[0] == "_i-wi-chi.wav=\u3044A3,1557.5,125,-360,0,0"
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_standalone_vowel_offset_cutoff_only(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("v.wav=a,100,130,-300,20,10\n", encoding="utf-8")
+    post.write_text("v.wav=a,210,150,-680,30,12\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["restored_initial_standalone_vowel_rows"] == 0
+    assert report["restored_standalone_vowel_offset_cutoff_rows"] == 1
+    assert post.read_text(encoding="utf-8").strip() == "v.wav=a,100,150,-300,30,12"
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_cv_head_cutoff_only_then_caps_profile(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("head.wav=- \u3042,1040,160,-430,120,85\n", encoding="utf-8")
+    post.write_text("head.wav=- \u3042,1080,180,-890,130,95\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["restored_cv_head_cutoff_rows"] == 1
+    assert report["capped_cv_head_vowel_pre_overlap_rows"] == 1
+    assert post.read_text(encoding="utf-8").strip() == "head.wav=- \u3042,1080,180,-430,90,45"
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_spaced_consonant_only(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+    from core.generation.common.oto_alias_family import alias_family
+
+    assert alias_family("ka a") == "spaced"
+
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("row.wav=ka a,1000,210,-300,170,80\n", encoding="utf-8")
+    post.write_text("row.wav=ka a,980,315,-330,180,85\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["restored_spaced_consonant_rows"] == 1
+    assert post.read_text(encoding="utf-8").strip() == "row.wav=ka a,980,210,-330,180,85"
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_vv_overlap_only(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+    from core.generation.common.oto_alias_family import alias_family
+
+    assert alias_family("a \u3042") == "vv"
+
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("vv.wav=a \u3042,100,420,-600,300,100\n", encoding="utf-8")
+    post.write_text("vv.wav=a \u3042,120,450,-650,280,25\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["restored_vv_overlap_rows"] == 1
+    assert report["capped_overlap_rows"] == 0
+    assert post.read_text(encoding="utf-8").strip() == "vv.wav=a \u3042,120,450,-650,280,100"
+
+
+def test_no_mfa_lightgbm_safety_filter_restores_terminal_vc_overlap_only(tmp_path):
+    from core.generation.common.oto_ml_safety import apply_no_mfa_lightgbm_safety_filter
+    from core.generation.common.oto_alias_family import alias_family
+
+    assert alias_family("a -6") == "vc"
+
+    pre = tmp_path / "pre.ini"
+    post = tmp_path / "post.ini"
+    pre.write_text("tail.wav=a -6,1000,220,-240,170,30\n", encoding="utf-8")
+    post.write_text("tail.wav=a -6,1010,230,-250,180,80\n", encoding="utf-8")
+
+    report = apply_no_mfa_lightgbm_safety_filter(
+        pre_oto_path=str(pre),
+        post_oto_path=str(post),
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert report["restored_terminal_vc_overlap_rows"] == 1
+    assert report["capped_overlap_rows"] == 0
+    assert post.read_text(encoding="utf-8").strip() == "tail.wav=a -6,1010,230,-250,180,30"
 
 
 def test_no_mfa_lightgbm_safety_filter_caps_vowel_cv_head_pre_overlap(tmp_path):
@@ -5679,6 +14805,96 @@ def test_hsmm_workflow_with_source_oto_preserves_base_alias_rows(tmp_path, monke
     assert "base_oto_alias_list_used" in report.warnings
 
 
+def test_mfa_free_preview_template_preserve_applies_cvvc_profile_repair(tmp_path, monkeypatch):
+    from ml.scripts.mfa_free_oto import predict_oto_preview
+
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir()
+    wav_path = wav_dir / "ki_ku.wav"
+    _write_tone_wav(wav_path, duration_s=0.45)
+    source_oto = wav_dir / "oto.ini"
+    source_oto.write_text("ki_ku.wav=ki,0,0,0,0,0\n", encoding="utf-8")
+
+    times = [0.0, 40.0, 80.0]
+    posterior = FramePosterior(
+        wav_path=str(wav_path),
+        times_ms=times,
+        class_probs={
+            "silence": [0.05, 0.05, 0.05],
+            "consonant": [0.80, 0.70, 0.20],
+            "vowel": [0.10, 0.20, 0.75],
+            "other": [0.05, 0.05, 0.05],
+        },
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+        metadata={},
+    )
+    prediction = SimpleNamespace(
+        posterior=posterior,
+        slot_result=None,
+        decoded_events=[],
+        to_json_dict=lambda: {"stub": True},
+    )
+
+    monkeypatch.setattr(predict_oto_preview, "predict_wav", lambda *args, **kwargs: prediction)
+    monkeypatch.setattr(
+        predict_oto_preview,
+        "assign_template_row_anchors",
+        lambda posterior, event_source, template_rows, **kwargs: [
+            OtoAnchor(anchor_abs_ms=250.0, score=0.8, role="cv_boundary", source_event_label="cv_boundary")
+            for _row in template_rows
+        ],
+    )
+
+    def fake_adapt_template_row(template_row, anchor, *, file_duration_ms, config):
+        return AdaptedOtoRow(
+            wav=template_row.wav,
+            alias=template_row.alias,
+            timing=OtoTiming(
+                offset=100.0,
+                consonant=190.0,
+                cutoff=-900.0,
+                preutterance=150.0,
+                overlap=115.0,
+            ),
+            source_timing=template_row.timing,
+            anchor=anchor,
+            mode=config.mode,
+        )
+
+    monkeypatch.setattr(predict_oto_preview, "adapt_template_row", fake_adapt_template_row)
+    out_oto = tmp_path / "preview.ini"
+    out_json = tmp_path / "anchors.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "predict_oto_preview",
+            "--wav-dir",
+            str(wav_dir),
+            "--source-oto",
+            str(source_oto),
+            "--out-oto",
+            str(out_oto),
+            "--out-json",
+            str(out_json),
+            "--language",
+            "japanese",
+            "--format-type",
+            "CVVC",
+        ],
+    )
+
+    assert predict_oto_preview.main() == 0
+    assert out_oto.read_text(encoding="utf-8").strip() == (
+        "ki_ku.wav=ki,180.000,150.000,-360.000,70.000,25.000"
+    )
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    row = payload["rows"][0]["generated_oto_rows"][0]
+    assert "cvvc_cv_role_profile_repair" in row["applied_rules"]
+    assert any(warning.startswith("cvvc_cv_role_profile_repaired:") for warning in row["warnings"])
+
+
 def test_mfa_free_preview_bootstrap_uses_filename_row_plan(tmp_path, monkeypatch):
     from dataclasses import replace
 
@@ -5871,19 +15087,12 @@ def test_mfa_free_preview_split_summary_log_is_readable():
     assert any("review_session: review.review_session.json" in log for log in dummy.logs)
 
 
-def test_hsmm_oto_ui_preview_uses_review_generate_hsmm(tmp_path):
+def test_hsmm_oto_ui_preview_uses_review_generate_hsmm(tmp_path, monkeypatch):
     from ui.pipeline_actions_mixin import PipelineActionsMixin
-
-    class FakeProcess:
-        returncode = 0
-
-        def wait(self):
-            return 0
 
     class Dummy(PipelineActionsMixin):
         def __init__(self):
             self.logs = []
-            self.commands = []
             self.writable_data_dir = str(tmp_path)
             self.app_data_dir = ""
             self.app_dir = str(tmp_path)
@@ -5891,34 +15100,31 @@ def test_hsmm_oto_ui_preview_uses_review_generate_hsmm(tmp_path):
         def _append_log(self, message):
             self.logs.append(str(message))
 
-        def _popen_subprocess_hidden(self, cmd, **kwargs):
-            self.commands.append(list(cmd))
-            return FakeProcess()
+    calls = []
 
-        def _iter_decoded_stdout_lines(self, process):
-            generated_path = tmp_path / "generated.ini"
-            generated_path.write_text("a.wav=a,0,0,0,0,0\nb.wav=i,0,0,0,0,0\n", encoding="utf-8")
-            return iter(
-                [
-                    json.dumps(
-                        {
-                            "processed": 2,
-                            "total": 2,
-                            "generated_oto_path": str(generated_path),
-                            "split_counts": {
-                                "total": 2,
-                                "fix_required": 0,
-                                "attention_only": 1,
-                                "clean": 1,
-                            },
-                            "split_output_paths": {
-                                "review_session": str(tmp_path / "review_session.json"),
-                            },
-                        },
-                        ensure_ascii=False,
-                    )
-                ]
-            )
+    def _fake_generate_hsmm_oto_review(**kwargs):
+        calls.append(dict(kwargs))
+        generated_path = tmp_path / "generated.ini"
+        generated_path.write_text("a.wav=a,0,0,0,0,0\nb.wav=i,0,0,0,0,0\n", encoding="utf-8")
+        if kwargs.get("callback"):
+            kwargs["callback"]("fake decoder progress")
+        return {
+            "ok": True,
+            "processed": 2,
+            "total": 2,
+            "generated_oto_path": str(generated_path),
+            "split_counts": {
+                "total": 2,
+                "fix_required": 0,
+                "attention_only": 1,
+                "clean": 1,
+            },
+            "split_output_paths": {
+                "review_session": str(tmp_path / "review_session.json"),
+            },
+        }
+
+    monkeypatch.setattr("ui.pipeline_actions_mixin.generate_hsmm_oto_review", _fake_generate_hsmm_oto_review)
 
     wav_dir = tmp_path / "wav"
     wav_dir.mkdir()
@@ -5936,30 +15142,23 @@ def test_hsmm_oto_ui_preview_uses_review_generate_hsmm(tmp_path):
     assert errors == []
     assert generated == 2
     assert total == 2
-    assert dummy.commands
-    command = dummy.commands[0]
-    assert command[:4] == [sys.executable or "python", "-m", "scripts.dev.mfa_free_oto_review", "generate"]
-    assert "--use-hsmm-decoder" in command
-    assert "--template-oto" not in command
-    assert "--checkpoint" not in command
+    assert calls
+    call = calls[0]
+    assert call["template_oto"] == ""
+    assert call["encoder"] == "acoustic_world_v1"
+    assert call["alias_type"] == "auto"
     assert out_path.read_text(encoding="utf-8").count("\n") == 2
     assert any("no base oto" in log for log in dummy.logs)
+    assert any("fake decoder progress" in log for log in dummy.logs)
     assert any("review_session:" in log for log in dummy.logs)
 
 
-def test_hsmm_oto_ui_preview_can_request_lightgbm_postprocess(tmp_path):
+def test_hsmm_oto_ui_preview_can_request_lightgbm_postprocess(tmp_path, monkeypatch):
     from ui.pipeline_actions_mixin import PipelineActionsMixin
-
-    class FakeProcess:
-        returncode = 0
-
-        def wait(self):
-            return 0
 
     class Dummy(PipelineActionsMixin):
         def __init__(self):
             self.logs = []
-            self.commands = []
             self.writable_data_dir = str(tmp_path)
             self.app_data_dir = ""
             self.app_dir = str(tmp_path)
@@ -5967,35 +15166,30 @@ def test_hsmm_oto_ui_preview_can_request_lightgbm_postprocess(tmp_path):
         def _append_log(self, message):
             self.logs.append(str(message))
 
-        def _popen_subprocess_hidden(self, cmd, **kwargs):
-            self.commands.append(list(cmd))
-            return FakeProcess()
+    calls = []
 
-        def _iter_decoded_stdout_lines(self, process):
-            generated_path = tmp_path / "generated.ini"
-            pre_lightgbm_path = tmp_path / "pre_lightgbm.ini"
-            generated_path.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
-            pre_lightgbm_path.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
-            return iter(
-                [
-                    json.dumps(
-                        {
-                            "processed": 1,
-                            "total": 1,
-                            "generated_oto_path": str(generated_path),
-                            "lightgbm_postprocess": {
-                                "enabled": True,
-                                "status": "applied",
-                                "changed": 1,
-                                "pre_lightgbm_path": str(pre_lightgbm_path),
-                            },
-                            "split_counts": {"total": 1, "fix_required": 0, "attention_only": 0, "clean": 1},
-                            "split_output_paths": {},
-                        },
-                        ensure_ascii=False,
-                    )
-                ]
-            )
+    def _fake_generate_hsmm_oto_review(**kwargs):
+        calls.append(dict(kwargs))
+        generated_path = tmp_path / "generated.ini"
+        pre_lightgbm_path = tmp_path / "pre_lightgbm.ini"
+        generated_path.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+        pre_lightgbm_path.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+        return {
+            "ok": True,
+            "processed": 1,
+            "total": 1,
+            "generated_oto_path": str(generated_path),
+            "lightgbm_postprocess": {
+                "enabled": True,
+                "status": "applied",
+                "changed": 1,
+                "pre_lightgbm_path": str(pre_lightgbm_path),
+            },
+            "split_counts": {"total": 1, "fix_required": 0, "attention_only": 0, "clean": 1},
+            "split_output_paths": {},
+        }
+
+    monkeypatch.setattr("ui.pipeline_actions_mixin.generate_hsmm_oto_review", _fake_generate_hsmm_oto_review)
 
     wav_dir = tmp_path / "wav"
     wav_dir.mkdir()
@@ -6017,30 +15211,21 @@ def test_hsmm_oto_ui_preview_can_request_lightgbm_postprocess(tmp_path):
     assert errors == []
     assert generated == 1
     assert total == 1
-    command = dummy.commands[0]
-    assert "--apply-lightgbm" in command
-    policy_index = command.index("--lightgbm-policy")
-    assert command[policy_index + 1] == "on"
-    model_index = command.index("--lightgbm-model-dir")
-    assert command[model_index + 1] == str(model_dir.resolve())
+    call = calls[0]
+    assert call["apply_lightgbm"] is True
+    assert call["lightgbm_policy"] == "on"
+    assert call["lightgbm_model_dir"] == str(model_dir.resolve())
     assert any("LightGBM postprocess requested" in log for log in dummy.logs)
     assert any("LightGBM postprocess: status=applied, changed=1" in log for log in dummy.logs)
     assert any("pre-LightGBM oto:" in log for log in dummy.logs)
 
 
-def test_hsmm_oto_ui_preview_passes_base_oto_as_template(tmp_path):
+def test_hsmm_oto_ui_preview_passes_base_oto_as_template(tmp_path, monkeypatch):
     from ui.pipeline_actions_mixin import PipelineActionsMixin
-
-    class FakeProcess:
-        returncode = 0
-
-        def wait(self):
-            return 0
 
     class Dummy(PipelineActionsMixin):
         def __init__(self):
             self.logs = []
-            self.commands = []
             self.writable_data_dir = str(tmp_path)
             self.app_data_dir = ""
             self.app_dir = str(tmp_path)
@@ -6048,27 +15233,22 @@ def test_hsmm_oto_ui_preview_passes_base_oto_as_template(tmp_path):
         def _append_log(self, message):
             self.logs.append(str(message))
 
-        def _popen_subprocess_hidden(self, cmd, **kwargs):
-            self.commands.append(list(cmd))
-            return FakeProcess()
+    calls = []
 
-        def _iter_decoded_stdout_lines(self, process):
-            generated_path = tmp_path / "generated.ini"
-            generated_path.write_text("a.wav=base alias,0,0,0,0,0\n", encoding="utf-8")
-            return iter(
-                [
-                    json.dumps(
-                        {
-                            "processed": 1,
-                            "total": 1,
-                            "generated_oto_path": str(generated_path),
-                            "split_counts": {"total": 1, "fix_required": 0, "attention_only": 0, "clean": 1},
-                            "split_output_paths": {},
-                        },
-                        ensure_ascii=False,
-                    )
-                ]
-            )
+    def _fake_generate_hsmm_oto_review(**kwargs):
+        calls.append(dict(kwargs))
+        generated_path = tmp_path / "generated.ini"
+        generated_path.write_text("a.wav=base alias,0,0,0,0,0\n", encoding="utf-8")
+        return {
+            "ok": True,
+            "processed": 1,
+            "total": 1,
+            "generated_oto_path": str(generated_path),
+            "split_counts": {"total": 1, "fix_required": 0, "attention_only": 0, "clean": 1},
+            "split_output_paths": {},
+        }
+
+    monkeypatch.setattr("ui.pipeline_actions_mixin.generate_hsmm_oto_review", _fake_generate_hsmm_oto_review)
 
     wav_dir = tmp_path / "wav"
     wav_dir.mkdir()
@@ -6088,10 +15268,7 @@ def test_hsmm_oto_ui_preview_passes_base_oto_as_template(tmp_path):
     assert errors == []
     assert generated == 1
     assert total == 1
-    command = dummy.commands[0]
-    template_index = command.index("--template-oto")
-    assert command[template_index + 1] == str(source_oto.resolve())
-    assert "--use-hsmm-decoder" in command
+    assert calls[0]["template_oto"] == str(source_oto.resolve())
     assert any("base oto alias list:" in log and str(source_oto.resolve()) in log for log in dummy.logs)
     assert any("base oto timing ignored" in log for log in dummy.logs)
 

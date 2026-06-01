@@ -246,6 +246,46 @@ def _resolve_default_mfa_free_checkpoint() -> str:
     return candidates[0]
 
 
+def _resolve_default_no_mfa_boundary_checkpoint() -> str:
+    for env_name in ("UTOA_NO_MFA_BOUNDARY_MODEL", "UTOA_PHONEME_BOUNDARY_MODEL"):
+        env_path = str(os.environ.get(env_name, "") or "").strip()
+        if env_path and os.path.isfile(env_path):
+            return os.path.abspath(env_path)
+    try:
+        from core.phoneme_boundary.discovery import list_available_phoneme_boundary_models
+
+        models = list_available_phoneme_boundary_models()
+        for item in models:
+            path = str(item.get("path", "") or "").strip()
+            if path and os.path.isfile(path):
+                return os.path.abspath(path)
+    except Exception:
+        pass
+    roots = [
+        str(os.environ.get("UTOA_APP_DIR", "") or "").strip(),
+        os.getcwd(),
+    ]
+    candidates: list[str] = []
+    for base in roots:
+        if not base:
+            continue
+        root = os.path.join(base, "ml_workspace", "mfa_free_oto")
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                low = str(name).lower()
+                if not low.endswith(".pt"):
+                    continue
+                if "phoneme_boundary" in low or "boundary" in low:
+                    candidates.append(os.path.join(dirpath, name))
+    candidates = [os.path.abspath(path) for path in candidates if os.path.isfile(path)]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return candidates[0]
+
+
 def _load_runtime_baseline_metrics() -> dict[str, float]:
     hint = str(os.environ.get("UTOA_NO_MFA_BASELINE_METRICS_JSON", "") or "").strip()
     candidates: list[str] = []
@@ -578,6 +618,182 @@ def _build_wav_lookup(wav_dir: str) -> tuple[dict[str, str], dict[str, str]]:
     return exact, normalized
 
 
+def _apply_no_mfa_file_consistency(
+    *,
+    language: str,
+    oto_path: str,
+    format_type: str,
+    callback: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    lang = str(language or "").strip().lower() or "japanese"
+    fmt = str(format_type or "").strip().lower()
+    if lang != "japanese" or "cvvc" not in fmt:
+        return {"enabled": False, "reason": "scope_not_japanese_cvvc"}
+    if not oto_path or not os.path.isfile(oto_path):
+        return {"enabled": True, "status": "skipped", "reason": "missing_oto"}
+    try:
+        from core.generation.common.oto_generator import validate_oto_params
+        from core.generation.ja.ja_oto_file_consistency import apply_ja_vc_neighbor_to_oto_file
+
+        stats = apply_ja_vc_neighbor_to_oto_file(
+            oto_path,
+            validate_fn=validate_oto_params,
+            log_fn=callback,
+        )
+        changed = int(stats.get("total_changed", 0) or 0)
+        if changed > 0:
+            _log(callback, f"[No-MFA] file consistency: changed={changed}.")
+        return {
+            "enabled": True,
+            "status": "applied" if changed > 0 else "no_change",
+            **dict(stats),
+        }
+    except Exception as exc:
+        _log(callback, f"[No-MFA] file consistency skipped: {exc}")
+        return {"enabled": True, "status": "failed", "reason": str(exc)}
+
+
+def _boundary_candidate_config_from_env():
+    from core.generation.common.oto_boundary_candidates import CandidateConfig, parse_float_map, parse_role_labels
+
+    preset = str(os.environ.get("UTOA_NO_MFA_BOUNDARY_CANDIDATE_PRESET", "cv_safe") or "cv_safe").strip().lower()
+    if preset in {"cv_vc_p90_safe", "cv-vc-p90-safe", "cv_vc_p90", "cv-vc-p90"}:
+        role_labels = {"cv": "vowel_onset", "vc": "vowel_end"}
+        max_shift = 60.0
+        role_max_shift = {"cv": 40.0, "vc": 50.0}
+        role_margin = {"vc": 0.08}
+        neighbor_guard = False
+    elif preset in {"cv_vc_safe", "cv-vc-safe", "cv_vc", "cv-vc"}:
+        role_labels = {"cv": "vowel_onset", "vc": "vowel_end"}
+        max_shift = 60.0
+        role_max_shift = {"cv": 60.0, "vc": 50.0}
+        role_margin = {"vc": 0.08}
+        neighbor_guard = False
+    elif preset in {"cv_vc_guarded", "cv-vc-guarded", "guarded"}:
+        role_labels = {"cv": "vowel_onset", "vc": "vowel_end"}
+        max_shift = 60.0
+        role_max_shift = {"cv": 60.0, "vc": 50.0}
+        role_margin = {"vc": 0.05}
+        neighbor_guard = True
+    elif preset in {"vc_guarded", "vc-guarded"}:
+        role_labels = {"vc": "vowel_end"}
+        max_shift = 50.0
+        role_max_shift = {"vc": 50.0}
+        role_margin = {"vc": 0.05}
+        neighbor_guard = True
+    else:
+        role_labels = {"cv": "vowel_onset"}
+        max_shift = 60.0
+        role_max_shift = {"cv": 60.0}
+        role_margin = {}
+        neighbor_guard = False
+
+    role_override = str(os.environ.get("UTOA_NO_MFA_BOUNDARY_ROLE_LABELS", "") or "").strip()
+    if role_override:
+        role_labels = parse_role_labels(role_override)
+    role_max_override = str(os.environ.get("UTOA_NO_MFA_BOUNDARY_ROLE_MAX_SHIFT_MS", "") or "").strip()
+    if role_max_override:
+        role_max_shift = parse_float_map(role_max_override)
+    role_margin_override = str(os.environ.get("UTOA_NO_MFA_BOUNDARY_ROLE_MIN_SCORE_MARGIN", "") or "").strip()
+    if role_margin_override:
+        role_margin = parse_float_map(role_margin_override)
+
+    return CandidateConfig(
+        role_labels=role_labels,
+        search_radius_ms=_env_float("UTOA_NO_MFA_BOUNDARY_SEARCH_RADIUS_MS", 120.0),
+        max_shift_ms=_env_float("UTOA_NO_MFA_BOUNDARY_MAX_SHIFT_MS", max_shift),
+        min_shift_ms=_env_float("UTOA_NO_MFA_BOUNDARY_MIN_SHIFT_MS", 8.0),
+        min_score=_env_float("UTOA_NO_MFA_BOUNDARY_MIN_SCORE", 0.18),
+        min_score_margin=_env_float("UTOA_NO_MFA_BOUNDARY_MIN_SCORE_MARGIN", 0.035),
+        min_quality=_env_float("UTOA_NO_MFA_BOUNDARY_MIN_QUALITY", 0.0),
+        min_new_offset_ms=_env_float("UTOA_NO_MFA_BOUNDARY_MIN_NEW_OFFSET_MS", 0.0),
+        skip_edge_peaks=not _env_bool("UTOA_NO_MFA_BOUNDARY_KEEP_EDGE_PEAKS", False),
+        center_penalty_per_ms=_env_float("UTOA_NO_MFA_BOUNDARY_CENTER_PENALTY_PER_MS", 0.0),
+        role_max_shift_ms=role_max_shift,
+        role_min_score_margin=role_margin,
+        neighbor_guard_enabled=_env_bool("UTOA_NO_MFA_BOUNDARY_NEIGHBOR_GUARD", neighbor_guard),
+        neighbor_guard_min_gap_ms=_env_float("UTOA_NO_MFA_BOUNDARY_NEIGHBOR_GUARD_MIN_GAP_MS", 10.0),
+    )
+
+
+def _apply_no_mfa_boundary_candidate_postprocess(
+    *,
+    language: str,
+    oto_path: str,
+    wav_dir: str,
+    format_type: str,
+    callback: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    if not _env_bool("UTOA_NO_MFA_BOUNDARY_CANDIDATES_ENABLE", False):
+        return {"enabled": False, "reason": "disabled"}
+    lang = str(language or "").strip().lower() or "japanese"
+    fmt = str(format_type or "").strip().lower()
+    if lang != "japanese" or "cvvc" not in fmt:
+        return {"enabled": False, "reason": "scope_not_japanese_cvvc"}
+    if not oto_path or not os.path.isfile(oto_path):
+        return {"enabled": True, "status": "skipped", "reason": "missing_oto"}
+    if not wav_dir or not os.path.isdir(wav_dir):
+        return {"enabled": True, "status": "skipped", "reason": "missing_wav_dir"}
+    model_path = _resolve_default_no_mfa_boundary_checkpoint()
+    if not model_path:
+        _log(callback, "[No-MFA] boundary candidate postprocess skipped: model not found.")
+        return {"enabled": True, "status": "skipped", "reason": "missing_model"}
+    config = _boundary_candidate_config_from_env()
+    report_path = ""
+    try:
+        from core.generation.common.oto_boundary_candidates import (
+            apply_boundary_candidates_to_oto_file,
+            config_to_json,
+        )
+
+        _log(
+            callback,
+            "[No-MFA] boundary candidate postprocess: "
+            f"model={os.path.basename(model_path)} roles={','.join(sorted(config.role_labels))}",
+        )
+        report = apply_boundary_candidates_to_oto_file(
+            oto_path=oto_path,
+            wav_dir=wav_dir,
+            model_path=model_path,
+            config=config,
+            out_path=oto_path,
+            device=str(os.environ.get("UTOA_NO_MFA_BOUNDARY_DEVICE", os.environ.get("UTOA_MFA_FREE_OTO_DEVICE", "auto")) or "auto"),
+            use_acoustic_heuristics=not _env_bool("UTOA_NO_MFA_BOUNDARY_DISABLE_ACOUSTIC_HEURISTICS", False),
+            heuristic_weight=_env_float("UTOA_NO_MFA_BOUNDARY_HEURISTIC_WEIGHT", 0.28),
+        )
+        if _env_bool("UTOA_NO_MFA_BOUNDARY_REPORT_ENABLE", True):
+            report_path = f"{oto_path}.boundary_candidates.report.json"
+            with open(report_path, "w", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        summary = dict(report.get("summary") or {}) if isinstance(report, dict) else {}
+        score_maps = dict(report.get("score_maps") or {}) if isinstance(report, dict) else {}
+        adjusted_by_family = (
+            dict(summary.get("adjusted_by_family_label") or {}) if isinstance(summary.get("adjusted_by_family_label"), dict) else {}
+        )
+        changed = int(summary.get("adjusted_rows", 0) or 0)
+        _log(
+            callback,
+            "[No-MFA] boundary candidate postprocess: "
+            f"changed={changed}, wav_scores={int(score_maps.get('loaded_wavs', 0) or 0)}/"
+            f"{int(score_maps.get('requested_wavs', 0) or 0)}",
+        )
+        return {
+            "enabled": True,
+            "status": "applied" if changed > 0 else "no_change",
+            "changed_rows": changed,
+            "model_path": model_path,
+            "report_path": report_path,
+            "score_maps_loaded": int(score_maps.get("loaded_wavs", 0) or 0),
+            "score_maps_requested": int(score_maps.get("requested_wavs", 0) or 0),
+            "adjusted_by_family_label": adjusted_by_family,
+            "config": config_to_json(config),
+        }
+    except Exception as exc:
+        _log(callback, f"[No-MFA] boundary candidate postprocess skipped: {exc}")
+        return {"enabled": True, "status": "failed", "reason": str(exc), "model_path": model_path}
+
+
 def _apply_no_mfa_ml_correction(
     *,
     language: str,
@@ -655,6 +871,11 @@ def _apply_no_mfa_ml_correction(
                         f"restored_terminal_v={int(safety_report.get('restored_terminal_standalone_vowel_rows', 0) or 0)}, "
                         f"retimed_terminal_v={int(safety_report.get('retimed_terminal_standalone_vowel_companion_rows', 0) or 0)}, "
                         f"restored_initial_v={int(safety_report.get('restored_initial_standalone_vowel_rows', 0) or 0)}, "
+                        f"restored_v_offset_cutoff={int(safety_report.get('restored_standalone_vowel_offset_cutoff_rows', 0) or 0)}, "
+                        f"restored_cv_head_cutoff={int(safety_report.get('restored_cv_head_cutoff_rows', 0) or 0)}, "
+                        f"restored_spaced_consonant={int(safety_report.get('restored_spaced_consonant_rows', 0) or 0)}, "
+                        f"restored_vv_overlap={int(safety_report.get('restored_vv_overlap_rows', 0) or 0)}, "
+                        f"restored_terminal_vc_overlap={int(safety_report.get('restored_terminal_vc_overlap_rows', 0) or 0)}, "
                         f"restored_cv_fixed_cutoff={int(safety_report.get('restored_cv_fixed_cutoff_rows', 0) or 0)}, "
                         f"restored_underscore_vc_positive_offset_shift={int(safety_report.get('restored_underscore_vc_positive_offset_shift_rows', 0) or 0)}, "
                         f"regularized_following_cv_block_offset={int(safety_report.get('regularized_following_cv_block_offset_rows', 0) or 0)}, "
@@ -1606,6 +1827,43 @@ def generate_no_mfa_auto_oto(
                 callback=callback,
             )
             runtime_metrics = dict(runtime_report.metrics or {})
+            consistency_report = _apply_no_mfa_file_consistency(
+                language=str(language or "japanese"),
+                oto_path=normalized_out_path,
+                format_type=resolved_format_type,
+                callback=callback,
+            )
+            if bool(consistency_report.get("enabled")):
+                runtime_metrics["file_consistency_changed"] = float(consistency_report.get("total_changed", 0) or 0)
+                runtime_metrics["file_consistency_row_plan_ordered_wavs"] = float(
+                    consistency_report.get("row_plan_ordered_wavs", 0) or 0
+                )
+                runtime_metrics["file_consistency_row_plan_fallback_wavs"] = float(
+                    consistency_report.get("row_plan_fallback_wavs", 0) or 0
+                )
+            boundary_candidate_report = _apply_no_mfa_boundary_candidate_postprocess(
+                language=str(language or "japanese"),
+                oto_path=normalized_out_path,
+                wav_dir=wav_dir,
+                format_type=resolved_format_type,
+                callback=callback,
+            )
+            if bool(boundary_candidate_report.get("enabled")):
+                runtime_metrics["boundary_candidate_postprocess_requested"] = 1.0
+                runtime_metrics["boundary_candidate_postprocess_changed"] = float(
+                    boundary_candidate_report.get("changed_rows", 0) or 0
+                )
+                runtime_metrics["boundary_candidate_score_maps_loaded"] = float(
+                    boundary_candidate_report.get("score_maps_loaded", 0) or 0
+                )
+                adjusted_by_family = boundary_candidate_report.get("adjusted_by_family_label")
+                if isinstance(adjusted_by_family, dict):
+                    for family, labels in adjusted_by_family.items():
+                        if not isinstance(labels, dict):
+                            continue
+                        runtime_metrics[f"boundary_candidate_adjusted_{family}"] = float(
+                            sum(int(value or 0) for value in labels.values())
+                        )
             if _env_bool("UTOA_MFA_FREE_HSMM_LIGHTGBM_ENABLE", False):
                 lightgbm_changed = _apply_no_mfa_ml_correction(
                     language=str(language or "japanese"),
@@ -1630,6 +1888,7 @@ def generate_no_mfa_auto_oto(
                 metrics=runtime_metrics,
                 baseline_metrics=baseline_metrics,
                 comparison=runtime_delta,
+                boundary_candidate_postprocess=boundary_candidate_report,
             )
             _log(
                 callback,

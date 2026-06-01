@@ -75,6 +75,7 @@ _JAPANESE_CVVC_UNDERSCORE_KANA_SLOT1_HEAD_GAP_MAX_MS = 180.0
 _JAPANESE_CVVC_UNDERSCORE_KANA_SLOT1_NEXT_GAP_MIN_MS = 550.0
 _JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_SHIFT_MS = -500.0
 _JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_GAP_MIN_MS = 460.0
+_JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_MIN_ML_LATE_MS = 250.0
 _TERMINAL_STANDALONE_VOWEL_OFFSET_AFTER_TERMINAL_MS = 100.0
 _TERMINAL_STANDALONE_VOWEL_CONSONANT_MS = 125.0
 _TERMINAL_STANDALONE_VOWEL_CUTOFF_MS = 260.0
@@ -178,6 +179,11 @@ def apply_no_mfa_lightgbm_safety_filter(
     restored_terminal_standalone_vowel_rows = 0
     retimed_terminal_standalone_vowel_companion_rows = 0
     restored_initial_standalone_vowel_rows = 0
+    restored_standalone_vowel_offset_cutoff_rows = 0
+    restored_cv_head_cutoff_rows = 0
+    restored_spaced_consonant_rows = 0
+    restored_vv_overlap_rows = 0
+    restored_terminal_vc_overlap_rows = 0
     restored_cv_fixed_cutoff_rows = 0
     repaired_vc_cutoff_order_rows = 0
     restored_underscore_vc_positive_offset_shift_rows = 0
@@ -290,6 +296,26 @@ def apply_no_mfa_lightgbm_safety_filter(
                     post_lines[post_record.line_index] = pre_record.line
                     changed_line_indices.add(post_record.line_index)
                     restored_initial_standalone_vowel_rows += 1
+                continue
+            adjusted_line = _replace_oto_offset_and_cutoff(
+                post_lines[post_record.line_index],
+                offset=pre_record.offset,
+                cutoff=pre_record.cutoff,
+            )
+            if adjusted_line != post_lines[post_record.line_index]:
+                post_lines[post_record.line_index] = adjusted_line
+                changed_line_indices.add(post_record.line_index)
+                restored_standalone_vowel_offset_cutoff_rows += 1
+            continue
+        if family == "cv_head":
+            adjusted_line = _replace_oto_cutoff(
+                post_lines[post_record.line_index],
+                pre_record.cutoff,
+            )
+            if adjusted_line != post_lines[post_record.line_index]:
+                post_lines[post_record.line_index] = adjusted_line
+                changed_line_indices.add(post_record.line_index)
+                restored_cv_head_cutoff_rows += 1
             continue
         if family == "terminal_v_dash":
             if post_lines[post_record.line_index] != pre_record.line:
@@ -302,6 +328,16 @@ def apply_no_mfa_lightgbm_safety_filter(
                 post_lines[post_record.line_index] = pre_record.line
                 changed_line_indices.add(post_record.line_index)
                 restored_breath_rows += 1
+            continue
+        if family == "spaced":
+            adjusted_line = _replace_oto_consonant(
+                post_lines[post_record.line_index],
+                consonant=pre_record.consonant,
+            )
+            if adjusted_line != post_lines[post_record.line_index]:
+                post_lines[post_record.line_index] = adjusted_line
+                changed_line_indices.add(post_record.line_index)
+                restored_spaced_consonant_rows += 1
             continue
         if family == "cv":
             adjusted_line = post_lines[post_record.line_index]
@@ -329,6 +365,7 @@ def apply_no_mfa_lightgbm_safety_filter(
         if family not in {"vc", "vv"}:
             continue
         adjusted_line = post_lines[post_record.line_index]
+        restored_overlap_to_pre = False
         if family == "vc":
             adjusted_line, cutoff_repaired = _repair_vc_cutoff_order_line(adjusted_line)
             if cutoff_repaired:
@@ -338,8 +375,20 @@ def apply_no_mfa_lightgbm_safety_filter(
                 if capped_line != adjusted_line:
                     adjusted_line = capped_line
                     restored_underscore_vc_positive_offset_shift_rows += 1
+            if _is_terminal_vc_alias(post_record.alias):
+                capped_line = _replace_oto_overlap(adjusted_line, pre_record.overlap)
+                if capped_line != adjusted_line:
+                    adjusted_line = capped_line
+                    restored_terminal_vc_overlap_rows += 1
+                    restored_overlap_to_pre = True
+        if family == "vv":
+            capped_line = _replace_oto_overlap(adjusted_line, pre_record.overlap)
+            if capped_line != adjusted_line:
+                adjusted_line = capped_line
+                restored_vv_overlap_rows += 1
+                restored_overlap_to_pre = True
         allowed_overlap = pre_record.overlap + max_overlap_increase
-        if post_record.overlap > allowed_overlap + 1e-6:
+        if not restored_overlap_to_pre and post_record.overlap > allowed_overlap + 1e-6:
             capped_line = _replace_oto_overlap(adjusted_line, allowed_overlap)
             if capped_line != adjusted_line:
                 adjusted_line = capped_line
@@ -390,7 +439,7 @@ def apply_no_mfa_lightgbm_safety_filter(
         changed_line_indices.update(shifted_slot1_indices)
         shifted_underscore_kana_slot1_rows += len(shifted_slot1_indices)
 
-    shifted_delayed_slot_indices = _shift_underscore_kana_delayed_slot_offsets(post_lines)
+    shifted_delayed_slot_indices = _shift_underscore_kana_delayed_slot_offsets(post_lines, pre_records)
     if shifted_delayed_slot_indices:
         changed_line_indices.update(shifted_delayed_slot_indices)
         shifted_underscore_kana_delayed_slot_rows += len(shifted_delayed_slot_indices)
@@ -417,6 +466,13 @@ def apply_no_mfa_lightgbm_safety_filter(
             retimed_terminal_standalone_vowel_companion_rows
         ),
         "restored_initial_standalone_vowel_rows": int(restored_initial_standalone_vowel_rows),
+        "restored_standalone_vowel_offset_cutoff_rows": int(
+            restored_standalone_vowel_offset_cutoff_rows
+        ),
+        "restored_cv_head_cutoff_rows": int(restored_cv_head_cutoff_rows),
+        "restored_spaced_consonant_rows": int(restored_spaced_consonant_rows),
+        "restored_vv_overlap_rows": int(restored_vv_overlap_rows),
+        "restored_terminal_vc_overlap_rows": int(restored_terminal_vc_overlap_rows),
         "restored_cv_fixed_cutoff_rows": int(restored_cv_fixed_cutoff_rows),
         "repaired_vc_cutoff_order_rows": int(repaired_vc_cutoff_order_rows),
         "restored_underscore_vc_positive_offset_shift_rows": int(
@@ -1422,7 +1478,10 @@ def _shift_underscore_kana_collapsed_slot1_offsets(post_lines: list[str]) -> set
     return changed_indices
 
 
-def _shift_underscore_kana_delayed_slot_offsets(post_lines: list[str]) -> set[int]:
+def _shift_underscore_kana_delayed_slot_offsets(
+    post_lines: list[str],
+    pre_records: Mapping[tuple[str, str, int], _OtoLineRecord],
+) -> set[int]:
     grouped: dict[str, list[_OtoLineRecord]] = {}
     occurrences: dict[tuple[str, str], int] = {}
     for line_index, line in enumerate(post_lines):
@@ -1503,12 +1562,21 @@ def _shift_underscore_kana_delayed_slot_offsets(post_lines: list[str]) -> set[in
                     > float(_JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_GAP_MIN_MS)
                 ):
                     for record in [*transition_rows, *cv_rows]:
+                        pre_record = pre_records.get(record.key)
+                        if pre_record is None:
+                            continue
                         current_offset = float(
                             _line_offset(post_lines[record.line_index]) or record.offset
                         )
+                        if (
+                            current_offset - float(pre_record.offset)
+                            < float(_JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_MIN_ML_LATE_MS)
+                        ):
+                            continue
                         target_offset = current_offset + float(
                             _JAPANESE_CVVC_UNDERSCORE_KANA_DELAYED_SLOT_SHIFT_MS
                         )
+                        target_offset = max(target_offset, float(pre_record.offset))
                         adjusted_line = _replace_oto_offset(
                             post_lines[record.line_index],
                             offset=target_offset,
@@ -1667,6 +1735,14 @@ def _alias_has_attached_pitch_suffix(alias: str) -> bool:
     return bool(value and _ALIAS_ATTACHED_PITCH_SUFFIX_RE.search(value))
 
 
+def _is_terminal_vc_alias(alias: str) -> bool:
+    parts = [part.strip() for part in str(alias or "").split() if part.strip()]
+    if len(parts) < 2:
+        return False
+    right = _strip_attached_pitch_suffix_preserve_case(parts[-1]).strip()
+    return right.startswith("-")
+
+
 def _cv_next_transition_records(
     records: Mapping[tuple[str, str, int], _OtoLineRecord],
 ) -> dict[tuple[str, str, int], _OtoLineRecord]:
@@ -1748,6 +1824,17 @@ def _replace_oto_offset(line: str, *, offset: float) -> str:
     if len(parts) < 6:
         return line
     parts[1] = _format_oto_number(offset)
+    return f"{wav_name}={','.join(parts)}"
+
+
+def _replace_oto_consonant(line: str, *, consonant: float) -> str:
+    if "=" not in line:
+        return line
+    wav_name, rest = line.split("=", 1)
+    parts = rest.split(",")
+    if len(parts) < 6:
+        return line
+    parts[2] = _format_oto_number(consonant)
     return f"{wav_name}={','.join(parts)}"
 
 

@@ -26,12 +26,21 @@ def main():
     ap.add_argument("--min-mapping-confidence", type=float, default=0.0)
     ap.add_argument("--num-boost-round", type=int, default=500)
     ap.add_argument("--early-stopping-rounds", type=int, default=50)
+    ap.add_argument(
+        "--target-mode",
+        choices=["default", "direct", "delta"],
+        default="default",
+        help="Target mode override. Use delta for residual-only calibration experiments.",
+    )
     ap.add_argument("--require-train-keep", action="store_true")
     ap.add_argument("--exclude-nuclei-fallback", action="store_true")
     args = ap.parse_args()
 
     alias_types = [v.strip() for v in str(args.alias_types).split(",") if v.strip()]
     alias_family = str(args.alias_family or "").strip()
+    target_mode = str(args.target_mode or "default").strip().lower()
+    if target_mode != "default":
+        os.environ["UTOA_ML_TARGET_MODE"] = target_mode
 
     meta = train_lightgbm_bundle(
         language=args.lang,

@@ -200,6 +200,11 @@ def _apply_generate_lightgbm_postprocess(
                 f"restored_terminal_v={int(safety_report.get('restored_terminal_standalone_vowel_rows', 0) or 0)}, "
                 f"retimed_terminal_v={int(safety_report.get('retimed_terminal_standalone_vowel_companion_rows', 0) or 0)}, "
                 f"restored_initial_v={int(safety_report.get('restored_initial_standalone_vowel_rows', 0) or 0)}, "
+                f"restored_v_offset_cutoff={int(safety_report.get('restored_standalone_vowel_offset_cutoff_rows', 0) or 0)}, "
+                f"restored_cv_head_cutoff={int(safety_report.get('restored_cv_head_cutoff_rows', 0) or 0)}, "
+                f"restored_spaced_consonant={int(safety_report.get('restored_spaced_consonant_rows', 0) or 0)}, "
+                f"restored_vv_overlap={int(safety_report.get('restored_vv_overlap_rows', 0) or 0)}, "
+                f"restored_terminal_vc_overlap={int(safety_report.get('restored_terminal_vc_overlap_rows', 0) or 0)}, "
                 f"restored_cv_fixed_cutoff={int(safety_report.get('restored_cv_fixed_cutoff_rows', 0) or 0)}, "
                 f"repaired_vc_cutoff_order={int(safety_report.get('repaired_vc_cutoff_order_rows', 0) or 0)}, "
                 f"restored_underscore_vc_positive_offset_shift={int(safety_report.get('restored_underscore_vc_positive_offset_shift_rows', 0) or 0)}, "
@@ -669,6 +674,8 @@ def _cmd_split(args: argparse.Namespace) -> int:
             "timeline_jsonl": str(args.timeline_jsonl or ""),
             "timeline_jsonl_sha256": timeline_jsonl_sha256,
             "wav_root": str(args.wav_root or ""),
+            "language": str(args.language or ""),
+            "format_type": str(args.format_type or ""),
             "source_timing_trusted": False,
         },
     )
@@ -4583,6 +4590,7 @@ def _assemble_replay_oto_rows(
         min_score=0.02,
         use_source_timing_prior=False,
         expected_phones=phones,
+        language=language,
     )
     config = OtoAdapterConfig(
         mode="template-preserve",
@@ -4712,9 +4720,15 @@ def _compare_generated_oto_params(
         name: {"value_ms": 0.0, "wav": "", "alias": "", "occurrence_index": 0}
         for name, _ in _OTO_PARAM_FIELDS
     }
+    absolute_abs_sums = {name: 0.0 for name in _OTO_ABSOLUTE_PARAM_FIELDS}
+    absolute_max = {
+        name: {"value_ms": 0.0, "wav": "", "alias": "", "occurrence_index": 0}
+        for name in _OTO_ABSOLUTE_PARAM_FIELDS
+    }
     matched_rows = 0
     changed_rows = 0
     split_changed_rows = 0
+    role_delta_stats: dict[str, dict[str, object]] = {}
     missing_in_baseline: list[dict[str, object]] = []
     missing_in_hsmm: list[dict[str, object]] = []
     row_deltas: list[dict[str, object]] = []
@@ -4731,10 +4745,16 @@ def _compare_generated_oto_params(
 
         matched_rows += 1
         params: dict[str, float] = {}
+        absolute_params: dict[str, float] = {}
         max_abs_delta = 0.0
+        absolute_max_abs_delta = 0.0
+        base_params = dict(base["params"])
+        hsmm_params = dict(hsmm_row["params"])
+        base_abs_params = _oto_absolute_param_positions(base_params)
+        hsmm_abs_params = _oto_absolute_param_positions(hsmm_params)
         for param_name, _ in _OTO_PARAM_FIELDS:
-            base_value = float(dict(base["params"])[param_name])
-            hsmm_value = float(dict(hsmm_row["params"])[param_name])
+            base_value = float(base_params[param_name])
+            hsmm_value = float(hsmm_params[param_name])
             delta = hsmm_value - base_value
             abs_delta = abs(delta)
             params[param_name] = _round_ms(delta)
@@ -4747,16 +4767,41 @@ def _compare_generated_oto_params(
                     "occurrence_index": int(key[2]),
                 }
             max_abs_delta = max(max_abs_delta, abs_delta)
+        for param_name in _OTO_ABSOLUTE_PARAM_FIELDS:
+            delta = float(hsmm_abs_params[param_name]) - float(base_abs_params[param_name])
+            abs_delta = abs(delta)
+            absolute_params[param_name] = _round_ms(delta)
+            absolute_abs_sums[param_name] += abs_delta
+            if abs_delta > float(absolute_max[param_name]["value_ms"]):
+                absolute_max[param_name] = {
+                    "value_ms": _round_ms(abs_delta),
+                    "wav": str(key[0]),
+                    "alias": str(key[1]),
+                    "occurrence_index": int(key[2]),
+                }
+            absolute_max_abs_delta = max(absolute_max_abs_delta, abs_delta)
 
         base_status = base_validation.get(key, {})
         hsmm_status = hsmm_validation.get(key, {})
         base_split = str(base_status.get("split", ""))
         hsmm_split = str(hsmm_status.get("split", ""))
         split_changed = bool(base_split or hsmm_split) and base_split != hsmm_split
+        role_family = str(hsmm_status.get("role_family") or base_status.get("role_family") or "unknown").strip().lower()
+        if not role_family:
+            role_family = "unknown"
         if max_abs_delta > 1e-6:
             changed_rows += 1
         if split_changed:
             split_changed_rows += 1
+        _add_role_delta_stats(
+            role_delta_stats,
+            role_family=role_family,
+            key=key,
+            param_deltas=params,
+            absolute_deltas=absolute_params,
+            changed=max_abs_delta > 1e-6,
+            split_changed=split_changed,
+        )
         if max_abs_delta > 1e-6 or split_changed:
             row_deltas.append(
                 {
@@ -4766,15 +4811,19 @@ def _compare_generated_oto_params(
                     "baseline_line_index": int(base["line_index"]),
                     "hsmm_line_index": int(hsmm_row["line_index"]),
                     "max_abs_delta_ms": _round_ms(max_abs_delta),
+                    "absolute_max_abs_delta_ms": _round_ms(absolute_max_abs_delta),
                     "deltas_ms": params,
-                    "baseline_params_ms": dict(base["params"]),
-                    "hsmm_params_ms": dict(hsmm_row["params"]),
+                    "absolute_deltas_ms": absolute_params,
+                    "baseline_params_ms": base_params,
+                    "hsmm_params_ms": hsmm_params,
+                    "baseline_absolute_ms": base_abs_params,
+                    "hsmm_absolute_ms": hsmm_abs_params,
                     "baseline_split": base_split,
                     "hsmm_split": hsmm_split,
                     "split_changed": split_changed,
                     "baseline_reasons": list(base_status.get("reasons", []) or []),
                     "hsmm_reasons": list(hsmm_status.get("reasons", []) or []),
-                    "role_family": str(hsmm_status.get("role_family") or base_status.get("role_family") or ""),
+                    "role_family": role_family,
                 }
             )
 
@@ -4793,6 +4842,10 @@ def _compare_generated_oto_params(
     mean_abs_delta = {
         name: _round_ms(param_abs_sums[name] / matched_rows) if matched_rows else 0.0
         for name, _ in _OTO_PARAM_FIELDS
+    }
+    absolute_mean_abs_delta = {
+        name: _round_ms(absolute_abs_sums[name] / matched_rows) if matched_rows else 0.0
+        for name in _OTO_ABSOLUTE_PARAM_FIELDS
     }
     return {
         "available": True,
@@ -4817,11 +4870,155 @@ def _compare_generated_oto_params(
         "split_changed_rows": split_changed_rows,
         "mean_abs_delta_ms": mean_abs_delta,
         "max_abs_delta_ms": param_max,
+        "absolute_mean_abs_delta_ms": absolute_mean_abs_delta,
+        "absolute_max_abs_delta_ms": absolute_max,
+        "role_delta_summary": _finalize_role_delta_summary(role_delta_stats),
         "row_delta_limit": row_delta_limit,
         "row_delta_rows_total": len(row_deltas),
         "row_delta_rows_included": len(included_rows),
         "largest_rows": included_rows,
     }
+
+
+_OTO_ABSOLUTE_PARAM_FIELDS = ("offset_abs", "overlap_abs", "pre_abs", "fixed_end_abs", "cutoff_abs")
+
+
+def _oto_absolute_param_positions(params: Mapping[str, object]) -> dict[str, float]:
+    offset = float(params.get("offset", 0.0) or 0.0)
+    overlap = float(params.get("overlap", 0.0) or 0.0)
+    pre = float(params.get("preutterance", 0.0) or 0.0)
+    fixed = float(params.get("consonant", 0.0) or 0.0)
+    cutoff = float(params.get("cutoff", 0.0) or 0.0)
+    cutoff_abs = offset + abs(cutoff) if cutoff < 0.0 else offset + cutoff
+    return {
+        "offset_abs": _round_ms(offset),
+        "overlap_abs": _round_ms(offset + max(0.0, overlap)),
+        "pre_abs": _round_ms(offset + max(0.0, pre)),
+        "fixed_end_abs": _round_ms(offset + max(0.0, fixed)),
+        "cutoff_abs": _round_ms(cutoff_abs),
+    }
+
+
+def _new_role_delta_stats() -> dict[str, object]:
+    return {
+        "matched_rows": 0,
+        "changed_rows": 0,
+        "split_changed_rows": 0,
+        "param_abs_sums": {name: 0.0 for name, _ in _OTO_PARAM_FIELDS},
+        "param_signed_sums": {name: 0.0 for name, _ in _OTO_PARAM_FIELDS},
+        "absolute_abs_sums": {name: 0.0 for name in _OTO_ABSOLUTE_PARAM_FIELDS},
+        "absolute_signed_sums": {name: 0.0 for name in _OTO_ABSOLUTE_PARAM_FIELDS},
+        "max_abs_delta_ms": {
+            name: {"value_ms": 0.0, "wav": "", "alias": "", "occurrence_index": 0}
+            for name, _ in _OTO_PARAM_FIELDS
+        },
+        "absolute_max_abs_delta_ms": {
+            name: {"value_ms": 0.0, "wav": "", "alias": "", "occurrence_index": 0}
+            for name in _OTO_ABSOLUTE_PARAM_FIELDS
+        },
+    }
+
+
+def _add_role_delta_stats(
+    role_delta_stats: dict[str, dict[str, object]],
+    *,
+    role_family: str,
+    key: tuple[str, str, int],
+    param_deltas: Mapping[str, object],
+    absolute_deltas: Mapping[str, object],
+    changed: bool,
+    split_changed: bool,
+) -> None:
+    stats = role_delta_stats.setdefault(str(role_family or "unknown"), _new_role_delta_stats())
+    stats["matched_rows"] = int(stats["matched_rows"]) + 1
+    if changed:
+        stats["changed_rows"] = int(stats["changed_rows"]) + 1
+    if split_changed:
+        stats["split_changed_rows"] = int(stats["split_changed_rows"]) + 1
+    _add_delta_field_stats(
+        stats,
+        sum_key="param_abs_sums",
+        signed_sum_key="param_signed_sums",
+        max_key="max_abs_delta_ms",
+        fields=[name for name, _ in _OTO_PARAM_FIELDS],
+        deltas=param_deltas,
+        key=key,
+    )
+    _add_delta_field_stats(
+        stats,
+        sum_key="absolute_abs_sums",
+        signed_sum_key="absolute_signed_sums",
+        max_key="absolute_max_abs_delta_ms",
+        fields=list(_OTO_ABSOLUTE_PARAM_FIELDS),
+        deltas=absolute_deltas,
+        key=key,
+    )
+
+
+def _add_delta_field_stats(
+    stats: dict[str, object],
+    *,
+    sum_key: str,
+    signed_sum_key: str,
+    max_key: str,
+    fields: Sequence[str],
+    deltas: Mapping[str, object],
+    key: tuple[str, str, int],
+) -> None:
+    abs_sums = dict(stats[sum_key])
+    signed_sums = dict(stats[signed_sum_key])
+    max_values = dict(stats[max_key])
+    for field in fields:
+        delta = float(deltas.get(field, 0.0) or 0.0)
+        abs_delta = abs(delta)
+        abs_sums[field] = float(abs_sums.get(field, 0.0)) + abs_delta
+        signed_sums[field] = float(signed_sums.get(field, 0.0)) + delta
+        current_max = dict(max_values.get(field, {}))
+        if abs_delta > float(current_max.get("value_ms", 0.0) or 0.0):
+            max_values[field] = {
+                "value_ms": _round_ms(abs_delta),
+                "wav": str(key[0]),
+                "alias": str(key[1]),
+                "occurrence_index": int(key[2]),
+            }
+    stats[sum_key] = abs_sums
+    stats[signed_sum_key] = signed_sums
+    stats[max_key] = max_values
+
+
+def _finalize_role_delta_summary(role_delta_stats: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for role, stats in sorted(role_delta_stats.items()):
+        matched = int(stats.get("matched_rows", 0) or 0)
+        divisor = float(max(1, matched))
+        param_abs_sums = dict(stats.get("param_abs_sums", {}) or {})
+        param_signed_sums = dict(stats.get("param_signed_sums", {}) or {})
+        absolute_abs_sums = dict(stats.get("absolute_abs_sums", {}) or {})
+        absolute_signed_sums = dict(stats.get("absolute_signed_sums", {}) or {})
+        out[str(role)] = {
+            "matched_rows": matched,
+            "changed_rows": int(stats.get("changed_rows", 0) or 0),
+            "split_changed_rows": int(stats.get("split_changed_rows", 0) or 0),
+            "mean_abs_delta_ms": {
+                name: _round_ms(float(param_abs_sums.get(name, 0.0)) / divisor)
+                for name, _ in _OTO_PARAM_FIELDS
+            },
+            "mean_signed_delta_ms": {
+                name: _round_ms(float(param_signed_sums.get(name, 0.0)) / divisor)
+                for name, _ in _OTO_PARAM_FIELDS
+            },
+            "absolute_mean_abs_delta_ms": {
+                name: _round_ms(float(absolute_abs_sums.get(name, 0.0)) / divisor)
+                for name in _OTO_ABSOLUTE_PARAM_FIELDS
+            },
+            "absolute_mean_signed_delta_ms": {
+                name: _round_ms(float(absolute_signed_sums.get(name, 0.0)) / divisor)
+                for name in _OTO_ABSOLUTE_PARAM_FIELDS
+            },
+            "max_abs_delta_ms": dict(stats.get("max_abs_delta_ms", {}) or {}),
+            "absolute_max_abs_delta_ms": dict(stats.get("absolute_max_abs_delta_ms", {}) or {}),
+        }
+    return out
 
 
 def _reference_comparison_failures(reference_comparison: Mapping[str, object]) -> list[dict[str, object]]:
@@ -4909,6 +5106,7 @@ def build_parser() -> argparse.ArgumentParser:
     split_parser.add_argument("--out-dir", required=True, help="Output directory for review files.")
     split_parser.add_argument("--name", default="", help="Output file stem. Defaults to generated file stem.")
     split_parser.add_argument("--language", default="", help="Language hint for OTO encoding, e.g. japanese.")
+    split_parser.add_argument("--format-type", default="", help="Optional OTO format hint, e.g. cvc or cvvc.")
     split_parser.add_argument("--wav-root", default="", help="Voicebank wav root used to read missing durations.")
     split_parser.add_argument(
         "--durations-json",
@@ -4939,7 +5137,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--format-type", default="CV")
     generate_parser.add_argument("--alias-type", default="auto")
     generate_parser.add_argument("--alias-suffix", default="")
-    generate_parser.add_argument("--encoder", default="acoustic", help="Feature encoder. Default keeps MVP dependency-light.")
+    generate_parser.add_argument("--encoder", default="acoustic_world_v1", help="Feature encoder.")
     generate_parser.add_argument("--device", default="", help="Torch device when a checkpoint is used.")
     generate_parser.add_argument("--disable-slot-viterbi", action="store_true")
     generate_parser.add_argument("--use-hsmm-decoder", action="store_true", help="Use filename row-plan HSMM events for no-template generation.")
@@ -5001,7 +5199,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--format-type", default="CV")
     compare_parser.add_argument("--alias-type", default="auto")
     compare_parser.add_argument("--alias-suffix", default="")
-    compare_parser.add_argument("--encoder", default="acoustic", help="Feature encoder. Default keeps MVP dependency-light.")
+    compare_parser.add_argument("--encoder", default="acoustic_world_v1", help="Feature encoder.")
     compare_parser.add_argument("--device", default="", help="Torch device when a checkpoint is used.")
     compare_parser.add_argument("--disable-slot-viterbi", action="store_true")
     compare_parser.add_argument(

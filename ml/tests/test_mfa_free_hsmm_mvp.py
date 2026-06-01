@@ -39,7 +39,12 @@ from core.mfa_free_oto.hsmm_adapter import (
     _max_leading_gap_ms,
     decode_filename_slots_with_hsmm,
 )
-from core.mfa_free_oto.oto_adapter import OtoAdapterConfig, OtoAnchor, expected_slots_for_template_rows
+from core.mfa_free_oto.oto_adapter import (
+    OtoAdapterConfig,
+    OtoAnchor,
+    expected_slots_for_template_rows,
+    timeline_expected_slots_for_template_rows,
+)
 import core.mfa_free_oto.row_plan as row_plan_module
 from core.mfa_free_oto.row_plan import (
     build_filename_row_plan,
@@ -2245,6 +2250,24 @@ def test_hsmm_event_sequence_guard_accepts_implicit_cv_after_vowel_only_cv_head(
     assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
 
 
+def test_hsmm_event_sequence_guard_accepts_moraic_n_vcv_vowel_boundary():
+    expected_slots = [
+        ExpectedSlot(0, 0, "n", "v", "vowel_nucleus"),
+        ExpectedSlot(1, 1, "i", "vcv", "cv_boundary"),
+        ExpectedSlot(2, 2, "n", "vv", "vowel_nucleus"),
+    ]
+    hsmm_events = [
+        {"label": "vv_boundary", "expected_phone_index": 0, "selected_time_ms": 260.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 0, "selected_time_ms": 419.5},
+        {"label": "vv_boundary", "expected_phone_index": 1, "selected_time_ms": 810.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 1, "selected_time_ms": 964.0},
+        {"label": "vv_boundary", "expected_phone_index": 2, "selected_time_ms": 1350.0},
+        {"label": "vowel_nucleus", "expected_phone_index": 2, "selected_time_ms": 1493.0},
+    ]
+
+    assert _hsmm_event_sequence_matches_expected(expected_slots, hsmm_events)
+
+
 def test_hsmm_event_sequence_guard_keeps_interior_cv_boundary_strict():
     expected_slots = [
         ExpectedSlot(0, 0, "a", "implicit_cv", "cv_boundary"),
@@ -2433,6 +2456,159 @@ def test_validate_oto_lines_exposes_rule_based_fallback_as_attention():
     assert metrics["rule_based_inference_rows"] == 2
     assert metrics["rule_based_checkpoint_missing_rows"] == 1
     assert metrics["rule_based_checkpoint_failed_rows"] == 1
+
+
+def test_validate_oto_lines_calibrates_korean_cvc_rule_based_clean_split():
+    records = validate_oto_lines(
+        [
+            "ba.wav=bi,1440,160,-550,60,25",
+            "ba.wav=bu,2030,160,-400,120,85",
+            "ba.wav=i b,1840,120,-154,80,45",
+            "ba.wav=be,2450,160,-250,60,25",
+        ],
+        language="korean",
+        format_type="cvc",
+        wav_durations_ms={"ba.wav": 5000.0},
+        row_diagnostics={
+            0: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+            },
+            1: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+            },
+            2: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+            },
+            3: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_failed_count": 1.0,
+            },
+        },
+    )
+
+    assert records[0].split == SPLIT_CLEAN
+    assert records[0].reasons == ("clean",)
+    assert records[1].split == SPLIT_ATTENTION_ONLY
+    assert records[1].reasons == ("attention.korean_cvc_default_cv_profile",)
+    assert records[2].split == SPLIT_CLEAN
+    assert records[2].reasons == ("clean",)
+    assert records[3].split == SPLIT_ATTENTION_ONLY
+    assert "attention.rule_based_checkpoint_failed" in records[3].reasons
+
+
+def test_validate_oto_lines_calibrates_korean_cvc_low_margin_clean_split():
+    records = validate_oto_lines(
+        [
+            "ba.wav=bi,1440,160,-550,60,25",
+            "ba.wav=bu,2030,160,-400,120,85",
+            "ba.wav=be,2450,160,-430,60,25",
+            "ja.wav=ji,1440,160,-550,60,25",
+        ],
+        language="korean",
+        format_type="cvc",
+        wav_durations_ms={"ba.wav": 5000.0, "ja.wav": 5000.0},
+        row_diagnostics={
+            0: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+                "local_refine_low_margin_count": 1.0,
+                "local_refine_max_delta_ms": 4.5,
+                "local_refine_min_margin": 0.01,
+            },
+            1: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+                "local_refine_low_margin_count": 1.0,
+                "local_refine_max_delta_ms": 4.5,
+                "local_refine_min_margin": 0.01,
+            },
+            2: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+                "local_refine_low_margin_count": 1.0,
+                "local_refine_max_delta_ms": 25.0,
+                "local_refine_min_margin": 0.01,
+            },
+            3: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+                "local_refine_low_margin_count": 1.0,
+                "local_refine_max_delta_ms": 4.5,
+                "local_refine_min_margin": 0.0005,
+            },
+        },
+    )
+
+    assert records[0].split == SPLIT_CLEAN
+    assert records[0].reasons == ("clean",)
+    assert records[1].split == SPLIT_ATTENTION_ONLY
+    assert records[1].reasons == ("attention.korean_cvc_default_cv_profile",)
+    assert records[2].split == SPLIT_ATTENTION_ONLY
+    assert records[2].reasons == ("attention.local_refine_low_margin",)
+    assert records[3].split == SPLIT_ATTENTION_ONLY
+    assert records[3].reasons == ("attention.local_refine_low_margin",)
+
+
+def test_validate_oto_lines_keeps_non_korean_low_margin_attention():
+    records = validate_oto_lines(
+        ["ka.wav=ka,1440,160,-550,60,25"],
+        language="japanese",
+        format_type="cvvc",
+        wav_durations_ms={"ka.wav": 5000.0},
+        row_diagnostics={
+            0: {
+                "local_refine_low_margin_count": 1.0,
+                "local_refine_max_delta_ms": 4.5,
+                "local_refine_min_margin": 0.01,
+            },
+        },
+    )
+
+    assert records[0].split == SPLIT_ATTENTION_ONLY
+    assert records[0].reasons == ("attention.local_refine_low_margin",)
+
+
+def test_split_oto_file_passes_format_type_to_korean_cvc_validation(tmp_path):
+    generated = tmp_path / "generated.ini"
+    generated.write_text(
+        "\n".join(
+            [
+                "ba.wav=bi,1440,160,-550,60,25",
+                "ba.wav=bu,2030,160,-400,120,85",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    split = split_oto_file(
+        str(generated),
+        str(tmp_path / "split"),
+        name="case",
+        language="korean",
+        wav_durations_ms={"ba.wav": 5000.0},
+        row_diagnostics={
+            0: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+            },
+            1: {
+                "rule_based_inference_count": 1.0,
+                "rule_based_checkpoint_missing_count": 1.0,
+            },
+        },
+        session_metadata={"format_type": "cvc"},
+    )
+
+    assert split.counts["clean"] == 1
+    assert split.counts["attention_only"] == 1
+    assert Path(split.output_paths["clean"]).read_text(encoding="utf-8").strip().endswith("=bi,1440,160,-550,60,25")
+    assert Path(split.output_paths["attention_only"]).read_text(encoding="utf-8").strip().endswith(
+        "=bu,2030,160,-400,120,85"
+    )
 
 
 def test_validate_oto_lines_does_not_force_attention_for_hsmm_primary_rule_based_rows():
@@ -3622,6 +3798,96 @@ def test_filename_row_plan_generates_cvvc_alias_order_without_template():
     slots = build_filename_slots("ga_geu_geo.wav", language="korean", format_type="cvvc")
     assert [slot.token for slot in slots] == ["ga", "geu", "geo"]
     assert filename_phone_sequence_from_slots(slots) == ("g", "a", "g", "eu", "g", "eo")
+
+
+def test_korean_cvc_filename_slots_keep_coda_phones_for_template_alignment():
+    slots = build_filename_slots(
+        "mam'mim'mum'mem'mom'meum'meom'mam.wav",
+        language="korean",
+        format_type="cvc",
+    )
+
+    assert [(slot.token, slot.onset, slot.vowel, slot.coda_phones, slot.phones) for slot in slots] == [
+        ("ma", "m", "a", ("m",), ("m", "a", "m")),
+        ("mi", "m", "i", ("m",), ("m", "i", "m")),
+        ("mu", "m", "u", ("m",), ("m", "u", "m")),
+        ("me", "m", "e", ("m",), ("m", "e", "m")),
+        ("mo", "m", "o", ("m",), ("m", "o", "m")),
+        ("meu", "m", "eu", ("m",), ("m", "eu", "m")),
+        ("meo", "m", "eo", ("m",), ("m", "eo", "m")),
+        ("ma", "m", "a", ("m",), ("m", "a", "m")),
+    ]
+    assert filename_phone_sequence_from_slots(slots) == (
+        "m",
+        "a",
+        "m",
+        "m",
+        "i",
+        "m",
+        "m",
+        "u",
+        "m",
+        "m",
+        "e",
+        "m",
+        "m",
+        "o",
+        "m",
+        "m",
+        "eu",
+        "m",
+        "m",
+        "eo",
+        "m",
+        "m",
+        "a",
+        "m",
+    )
+
+
+def test_korean_cvc_template_aliases_target_coda_rows_without_one_step_shift():
+    from core.mfa_free_oto.oto_adapter import (
+        OtoTemplateRow,
+        OtoTiming,
+        _assign_alias_target_indices,
+        _alias_phone_sequence,
+        _alias_type_for_row,
+    )
+
+    rows = [
+        OtoTemplateRow("x.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), "")
+        for alias in ("ma", "am", "a m", "mi", "im", "i m", "mu")
+    ]
+    phones = ("m", "a", "m", "m", "i", "m", "m", "u", "m")
+
+    assert [_alias_type_for_row(row.alias, "auto") for row in rows] == [
+        "cv",
+        "vc",
+        "vc",
+        "cv",
+        "vc",
+        "vc",
+        "cv",
+    ]
+    assert _assign_alias_target_indices(rows, phones) == [1, 2, 2, 4, 5, 5, 7]
+
+    timeline_slots = timeline_expected_slots_for_template_rows(rows, phones, language="korean")
+    assert [(slot.phone_index, slot.phone, slot.role, slot.event_label) for slot in timeline_slots] == [
+        (1, "a", "cv", "cv_boundary"),
+        (2, "m", "vc", "phone_change"),
+        (4, "i", "implicit_cv", "cv_boundary"),
+        (5, "m", "vc", "phone_change"),
+        (7, "u", "implicit_cv", "cv_boundary"),
+    ]
+    assert all(slot.phone_index not in {3, 6} for slot in timeline_slots)
+
+    y_rows = [
+        OtoTemplateRow("y.wav", alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), "")
+        for alias in ("jjya", "jjye", "jjyeo", "jjyo", "jjyu", "jjeui")
+    ]
+    y_phones = ("ya", "j", "j", "ya", "j", "j", "ye", "j", "j", "yeo", "j", "j", "yo", "j", "j", "yu", "j", "j", "eui")
+    assert _alias_phone_sequence("jjeui") == ["j", "j", "eui"]
+    assert _assign_alias_target_indices(y_rows, y_phones) == [3, 6, 9, 12, 15, 18]
 
 
 def test_japanese_cvvc_kana_filename_slots_preserve_kw_and_yoon_onsets():
@@ -5405,6 +5671,57 @@ def test_compare_hsmm_reports_row_param_deltas_from_generated_oto(tmp_path):
         "preutterance": 5.0,
         "overlap": -5.0,
     }
+
+
+def test_compare_hsmm_reports_role_delta_summary_from_validation_jsonl(tmp_path):
+    baseline_oto = tmp_path / "baseline.ini"
+    hsmm_oto = tmp_path / "hsmm.ini"
+    baseline_oto.write_text(
+        "\n".join(
+            [
+                "_a-a-i-a.wav=a a,100,160,-600,120,85",
+                "_a-a-i-a.wav=ka,900,190,-420,150,115",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    hsmm_oto.write_text(
+        "\n".join(
+            [
+                "_a-a-i-a.wav=a a,90,420,-600,300,100",
+                "_a-a-i-a.wav=ka,900,190,-420,150,115",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    split = split_oto_file(
+        str(hsmm_oto),
+        str(tmp_path / "split"),
+        name="hsmm",
+        row_diagnostics={
+            0: {"row_plan": {"role_family": "vv"}},
+            1: {"row_plan": {"role_family": "cv"}},
+        },
+    )
+    module = runpy.run_path(str(REPO_ROOT / "scripts/dev/mfa_free_oto_review.py"))
+
+    delta = module["_compare_generated_oto_params"](
+        str(baseline_oto),
+        str(hsmm_oto),
+        hsmm_validation_path=split.output_paths["validation_jsonl"],
+        row_delta_limit=10,
+    )
+
+    assert delta["role_delta_summary"]["vv"]["matched_rows"] == 1
+    assert delta["role_delta_summary"]["vv"]["mean_signed_delta_ms"]["preutterance"] == 180.0
+    assert delta["role_delta_summary"]["vv"]["mean_signed_delta_ms"]["overlap"] == 15.0
+    assert delta["role_delta_summary"]["vv"]["absolute_mean_signed_delta_ms"]["pre_abs"] == 170.0
+    assert delta["role_delta_summary"]["cv"]["matched_rows"] == 1
+    assert delta["role_delta_summary"]["cv"]["changed_rows"] == 0
+    assert delta["absolute_mean_abs_delta_ms"]["pre_abs"] == 85.0
+    assert delta["largest_rows"][0]["absolute_deltas_ms"]["pre_abs"] == 170.0
 
 
 def test_evaluate_lightgbm_postprocess_reports_reference_improvement(tmp_path):

@@ -93,6 +93,21 @@ def test_model_forward_shape_when_torch_available():
     assert tuple(out["vowel_logits"].shape[:2]) == (2, 16)
 
 
+def test_boundary_label_weight_overrides_target_sonorant_vc_labels():
+    from core.phoneme_boundary.training import _boundary_label_weight_values
+    from ml.scripts.phoneme_boundary.train import _parse_boundary_label_weights
+
+    weights = _parse_boundary_label_weights("consonant_onset:1.8,vowel_end:1.35,phone_start:0.65")
+    values = _boundary_label_weight_values(
+        labels=("phone_start", "consonant_onset", "vowel_onset", "vowel_nucleus", "vowel_end"),
+        vowel_onset_weight=1.2,
+        vowel_nucleus_weight=0.8,
+        label_weights=weights,
+    )
+
+    assert values == [0.65, 1.8, 1.2, 0.8, 1.35]
+
+
 def test_acoustic_heuristics_emit_boundary_tracks():
     sr = 16000
     silence = np.zeros((sr // 10,), dtype=np.float32)
@@ -103,6 +118,32 @@ def test_acoustic_heuristics_emit_boundary_tracks():
     assert set(BOUNDARY_LABELS).issubset(scores.keys())
     assert max(scores["vowel_nucleus"]) > 0.2
     assert max(scores["vowel_onset"]) > 0.2
+
+
+def test_eval_phoneme_boundary_heuristic_baseline(tmp_path):
+    from scripts.dev.eval_phoneme_boundary import delta_vs_baseline, heuristic_baseline
+
+    wav_path = tmp_path / "sample.wav"
+    _write_tone_wav(wav_path)
+    rows = [
+        {
+            "wav_path": str(wav_path),
+            "language": "japanese",
+            "events": [
+                {"label": "vowel_onset", "time_ms": 20.0, "confidence": 1.0},
+                {"label": "vowel_nucleus", "time_ms": 70.0, "confidence": 1.0},
+            ],
+        }
+    ]
+
+    report = heuristic_baseline(rows, str(tmp_path), search_radius_ms=80.0)
+    assert report["rows"] == 1
+    assert report["events"] == 2
+    assert report["matched_events"] == 2
+    assert report["by_label"]["vowel_onset"]["count"] == 1
+
+    delta = delta_vs_baseline({"mae_ms": 10.0, "p50_ms": 8.0, "p90_ms": 20.0}, report)
+    assert "mae_ms_delta" in delta
 
 
 def test_manifest_builder_merges_alias_order_and_sidecar(tmp_path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -41,6 +41,7 @@ class PhonemeBoundaryTrainConfig:
     vowel_loss_weight: float = 0.20
     boundary_vowel_onset_weight: float = 1.0
     boundary_vowel_nucleus_weight: float = 1.0
+    boundary_label_weights: dict[str, float] = field(default_factory=dict)
 
 
 class PhonemeBoundaryDataset:
@@ -198,6 +199,7 @@ def train_phoneme_boundary_from_manifest(
         labels=tuple(model_cfg.labels),
         vowel_onset_weight=float(cfg.boundary_vowel_onset_weight),
         vowel_nucleus_weight=float(cfg.boundary_vowel_nucleus_weight),
+        label_weights=dict(cfg.boundary_label_weights or {}),
         device=device,
     )
     history: list[dict[str, float]] = []
@@ -294,6 +296,12 @@ def train_phoneme_boundary_from_manifest(
             "amp": bool(use_amp),
             "objective": "phoneme_boundary_frame_events",
             "uses_phone_aux_heads": bool(model_cfg.enable_phone_state_head or model_cfg.enable_phone_identity_heads),
+            "boundary_label_weights": _boundary_label_weight_meta(
+                labels=tuple(model_cfg.labels),
+                vowel_onset_weight=float(cfg.boundary_vowel_onset_weight),
+                vowel_nucleus_weight=float(cfg.boundary_vowel_nucleus_weight),
+                label_weights=dict(cfg.boundary_label_weights or {}),
+            ),
         },
     )
     return {
@@ -481,18 +489,66 @@ def _boundary_label_weight_tensor(
     labels: tuple[str, ...],
     vowel_onset_weight: float,
     vowel_nucleus_weight: float,
+    label_weights: dict[str, float] | None = None,
     device,
 ):
-    weights = np.ones((len(labels),), dtype=np.float32)
+    weights = np.asarray(
+        _boundary_label_weight_values(
+            labels=labels,
+            vowel_onset_weight=vowel_onset_weight,
+            vowel_nucleus_weight=vowel_nucleus_weight,
+            label_weights=label_weights,
+        ),
+        dtype=np.float32,
+    )
+    return torch.from_numpy(weights).to(device)
+
+
+def _boundary_label_weight_values(
+    *,
+    labels: tuple[str, ...],
+    vowel_onset_weight: float,
+    vowel_nucleus_weight: float,
+    label_weights: dict[str, float] | None = None,
+) -> list[float]:
+    from core.phoneme_boundary.types import normalize_boundary_label
+
+    explicit = {
+        normalize_boundary_label(key): max(0.1, float(value))
+        for key, value in dict(label_weights or {}).items()
+        if str(key or "").strip()
+    }
+    out: list[float] = []
     onset_w = max(0.1, float(vowel_onset_weight))
     nucleus_w = max(0.1, float(vowel_nucleus_weight))
-    for idx, label in enumerate(labels):
+    for label in labels:
         text = str(label or "").strip().lower()
+        if text in explicit:
+            out.append(float(explicit[text]))
+            continue
         if text == "vowel_onset":
-            weights[idx] *= onset_w
+            out.append(onset_w)
         elif text == "vowel_nucleus":
-            weights[idx] *= nucleus_w
-    return torch.from_numpy(weights).to(device)
+            out.append(nucleus_w)
+        else:
+            out.append(1.0)
+    return out
+
+
+def _boundary_label_weight_meta(
+    *,
+    labels: tuple[str, ...],
+    vowel_onset_weight: float,
+    vowel_nucleus_weight: float,
+    label_weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    values = _boundary_label_weight_values(
+        labels=labels,
+        vowel_onset_weight=vowel_onset_weight,
+        vowel_nucleus_weight=vowel_nucleus_weight,
+        label_weights=label_weights,
+    )
+    return {label: float(value) for label, value in zip(labels, values)}
 
 
 __all__ = [

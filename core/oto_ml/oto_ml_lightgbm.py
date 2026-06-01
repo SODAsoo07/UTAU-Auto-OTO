@@ -480,7 +480,14 @@ def train_lightgbm_bundle(
     feature_schema = get_feature_schema()
     feature_names = list(feature_schema["feature_names"])
     categorical_features = [c for c in CATEGORICAL_FEATURES if c in feature_names]
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir_abs = os.path.abspath(out_dir)
+    os.makedirs(out_dir_abs, exist_ok=True)
+
+    def _bundle_relpath(path: str) -> str:
+        try:
+            return os.path.relpath(os.path.abspath(path), out_dir_abs).replace(os.sep, "/")
+        except ValueError:
+            return os.path.abspath(path)
 
     def _target_column(target_name: str) -> str:
         if target_mode == "direct":
@@ -545,11 +552,11 @@ def train_lightgbm_bundle(
                 "baseline_mae": float(mean_absolute_error(y_valid_raw, [0.0] * len(y_valid_raw))),
                 "model_mae": float(mean_absolute_error(y_valid_raw, pred)),
             }
-            head_targets[target] = model_path
+            head_targets[target] = _bundle_relpath(model_path)
         return head_metrics, head_targets
 
     # Root head (always trained)
-    out_metrics, targets = _fit_head_models(df, out_dir)
+    out_metrics, targets = _fit_head_models(df, out_dir_abs)
 
     format_heads: Dict[str, Any] = {}
     if _env_flag("UTOA_ML_FORMAT_HEADS", True):
@@ -559,16 +566,16 @@ def train_lightgbm_bundle(
             head_df = df[df["_format_head"] == head_fmt].copy()
             if len(head_df) < 16:
                 continue
-            head_dir = os.path.join(out_dir, "heads", _safe_format_token(head_fmt))
+            head_dir = os.path.join(out_dir_abs, "heads", _safe_format_token(head_fmt))
             head_metrics, head_targets = _fit_head_models(head_df, head_dir)
             format_heads[head_fmt] = {
-                "model_dir": head_dir,
+                "model_dir": _bundle_relpath(head_dir),
                 "rows": int(len(head_df)),
                 "targets": dict(head_targets),
                 "holdout_metrics": dict(head_metrics),
             }
 
-    write_feature_schema(os.path.join(out_dir, "feature_schema.json"))
+    write_feature_schema(os.path.join(out_dir_abs, "feature_schema.json"))
     meta = {
         "backend": "lightgbm",
         "language": language,
@@ -611,9 +618,9 @@ def train_lightgbm_bundle(
             "blank_risk_rows": int(df["blank_risk_score"].ge(0.55).sum()) if "blank_risk_score" in df.columns else 0,
         },
     }
-    with open(os.path.join(out_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir_abs, "model_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(out_dir, "eval_summary.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir_abs, "eval_summary.json"), "w", encoding="utf-8") as f:
         json.dump({"targets": targets, "metrics": out_metrics}, f, ensure_ascii=False, indent=2)
     return meta
 

@@ -24,10 +24,15 @@ from core.mfa_free_oto.oto_adapter import (
     assign_template_row_anchors,
     anchors_from_prediction,
     bootstrap_row,
-    expected_slots_for_template_rows,
     load_oto_template_rows,
+    repair_cvvc_row_sequence,
+    timeline_expected_slots_for_template_rows,
 )
-from core.mfa_free_oto.row_plan import build_filename_template_rows
+from core.mfa_free_oto.row_plan import (
+    build_filename_slots,
+    build_filename_template_rows,
+    filename_phone_sequence_from_slots,
+)
 from core.mfa_free_oto.review_overlay import write_review_html
 from core.mfa_free_oto.runtime_inference import RuntimePrediction, predict_wav
 
@@ -91,7 +96,14 @@ def main() -> int:
     for wav_path in targets:
         row_plan_records = []
         if args.source_oto:
-            expected_phones = infer_filename_phone_sequence(wav_path.name)
+            row_plan_slots = build_filename_slots(
+                wav_path.name,
+                language=args.language,
+                format_type=args.format_type,
+            )
+            expected_phones = list(filename_phone_sequence_from_slots(row_plan_slots))
+            if not expected_phones:
+                expected_phones = infer_filename_phone_sequence(wav_path.name)
             template_rows = template_by_wav.get(wav_path.name.lower()) or []
         else:
             template_rows, row_plan_phones, row_plan_records = build_filename_template_rows(
@@ -100,7 +112,15 @@ def main() -> int:
                 format_type=args.format_type,
             )
             expected_phones = list(row_plan_phones or infer_filename_phone_sequence(wav_path.name))
-        expected_slots = expected_slots_for_template_rows(template_rows, expected_phones) if template_rows else None
+        expected_slots = (
+            timeline_expected_slots_for_template_rows(
+                template_rows,
+                expected_phones,
+                language=args.language,
+            )
+            if template_rows
+            else None
+        )
         prediction = predict_wav(
             wav_path,
             checkpoint_path=args.checkpoint,
@@ -109,6 +129,7 @@ def main() -> int:
             encoder=args.encoder,
             device=args.device,
             use_slot_viterbi=not args.disable_slot_viterbi,
+            language=args.language,
         )
         event_source = _slot_events_for_oto(prediction)
         anchors = anchors_from_prediction(prediction.posterior, event_source)
@@ -123,6 +144,7 @@ def main() -> int:
                 min_score=min(config.min_anchor_score, 0.03),
                 use_source_timing_prior=config.preserve_source_timing,
                 expected_phones=expected_phones,
+                language=config.language,
             )
             for template_row, anchor in zip(template_rows, row_anchors):
                 adapted.append(
@@ -150,6 +172,11 @@ def main() -> int:
                     ),
                 )
             )
+        adapted = repair_cvvc_row_sequence(
+            adapted,
+            config,
+            file_duration_ms=file_duration_ms,
+        )
         generated_rows_json = [row.to_json_dict() for row in adapted]
         line_base = len(out_lines)
         out_lines.extend(row.format_line() for row in adapted)

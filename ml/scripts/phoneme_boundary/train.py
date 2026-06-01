@@ -3,10 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from core.phoneme_boundary.model import PhonemeBoundaryDetectorConfig
 from core.phoneme_boundary.targets import read_boundary_manifest
 from core.phoneme_boundary.training import PhonemeBoundaryTrainConfig, train_phoneme_boundary_from_manifest
+from core.phoneme_boundary.types import BOUNDARY_LABELS, normalize_boundary_label
 
 
 def main() -> int:
@@ -35,6 +42,14 @@ def main() -> int:
     ap.add_argument("--vowel-loss-weight", type=float, default=0.20)
     ap.add_argument("--boundary-vowel-onset-weight", type=float, default=1.0)
     ap.add_argument("--boundary-vowel-nucleus-weight", type=float, default=1.0)
+    ap.add_argument(
+        "--boundary-label-weights",
+        default="",
+        help=(
+            "Comma-separated label:weight overrides for frame-event BCE, "
+            "e.g. consonant_onset:1.6,vowel_end:1.3,phone_start:0.7."
+        ),
+    )
     args = ap.parse_args()
 
     rows = read_boundary_manifest(args.manifest)
@@ -63,6 +78,7 @@ def main() -> int:
         vowel_loss_weight=float(args.vowel_loss_weight),
         boundary_vowel_onset_weight=float(args.boundary_vowel_onset_weight),
         boundary_vowel_nucleus_weight=float(args.boundary_vowel_nucleus_weight),
+        boundary_label_weights=_parse_boundary_label_weights(args.boundary_label_weights),
     )
     result = train_phoneme_boundary_from_manifest(
         rows,
@@ -73,6 +89,26 @@ def main() -> int:
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
+
+def _parse_boundary_label_weights(text: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    allowed = set(BOUNDARY_LABELS)
+    for item in str(text or "").split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"boundary label weight must be label:weight: {part!r}")
+        label_raw, value_raw = part.split(":", 1)
+        label = normalize_boundary_label(label_raw)
+        if label not in allowed:
+            raise ValueError(f"unknown boundary label weight: {label_raw!r}")
+        value = float(value_raw)
+        if value <= 0.0:
+            raise ValueError(f"boundary label weight must be > 0: {part!r}")
+        out[label] = value
+    return out
 
 
 if __name__ == "__main__":

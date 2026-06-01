@@ -31,15 +31,6 @@
           ]
         },
         { "type": "slot", "name": "_slot_pipeline_action_panel" },
-        {
-          "type": "section",
-          "title": "MFA 상태",
-          "fg_color": "overlay",
-          "border_color": "panel_border",
-          "children": [
-            { "type": "slot", "name": "_slot_pipeline_mfa_status" }
-          ]
-        },
         { "type": "slot", "name": "_slot_pipeline_intro" },
         { "type": "slot", "name": "_slot_pipeline_steps" }
       ]

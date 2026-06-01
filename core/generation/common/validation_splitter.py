@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, Mapping, Sequence
 
@@ -110,6 +111,8 @@ def classify_alias_role(alias: str) -> str:
 def validate_oto_lines(
     lines: Sequence[str],
     *,
+    language: str = "",
+    format_type: str = "",
     wav_root: str = "",
     wav_durations_ms: Mapping[str, float] | None = None,
     row_diagnostics: Mapping[int, Mapping[str, object]] | None = None,
@@ -205,6 +208,15 @@ def validate_oto_lines(
                 attention_reasons.append("attention.short_tail")
         diagnostic_metrics = _numeric_diagnostics(diagnostics)
         if not special_zero_template and not trusted_nonphonetic_template:
+            if _korean_cvc_default_cv_profile_needs_attention(
+                language=language,
+                format_type=format_type,
+                role=role,
+                alias=alias,
+                pre=pre,
+                overlap=overlap,
+            ):
+                attention_reasons.append("attention.korean_cvc_default_cv_profile")
             local_margin = diagnostic_metrics.get("hsmm_min_selected_vs_best_local_margin")
             if local_margin is not None:
                 if local_margin < float(hsmm_local_margin_fix):
@@ -242,7 +254,12 @@ def validate_oto_lines(
                     local_refine_changed_attention_delta_ms
                 ):
                     attention_reasons.append("attention.local_refine_changed_anchor")
-            if _metric_positive(diagnostic_metrics, "local_refine_low_margin_count"):
+            if _metric_positive(diagnostic_metrics, "local_refine_low_margin_count") and _local_refine_low_margin_needs_attention(
+                language=language,
+                format_type=format_type,
+                role=role,
+                diagnostic_metrics=diagnostic_metrics,
+            ):
                 attention_reasons.append("attention.local_refine_low_margin")
             if _metric_positive(diagnostic_metrics, "local_refine_rejected_slot_boundary_count"):
                 attention_reasons.append("attention.local_refine_rejected_slot_boundary")
@@ -263,6 +280,11 @@ def validate_oto_lines(
             elif _metric_positive(diagnostic_metrics, "rule_based_inference_count") and not _metric_positive(
                 diagnostic_metrics,
                 "hsmm_decoder_used",
+            ) and _rule_based_inference_needs_attention(
+                language=language,
+                format_type=format_type,
+                role=role,
+                diagnostic_metrics=diagnostic_metrics,
             ):
                 attention_reasons.append("attention.rule_based_inference")
 
@@ -332,8 +354,11 @@ def split_oto_file(
 ) -> SplitResult:
     text = read_text_with_fallback(generated_oto_path)
     lines = text.splitlines()
+    metadata = dict(session_metadata or {})
     records = validate_oto_lines(
         lines,
+        language=language,
+        format_type=str(metadata.get("format_type", "") or ""),
         wav_root=wav_root,
         wav_durations_ms=wav_durations_ms,
         row_diagnostics=row_diagnostics,
@@ -423,7 +448,7 @@ def split_oto_file(
         counts=counts,
         output_paths=output_paths,
         output_sha256=session_output_sha256,
-        metadata=session_metadata or {},
+        metadata=metadata,
     )
     _write_json(output_paths["review_session"], review_session)
     return SplitResult(records=records, counts=counts, output_paths=output_paths, summary=summary)
@@ -575,6 +600,68 @@ def _alias_has_sonorant(alias: str) -> bool:
         for sonorant in sonorants:
             if token.startswith(sonorant) and token != "a":
                 return True
+    return False
+
+
+def _is_korean_cvc_validation_scope(*, language: str, format_type: str) -> bool:
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    return lang in {"korean", "ko", "kr"} and "cvc" in fmt
+
+
+def _korean_cvc_default_cv_profile_needs_attention(
+    *,
+    language: str,
+    format_type: str,
+    role: str,
+    alias: str,
+    pre: float,
+    overlap: float,
+) -> bool:
+    if not _is_korean_cvc_validation_scope(language=language, format_type=format_type):
+        return False
+    if str(role or "").strip().lower() != "cv":
+        return False
+    if re.search(r"\s", str(alias or "")):
+        return False
+    return float(pre) >= 100.0 and float(overlap) >= 70.0
+
+
+def _rule_based_inference_needs_attention(
+    *,
+    language: str,
+    format_type: str,
+    role: str,
+    diagnostic_metrics: Mapping[str, float],
+) -> bool:
+    if not _is_korean_cvc_validation_scope(language=language, format_type=format_type):
+        return True
+    if _metric_positive(diagnostic_metrics, "rule_based_checkpoint_failed_count"):
+        return True
+    if str(role or "").strip().lower() in {"br", "policy_breath"}:
+        return False
+    return False
+
+
+def _local_refine_low_margin_needs_attention(
+    *,
+    language: str,
+    format_type: str,
+    role: str,
+    diagnostic_metrics: Mapping[str, float],
+) -> bool:
+    if not _is_korean_cvc_validation_scope(language=language, format_type=format_type):
+        return True
+    if str(role or "").strip().lower() in {"br", "policy_breath"}:
+        return False
+    local_refine_delta = diagnostic_metrics.get("local_refine_max_delta_ms")
+    local_refine_margin = diagnostic_metrics.get("local_refine_min_margin")
+    if local_refine_delta is None or local_refine_margin is None:
+        return True
+    if abs(float(local_refine_delta)) > 20.0:
+        return True
+    if float(local_refine_margin) < 0.001:
+        return True
     return False
 
 
