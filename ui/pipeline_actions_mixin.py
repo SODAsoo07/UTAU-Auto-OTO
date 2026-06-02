@@ -272,6 +272,14 @@ class PipelineActionsMixin:
                 f"clean={int(counts.get('clean') or 0)}, "
                 f"total={int(counts.get('total') or 0)}"
             )
+        if bool(payload.get("guard_failed")):
+            reasons = [
+                str(item)
+                for item in list(payload.get("review_split_guard_reasons", []) or [])
+                if str(item).strip()
+            ]
+            if reasons:
+                self._append_log(f"[HSMM OTO] review split guard: manual review required ({', '.join(reasons)})")
         paths = payload.get("review_split_output_paths")
         if isinstance(paths, dict) and paths:
             for key in (
@@ -286,6 +294,9 @@ class PipelineActionsMixin:
                 value = str(paths.get(key) or "").strip()
                 if value:
                     self._append_log(f"[HSMM OTO] {key}: {value}")
+        row_provenance_path = str(payload.get("row_provenance_path") or "").strip()
+        if row_provenance_path:
+            self._append_log(f"[HSMM OTO] row_provenance: {row_provenance_path}")
         lightgbm = payload.get("lightgbm_postprocess")
         if isinstance(lightgbm, dict) and lightgbm.get("enabled"):
             status = str(lightgbm.get("status") or "unknown")
@@ -2941,10 +2952,17 @@ class PipelineActionsMixin:
                             wav_dir=target_wav_dir,
                             source_hint=target_tpl_path,
                         )
+                    apply_hsmm_lightgbm = (
+                        self._should_apply_hsmm_lightgbm(enable_ml_correction)
+                        if hasattr(self, "_should_apply_hsmm_lightgbm")
+                        else bool(enable_ml_correction)
+                    )
                     self._append_log(
                         f"{prefix}HSMM OTO 시작: language={lang}, format={selected_format}, "
-                        f"lightgbm={'ON' if enable_ml_correction else 'OFF'}"
+                        f"lightgbm={'ON' if apply_hsmm_lightgbm else 'OFF'}"
                     )
+                    if bool(enable_ml_correction) and not apply_hsmm_lightgbm:
+                        self._append_log(f"{prefix}[HSMM] LightGBM postprocess disabled by developer setting.")
                     if hsmm_source_oto:
                         self._append_log(f"{prefix}[HSMM] base oto: {hsmm_source_oto}")
                     else:
@@ -2957,7 +2975,7 @@ class PipelineActionsMixin:
                         source_oto_path=hsmm_source_oto,
                         language=lang,
                         format_type=selected_format,
-                        apply_lightgbm=enable_ml_correction,
+                        apply_lightgbm=apply_hsmm_lightgbm,
                         callback=_make_target_callback(0.20, 0.65),
                     )
                     self._append_log(f"{prefix}HSMM OTO 완료: processed={processed}/{total}, errors={len(errors or [])}")
@@ -3530,13 +3548,20 @@ class PipelineActionsMixin:
 
                     _set_stage_progress("oto", 0.03)
                     self._set_status("4/5 - HSMM OTO 생성 중...")
+                    apply_hsmm_lightgbm = (
+                        self._should_apply_hsmm_lightgbm(enable_ml_correction)
+                        if hasattr(self, "_should_apply_hsmm_lightgbm")
+                        else bool(enable_ml_correction)
+                    )
+                    if bool(enable_ml_correction) and not apply_hsmm_lightgbm:
+                        self._append_log("[HSMM] LightGBM postprocess disabled by developer setting.")
                     _processed, _total, oto_errors = self._run_hsmm_oto_preview_generation(
                         wav_dir=wav_dir,
                         out_path=out_path,
                         source_oto_path=hsmm_source_oto,
                         language=lang,
                         format_type=selected_format,
-                        apply_lightgbm=enable_ml_correction,
+                        apply_lightgbm=apply_hsmm_lightgbm,
                         callback=_make_stage_callback("oto"),
                     )
                     if oto_errors:

@@ -10,6 +10,7 @@ def adapter_warning_validation_metrics(row: Mapping[str, object] | object) -> di
     out: dict[str, object] = {}
     out.update(_timing_clamp_validation_metrics(row))
     out.update(_row_warning_validation_metrics(row))
+    out.update(_row_rule_validation_metrics(row))
     out.update(_local_refine_validation_metrics(row))
     return out
 
@@ -90,6 +91,16 @@ def _row_warning_validation_metrics(row: Mapping[str, object]) -> dict[str, obje
         out["row_warning_local_gate_low_count"] = 1.0
     if any("missing_local_gate" in warning for warning in warnings):
         out["row_warning_missing_local_gate_count"] = 1.0
+    return out
+
+
+def _row_rule_validation_metrics(row: Mapping[str, object]) -> dict[str, object]:
+    rules = [str(item) for item in list(row.get("applied_rules", []) or [])]
+    if not rules:
+        return {}
+    out: dict[str, object] = {}
+    if "special_alias_source_timing_preserve" in rules:
+        out["special_alias_source_timing_preserve_count"] = 1.0
     return out
 
 

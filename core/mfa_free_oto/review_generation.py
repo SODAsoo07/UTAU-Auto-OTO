@@ -12,7 +12,7 @@ from core.generation.common.validation_diagnostics import (
     adapter_warning_validation_metrics,
     runtime_metadata_validation_metrics,
 )
-from core.generation.common.validation_splitter import split_oto_file
+from core.generation.common.validation_splitter import review_split_guard_reasons, split_oto_file
 from core.mfa_free_oto.evidence_pack import summarize_event_candidate_reliability
 from core.mfa_free_oto.row_plan import build_filename_row_plan, write_row_plan_jsonl
 from core.mfa_free_oto.workflow import generate_no_mfa_oto_with_model_context
@@ -133,6 +133,14 @@ def generate_hsmm_oto_review(
         _write_jsonl(Path(evidence_path), evidence_rows)
         evidence_sha256 = _sha256_file(Path(evidence_path))
 
+    row_provenance_records = _row_provenance_records_from_timeline_records(timeline_rows)
+    row_provenance_path = ""
+    row_provenance_sha256 = ""
+    if row_provenance_records:
+        row_provenance_path = str(root / f"{stem}.row_provenance.jsonl")
+        _write_jsonl(Path(row_provenance_path), row_provenance_records)
+        row_provenance_sha256 = _sha256_file(Path(row_provenance_path))
+
     split = split_oto_file(
         str(generated_path),
         str(root),
@@ -160,11 +168,23 @@ def generate_hsmm_oto_review(
             "evidence_path": evidence_path,
             "evidence_sha256": evidence_sha256,
             "evidence_wavs": len(evidence_rows),
+            "row_provenance_path": row_provenance_path,
+            "row_provenance_sha256": row_provenance_sha256,
+            "row_provenance_rows": len(row_provenance_records),
             "file_consistency": dict(file_consistency),
             "lightgbm_postprocess": dict(lightgbm_postprocess),
             "preferred_encoding_source": str(generated_path),
         },
     )
+    split_guard_reasons = review_split_guard_reasons(split.counts)
+    if split_guard_reasons:
+        emit(
+            "[No-MFA/MFA-Free] review split guard=fail "
+            + ",".join(str(reason) for reason in split_guard_reasons)
+        )
+    warnings = list(report.warnings)
+    warnings.extend(str(reason) for reason in split_guard_reasons)
+    guard_failed = bool(report.guard_failed or split_guard_reasons)
     return {
         "ok": True,
         "generated_oto_path": str(generated_path),
@@ -172,10 +192,11 @@ def generate_hsmm_oto_review(
         "processed": int(report.processed),
         "total": int(report.total),
         "confidence": float(report.confidence),
-        "guard_failed": bool(report.guard_failed),
-        "warnings": list(report.warnings),
+        "guard_failed": guard_failed,
+        "warnings": list(dict.fromkeys(warnings)),
         "messages": messages,
         "metrics": dict(report.metrics or {}),
+        "review_split_guard_reasons": list(split_guard_reasons),
         "row_plan_path": row_plan_path,
         "row_plan_sha256": row_plan_sha256,
         "row_plan_rows": len(row_plan_records),
@@ -185,6 +206,9 @@ def generate_hsmm_oto_review(
         "evidence_path": evidence_path,
         "evidence_sha256": evidence_sha256,
         "evidence_wavs": len(evidence_rows),
+        "row_provenance_path": row_provenance_path,
+        "row_provenance_sha256": row_provenance_sha256,
+        "row_provenance_rows": len(row_provenance_records),
         "file_consistency": dict(file_consistency),
         "lightgbm_postprocess": dict(lightgbm_postprocess),
         "split_counts": dict(split.counts),
@@ -324,7 +348,8 @@ def _apply_lightgbm_postprocess(
                 f"restored_spaced_consonant={int(safety_report.get('restored_spaced_consonant_rows', 0) or 0)}, "
                 f"restored_vv_overlap={int(safety_report.get('restored_vv_overlap_rows', 0) or 0)}, "
                 f"restored_terminal_vc_overlap={int(safety_report.get('restored_terminal_vc_overlap_rows', 0) or 0)}, "
-                f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}."
+                f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}, "
+                f"repaired_parameter_order={int(safety_report.get('repaired_parameter_order_rows', 0) or 0)}."
             )
         return {
             "enabled": True,
@@ -377,6 +402,105 @@ def _row_diagnostics_from_timeline_records(records: list[Mapping[str, object]] |
                 out[line_index] = dict(metrics)
             line_index += 1
     return out
+
+
+def _row_provenance_records_from_timeline_records(
+    records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    global_index = 0
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        wav = str(record.get("wav", "") or "")
+        selected_event_source = str(record.get("selected_event_source", "") or "")
+        hsmm = record.get("hsmm")
+        hsmm_summary = _row_provenance_hsmm_summary(hsmm if isinstance(hsmm, Mapping) else None)
+        for local_index, row in enumerate(list(record.get("adapted_rows", []) or [])):
+            if not isinstance(row, Mapping):
+                continue
+            anchor = row.get("anchor")
+            row_plan = row.get("row_plan")
+            anchor_map = dict(anchor or {}) if isinstance(anchor, Mapping) else {}
+            row_plan_map = dict(row_plan or {}) if isinstance(row_plan, Mapping) else {}
+            slot_index = _provenance_int(
+                row_plan_map.get("slot_index", anchor_map.get("slot_index", -1)),
+                default=-1,
+            )
+            left_slot_index = _provenance_int(row_plan_map.get("left_slot_index", slot_index), default=slot_index)
+            right_slot_index = _provenance_int(row_plan_map.get("right_slot_index", slot_index), default=slot_index)
+            out.append(
+                {
+                    "schema_version": 1,
+                    "global_row_index": int(global_index),
+                    "row_index": _provenance_int(row.get("row_index", local_index), default=int(local_index)),
+                    "wav": wav,
+                    "alias": str(row.get("alias", "") or ""),
+                    "mode": str(row.get("mode", "") or ""),
+                    "role": str(row_plan_map.get("role_family", anchor_map.get("role", "")) or ""),
+                    "selected_event_source": selected_event_source,
+                    "slot": {
+                        "slot_index": int(slot_index),
+                        "left_slot_index": int(left_slot_index),
+                        "right_slot_index": int(right_slot_index),
+                        "expected_phone_index": _provenance_int(
+                            row_plan_map.get(
+                                "expected_phone_index",
+                                anchor_map.get("expected_phone_index", -1),
+                            ),
+                            default=-1,
+                        ),
+                    },
+                    "timing": _json_safe(row.get("timing", {})),
+                    "absolute": _json_safe(row.get("absolute", {})),
+                    "anchor": {
+                        "anchor_abs_ms": anchor_map.get("anchor_abs_ms"),
+                        "score": anchor_map.get("score"),
+                        "role": anchor_map.get("role"),
+                        "source_event_label": anchor_map.get("source_event_label"),
+                        "expected_phone": anchor_map.get("expected_phone"),
+                        "expected_phone_index": anchor_map.get("expected_phone_index"),
+                        "slot_index": anchor_map.get("slot_index"),
+                        "boundary_confidence": anchor_map.get("boundary_confidence"),
+                        "nucleus_confidence": anchor_map.get("nucleus_confidence"),
+                        "warnings": list(anchor_map.get("warnings", []) or []),
+                    },
+                    "row_plan": _json_safe(row_plan_map),
+                    "applied_rules": list(row.get("applied_rules", []) or []),
+                    "warnings": list(row.get("warnings", []) or []),
+                    "hsmm": dict(hsmm_summary),
+                }
+            )
+            global_index += 1
+    return out
+
+
+def _row_provenance_hsmm_summary(hsmm: Mapping[str, object] | None) -> dict[str, object]:
+    if not isinstance(hsmm, Mapping):
+        return {"available": False}
+    return {
+        "available": True,
+        "ok": bool(hsmm.get("ok")),
+        "reason": str(hsmm.get("reason", "") or ""),
+        "score": hsmm.get("score"),
+    }
+
+
+def _provenance_int(value: object, *, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _hsmm_validation_metrics_for_row(record: Mapping[str, object], row: object) -> dict[str, object]:

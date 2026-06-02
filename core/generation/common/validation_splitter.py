@@ -14,11 +14,14 @@ from core.model_context.oto_params import resolve_cutoff_abs_ms, wav_duration_ms
 
 
 VALIDATION_SPLIT_SCHEMA_VERSION = 1
+REVIEW_SPLIT_GUARD_MIN_TOTAL_ROWS = 20
+REVIEW_SPLIT_GUARD_FIX_REQUIRED_RATIO = 0.25
 
 SPLIT_FIX_REQUIRED = "fix_required"
 SPLIT_ATTENTION_ONLY = "attention_only"
 SPLIT_CLEAN = "clean"
 VALIDATION_SPLITS = frozenset({SPLIT_FIX_REQUIRED, SPLIT_ATTENTION_ONLY, SPLIT_CLEAN})
+ATTACHED_PITCH_SUFFIX_RE = re.compile(r"[A-Ga-g](?:#|b)?[0-8](?:[A-Za-z]{1,4})?$")
 
 
 @dataclass(frozen=True)
@@ -99,9 +102,18 @@ def classify_alias_role(alias: str) -> str:
             return "vc"
         return "cv"
     compact = "".join(part for part in text.split())
+    pitch_stripped_compact = "".join(
+        _strip_attached_pitch_suffix_token(part).strip()
+        for part in text.split()
+        if part.strip()
+    )
     if text in {"br", "breath", "sil", "pau", "sp"}:
         return "br"
     if compact.startswith("br") and compact[2:].isdigit():
+        return "br"
+    if pitch_stripped_compact == "br" or (
+        pitch_stripped_compact.startswith("br") and pitch_stripped_compact[2:].isdigit()
+    ):
         return "br"
     if _looks_vowel(text):
         return "v"
@@ -161,7 +173,14 @@ def validate_oto_lines(
         alias = str(row["alias"])
         diagnostics = diagnostics_by_line.get(idx, {})
         row_plan_context = _row_plan_context(diagnostics)
-        role = str(row_plan_context.get("role_family") or classify_alias_role(alias))
+        diagnostic_metrics = _numeric_diagnostics(diagnostics)
+        alias_role = classify_alias_role(alias)
+        role = str(row_plan_context.get("role_family") or alias_role)
+        if _metric_positive(diagnostic_metrics, "special_alias_source_timing_preserve_count") and alias_role in {
+            "br",
+            "policy_breath",
+        }:
+            role = alias_role
         key = (wav, alias)
         occurrence_index = occurrence.get(key, 0)
         occurrence[key] = occurrence_index + 1
@@ -184,7 +203,13 @@ def validate_oto_lines(
             fixed=fixed,
             cutoff=cutoff,
         )
-        trusted_nonphonetic_template = bool(row_plan_context.get("source_timing_trusted", False)) and role in {
+        source_timing_trusted = bool(row_plan_context.get("source_timing_trusted", False))
+        if _metric_positive(diagnostic_metrics, "special_alias_source_timing_preserve_count") and role in {
+            "br",
+            "policy_breath",
+        }:
+            source_timing_trusted = True
+        trusted_nonphonetic_template = source_timing_trusted and role in {
             "br",
             "policy_breath",
         }
@@ -206,7 +231,6 @@ def validate_oto_lines(
                 attention_reasons.append("attention.duration_unknown")
             if role in {"vc", "vv"} and overlap <= 0.0:
                 attention_reasons.append("attention.short_tail")
-        diagnostic_metrics = _numeric_diagnostics(diagnostics)
         if not special_zero_template and not trusted_nonphonetic_template:
             if _korean_cvc_default_cv_profile_needs_attention(
                 language=language,
@@ -217,6 +241,13 @@ def validate_oto_lines(
                 overlap=overlap,
             ):
                 attention_reasons.append("attention.korean_cvc_default_cv_profile")
+            if _korean_cvc_pitch_suffix_rule_based_needs_attention(
+                language=language,
+                format_type=format_type,
+                alias=alias,
+                diagnostic_metrics=diagnostic_metrics,
+            ):
+                attention_reasons.append("attention.korean_cvc_pitch_suffix_rule_based")
             local_margin = diagnostic_metrics.get("hsmm_min_selected_vs_best_local_margin")
             if local_margin is not None:
                 if local_margin < float(hsmm_local_margin_fix):
@@ -321,7 +352,7 @@ def validate_oto_lines(
                 left_slot_index=int(row_plan_context["left_slot_index"]),
                 right_slot_index=int(row_plan_context["right_slot_index"]),
                 source_row_index=int(row_plan_context["source_row_index"]),
-                source_timing_trusted=bool(row_plan_context["source_timing_trusted"]),
+                source_timing_trusted=source_timing_trusted,
                 offset_abs=offset,
                 overlap_abs=overlap_abs,
                 pre_abs=pre_abs,
@@ -452,6 +483,23 @@ def split_oto_file(
     )
     _write_json(output_paths["review_session"], review_session)
     return SplitResult(records=records, counts=counts, output_paths=output_paths, summary=summary)
+
+
+def review_split_guard_reasons(
+    counts: Mapping[str, int],
+    *,
+    min_total_rows: int = REVIEW_SPLIT_GUARD_MIN_TOTAL_ROWS,
+    fix_required_ratio: float = REVIEW_SPLIT_GUARD_FIX_REQUIRED_RATIO,
+) -> tuple[str, ...]:
+    """Return guard reasons when review split quality is too poor for unattended use."""
+    total = int(counts.get("total", 0) or 0)
+    fix_required = int(counts.get(SPLIT_FIX_REQUIRED, 0) or 0)
+    if total < int(min_total_rows):
+        return ()
+    ratio = float(fix_required) / float(max(1, total))
+    if ratio >= float(fix_required_ratio):
+        return (f"review_split_fix_required_ratio_high:{fix_required}/{total}",)
+    return ()
 
 
 def load_validation_records(path: str) -> tuple[ValidationRecord, ...]:
@@ -609,6 +657,38 @@ def _is_korean_cvc_validation_scope(*, language: str, format_type: str) -> bool:
     return lang in {"korean", "ko", "kr"} and "cvc" in fmt
 
 
+def _alias_has_attached_pitch_suffix(alias: str) -> bool:
+    for token in str(alias or "").strip().split():
+        match = ATTACHED_PITCH_SUFFIX_RE.search(token)
+        if match is not None and match.start() > 0:
+            return True
+    return False
+
+
+def _strip_attached_pitch_suffix_token(token: str) -> str:
+    text = str(token or "").strip().lower()
+    match = ATTACHED_PITCH_SUFFIX_RE.search(text)
+    if match is not None and match.start() > 0:
+        return text[: match.start()]
+    return text
+
+
+def _korean_cvc_pitch_suffix_rule_based_needs_attention(
+    *,
+    language: str,
+    format_type: str,
+    alias: str,
+    diagnostic_metrics: Mapping[str, float],
+) -> bool:
+    if not _is_korean_cvc_validation_scope(language=language, format_type=format_type):
+        return False
+    if not _alias_has_attached_pitch_suffix(alias):
+        return False
+    if not _metric_positive(diagnostic_metrics, "rule_based_inference_count"):
+        return False
+    return not _metric_positive(diagnostic_metrics, "hsmm_decoder_used")
+
+
 def _korean_cvc_default_cv_profile_needs_attention(
     *,
     language: str,
@@ -735,6 +815,7 @@ def _numeric_diagnostics(diagnostics: Mapping[str, object] | object) -> dict[str
         "rule_based_inference_count",
         "rule_based_checkpoint_missing_count",
         "rule_based_checkpoint_failed_count",
+        "special_alias_source_timing_preserve_count",
     }
     for key in allowed:
         if key not in diagnostics:
@@ -1131,6 +1212,7 @@ __all__ = [
     "classify_alias_role",
     "load_validation_records",
     "load_validation_records_with_errors",
+    "review_split_guard_reasons",
     "split_oto_file",
     "validate_validation_records",
     "validate_oto_lines",

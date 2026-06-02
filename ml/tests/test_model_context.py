@@ -134,6 +134,11 @@ def test_manual_oto_anchor_uses_utau_negative_cutoff_and_vc_role():
     assert classify_manual_oto_alias_role("a i", language="japanese", format_type="cvvc") == "vv"
     assert manual_oto_alias_order_terms("a k", language="japanese", format_type="cvvc", alias_role="vc")[0] == "a"
     assert manual_oto_alias_order_terms("n my_E4", language="japanese", format_type="cvvc", alias_role="vc")[0] == "n"
+    assert manual_oto_alias_order_terms("a tsBA3", language="japanese", format_type="cvvc", alias_role="vc")[:2] == ["a", "ts"]
+    assert manual_oto_alias_order_terms("n nyA3", language="japanese", format_type="cvvc", alias_role="vc")[:2] == ["n", "ny"]
+    assert classify_manual_oto_alias_role("n nyA3", language="japanese", format_type="cvvc") == "vc"
+    assert classify_manual_oto_alias_role("a RBA3", language="japanese", format_type="cvvc") == "vc"
+    assert classify_manual_oto_alias_role("brC4S", language="korean", format_type="cvc") == "br"
     assert manual_oto_alias_order_terms("\u3042 \u304b", language="japanese", format_type="vcv", alias_role="vcv")[0] == "ka"
 
     record = manual_oto_params_to_anchor_record(

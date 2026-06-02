@@ -560,10 +560,17 @@ class OtoActionsMixin:
                                 wav_dir=target_wav_dir,
                                 source_hint=tpl_path,
                             )
+                        apply_hsmm_lightgbm = (
+                            self._should_apply_hsmm_lightgbm(enable_ml_correction)
+                            if hasattr(self, "_should_apply_hsmm_lightgbm")
+                            else bool(enable_ml_correction)
+                        )
                         self._append_log(
                             f"{prefix}HSMM OTO 시작: target={target_wav_dir}, "
-                            f"format={selected_format}, lightgbm={'ON' if enable_ml_correction else 'OFF'}"
+                            f"format={selected_format}, lightgbm={'ON' if apply_hsmm_lightgbm else 'OFF'}"
                         )
+                        if bool(enable_ml_correction) and not apply_hsmm_lightgbm:
+                            self._append_log(f"{prefix}[HSMM] LightGBM postprocess disabled by developer setting.")
                         if hsmm_source_oto:
                             self._append_log(f"{prefix}[HSMM] base oto: {hsmm_source_oto}")
                         else:
@@ -575,7 +582,7 @@ class OtoActionsMixin:
                             source_oto_path=hsmm_source_oto,
                             language=lang,
                             format_type=selected_format,
-                            apply_lightgbm=enable_ml_correction,
+                            apply_lightgbm=apply_hsmm_lightgbm,
                             callback=_make_progress_callback("oto", batch_index=batch_index, batch_total=batch_total),
                         )
                         self._append_log(f"{prefix}HSMM OTO 완료: processed={processed}/{total}, errors={len(errors or [])}")

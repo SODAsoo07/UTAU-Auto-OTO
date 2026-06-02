@@ -66,6 +66,10 @@ def t(key: str, **kwargs) -> str:
 # ---------------------------------------------------------------------------
 
 _EN: dict[str, str] = {
+    "HSMM LightGBM 후처리 비활성화": "Disable HSMM LightGBM postprocess",
+    "ON이면 HSMM OTO 생성 후 LightGBM 보정 단계를 건너뜁니다.": (
+        "When ON, HSMM OTO generation skips the LightGBM correction step."
+    ),
 
     # ── UI language control ─────────────────────────────────────────────────
     "UI 언어": "UI Language",
@@ -375,6 +379,10 @@ _EN: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _JA: dict[str, str] = {
+    "HSMM LightGBM 후처리 비활성화": "HSMM LightGBM後処理を無効化",
+    "ON이면 HSMM OTO 생성 후 LightGBM 보정 단계를 건너뜁니다.": (
+        "ONの場合、HSMM OTO生成後のLightGBM補正ステップをスキップします。"
+    ),
 
     # ── UI language control ─────────────────────────────────────────────────
     "UI 언어": "UI言語",

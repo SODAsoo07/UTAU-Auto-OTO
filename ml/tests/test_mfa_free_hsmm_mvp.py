@@ -14,13 +14,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.alignment.hsmm_decoder import HSMMStateSpec, decode_segmental_hsmm
+from core.alignment.hsmm_decoder import (
+    HSMMStateFrameWindow,
+    HSMMStateSpec,
+    decode_segmental_hsmm,
+    decode_segmental_hsmm_coarse_to_refine,
+)
 from core.generation.common.final_merge import merge_split_oto
 from core.generation.common.validation_splitter import (
     SPLIT_ATTENTION_ONLY,
     SPLIT_CLEAN,
     SPLIT_FIX_REQUIRED,
     build_row_id,
+    review_split_guard_reasons,
     split_oto_file,
     validate_oto_lines,
 )
@@ -37,6 +43,7 @@ from core.mfa_free_oto.evidence_pack import (
 from core.mfa_free_oto.hsmm_adapter import (
     _max_internal_gap_ms,
     _max_leading_gap_ms,
+    build_hsmm_states_for_slots,
     decode_filename_slots_with_hsmm,
 )
 from core.mfa_free_oto.oto_adapter import (
@@ -183,6 +190,14 @@ def test_validation_splitter_writes_disjoint_subsets_and_summary(tmp_path):
     assert "--review-session" in install_template_args
     assert "--target-oto" in install_template_args
     assert review_session["recommended_next_steps"][5]["dry_run_by_default"] is True
+
+
+def test_review_split_guard_flags_large_fix_required_ratio_only_for_real_sessions():
+    assert review_split_guard_reasons({"total": 381, "fix_required": 169, "attention_only": 198, "clean": 14}) == (
+        "review_split_fix_required_ratio_high:169/381",
+    )
+    assert review_split_guard_reasons({"total": 509, "fix_required": 0, "attention_only": 509, "clean": 0}) == ()
+    assert review_split_guard_reasons({"total": 3, "fix_required": 1, "attention_only": 1, "clean": 1}) == ()
 
 
 def test_validation_splitter_keeps_zero_breath_template_rows_clean():
@@ -2041,6 +2056,89 @@ def test_segmental_hsmm_decoder_recovers_known_sequence_intervals():
     ]
 
 
+def test_segmental_hsmm_decoder_honors_state_frame_windows():
+    times = [float(i * 10) for i in range(50)]
+    states = [
+        HSMMStateSpec("slot0.v", "vowel", 80.0, 130.0, mode_duration_ms=100.0, duration_sigma_ms=12.0),
+    ]
+    frame_scores = {
+        "slot0.v": [2.0 if 300.0 <= t < 400.0 else 1.7 if 80.0 <= t < 180.0 else -2.0 for t in times],
+    }
+
+    unrestricted = decode_segmental_hsmm(
+        states,
+        times,
+        frame_scores,
+        beam_width_per_state=32,
+        timeout_ms=1000,
+        allow_leading_gap=True,
+    )
+    restricted = decode_segmental_hsmm(
+        states,
+        times,
+        frame_scores,
+        beam_width_per_state=32,
+        timeout_ms=1000,
+        allow_leading_gap=True,
+        state_frame_windows={
+            "slot0.v": HSMMStateFrameWindow(
+                start_min_frame=6,
+                start_max_frame=12,
+                end_min_frame=16,
+                end_max_frame=22,
+            )
+        },
+    )
+
+    assert unrestricted.ok
+    assert unrestricted.states[0].start_ms == 300.0
+    assert restricted.ok
+    assert 60.0 <= restricted.states[0].start_ms <= 120.0
+    assert 160.0 <= restricted.states[0].end_ms <= 220.0
+
+
+def test_segmental_hsmm_coarse_to_refine_recovers_known_sequence_intervals():
+    times = [float(i * 10) for i in range(80)]
+    states = [
+        HSMMStateSpec("slot0.c", "consonant", 40.0, 90.0, mode_duration_ms=60.0, duration_sigma_ms=12.0),
+        HSMMStateSpec("slot0.v", "vowel", 90.0, 170.0, mode_duration_ms=130.0, duration_sigma_ms=18.0),
+        HSMMStateSpec("slot1.c", "consonant", 40.0, 90.0, mode_duration_ms=60.0, duration_sigma_ms=12.0),
+        HSMMStateSpec("slot1.v", "vowel", 90.0, 170.0, mode_duration_ms=130.0, duration_sigma_ms=18.0),
+    ]
+
+    def score_range(start: float, end: float) -> list[float]:
+        return [2.0 if start <= t < end else -2.0 for t in times]
+
+    frame_scores = {
+        "slot0.c": score_range(50.0, 110.0),
+        "slot0.v": score_range(110.0, 240.0),
+        "slot1.c": score_range(390.0, 450.0),
+        "slot1.v": score_range(450.0, 580.0),
+    }
+    result = decode_segmental_hsmm_coarse_to_refine(
+        states,
+        times,
+        frame_scores,
+        coarse_stride=4,
+        refine_window_ms=70.0,
+        beam_width_per_state=32,
+        timeout_ms=1000,
+        allow_leading_gap=True,
+        allow_internal_gaps=True,
+        max_internal_gap_ms=220.0,
+    )
+
+    assert result.ok
+    assert result.meta["coarse_to_refine"] is True
+    assert result.meta["coarse_stride"] == 4
+    assert [(s.start_ms, s.end_ms) for s in result.states] == [
+        (50.0, 110.0),
+        (110.0, 240.0),
+        (390.0, 450.0),
+        (450.0, 580.0),
+    ]
+
+
 def test_segmental_hsmm_decoder_can_skip_leading_gap_for_late_segment():
     times = [float(i * 10) for i in range(60)]
     states = [
@@ -2497,6 +2595,56 @@ def test_validate_oto_lines_calibrates_korean_cvc_rule_based_clean_split():
     assert records[2].reasons == ("clean",)
     assert records[3].split == SPLIT_ATTENTION_ONLY
     assert "attention.rule_based_checkpoint_failed" in records[3].reasons
+
+
+def test_validate_oto_lines_marks_korean_cvc_pitch_suffix_rule_based_attention():
+    records = validate_oto_lines(
+        [
+            "ba.wav=biC4S,1440,160,-550,60,25",
+            "ba.wav=i bC4S,1840,120,-154,80,45",
+            "ba.wav=bu,2030,160,-400,60,25",
+        ],
+        language="korean",
+        format_type="cvc",
+        wav_durations_ms={"ba.wav": 5000.0},
+        row_diagnostics={
+            0: {"rule_based_inference_count": 1.0, "rule_based_checkpoint_missing_count": 1.0},
+            1: {"rule_based_inference_count": 1.0, "rule_based_checkpoint_missing_count": 1.0},
+            2: {"rule_based_inference_count": 1.0, "rule_based_checkpoint_missing_count": 1.0},
+        },
+    )
+
+    assert records[0].split == SPLIT_ATTENTION_ONLY
+    assert records[0].reasons == ("attention.korean_cvc_pitch_suffix_rule_based",)
+    assert records[1].split == SPLIT_ATTENTION_ONLY
+    assert records[1].reasons == ("attention.korean_cvc_pitch_suffix_rule_based",)
+    assert records[2].split == SPLIT_CLEAN
+    assert records[2].reasons == ("clean",)
+
+
+def test_validate_oto_lines_trusts_pitch_suffixed_breath_source_timing_metric():
+    records = validate_oto_lines(
+        ["br.wav=brC4S,755.33,510.43,-510.43,195.01,94.1"],
+        language="korean",
+        format_type="cvc",
+        wav_durations_ms={"br.wav": 2742.8571428571427},
+        row_diagnostics={
+            0: {
+                "special_alias_source_timing_preserve_count": 1.0,
+                "row_plan": {
+                    "role_family": "cv",
+                    "source_timing_trusted": False,
+                    "source_row_index": 12,
+                },
+            },
+        },
+    )
+
+    assert len(records) == 1
+    assert records[0].split == SPLIT_CLEAN
+    assert records[0].reasons == ("clean",)
+    assert records[0].role_family == "br"
+    assert records[0].source_timing_trusted is True
 
 
 def test_validate_oto_lines_calibrates_korean_cvc_low_margin_clean_split():
@@ -4040,6 +4188,78 @@ def test_filename_hsmm_adapter_decodes_slot_events_from_acoustic_posterior():
     assert diagnostics["decoded_state_count"] == 4
     assert len(diagnostics["states"]) == 4
     assert all("selected_vs_best_local_margin" in item for item in diagnostics["states"])
+
+
+def test_filename_hsmm_adapter_adds_sonorant_hold_states_without_changing_events():
+    times = [float(i * 10) for i in range(50)]
+    slots = build_filename_slots("ma_mi.wav", language="japanese", format_type="cvvc")
+    states = build_hsmm_states_for_slots(slots, duration_ms=500.0, enable_sonorant_hold=True)
+
+    assert [state.state_id for state in states] == [
+        "slot0.onset",
+        "slot0.onset_hold",
+        "slot0.vowel",
+        "slot1.onset",
+        "slot1.onset_hold",
+        "slot1.vowel",
+    ]
+
+    def active(start: float, end: float) -> list[float]:
+        return [0.90 if start <= t < end else 0.05 for t in times]
+
+    class_probs = {label: [0.05 for _ in times] for label in FRAME_LABELS}
+    class_probs["consonant"] = [
+        max(a, b)
+        for a, b in zip(active(0.0, 80.0), active(210.0, 290.0))
+    ]
+    class_probs["vowel"] = [
+        max(a, b)
+        for a, b in zip(active(80.0, 210.0), active(290.0, 430.0))
+    ]
+    class_probs["silence"] = [0.02 for _ in times]
+    event_scores = {label: [0.02 for _ in times] for label in EVENT_LABELS}
+    event_scores["phone_change"] = [0.95 if t in {0.0, 210.0} else 0.02 for t in times]
+    event_scores["cv_boundary"] = [0.95 if t in {80.0, 290.0} else 0.02 for t in times]
+    event_scores["vowel_nucleus"] = [0.95 if t in {150.0, 360.0} else 0.02 for t in times]
+    posterior = FramePosterior(
+        wav_path="ma_mi.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores={
+            "transition_likelihood": event_scores["cv_boundary"],
+            "onset_strength": event_scores["phone_change"],
+            "sonorant_onset_likelihood": event_scores["phone_change"],
+            "voicing": [0.88 if 0.0 <= t < 430.0 else 0.05 for t in times],
+            "nucleus_likelihood": event_scores["vowel_nucleus"],
+        },
+    )
+
+    decoded = decode_filename_slots_with_hsmm(
+        posterior,
+        slots,
+        beam_width_per_state=48,
+        timeout_ms=1000,
+        use_coarse_to_refine=True,
+        enable_sonorant_hold=True,
+        use_vowel_start_score=True,
+    )
+
+    assert decoded.ok
+    assert decoded.diagnostics["state_count"] == 6
+    labels = [event["label"] for event in decoded.events]
+    assert labels == [
+        "phone_change",
+        "cv_boundary",
+        "vowel_nucleus",
+        "phone_change",
+        "cv_boundary",
+        "vowel_nucleus",
+    ]
+    phone_change_times = [event["selected_time_ms"] for event in decoded.events if event["label"] == "phone_change"]
+    cv_times = [event["selected_time_ms"] for event in decoded.events if event["label"] == "cv_boundary"]
+    assert phone_change_times == pytest.approx([0.0, 210.0], abs=30.0)
+    assert cv_times == pytest.approx([80.0, 290.0], abs=35.0)
 
 
 def test_acoustic_evidence_pack_exports_soft_candidates_and_reliability(tmp_path):
