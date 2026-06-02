@@ -609,6 +609,9 @@ def validate_oto_timing(
     summary = {
         "total_lines": 0,
         "checked_files": 0,
+        "sampled_wavs": 0,
+        "checked_wavs_total": 0,
+        "truncated_issues": 0,
         "warnings": 0,
         "errors": 0,
         "report_path": "",
@@ -650,6 +653,7 @@ def validate_oto_timing(
     by_wav = defaultdict(list)
     for row in parsed_lines:
         by_wav[row["wav"]].append(row)
+    summary["checked_wavs_total"] = len(by_wav)
 
     if language == "japanese":
         from core.ja_oto_generator import classify_ja_alias as classify_fn
@@ -791,6 +795,7 @@ def validate_oto_timing(
 
     warn_count = sum(1 for x in issues if x[0] == "warn")
     err_count = sum(1 for x in issues if x[0] == "error")
+    summary["sampled_wavs"] = summary["checked_files"]
     summary["warnings"] = warn_count
     summary["errors"] = err_count
 

@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from core.mfa_free_oto.oto_adapter import _strip_alias_attached_pitch_suffix_token
 from scripts.dev.diff_oto import build_report
 
 DEFAULT_DIMENSIONS = (
@@ -31,6 +32,22 @@ DEFAULT_DIMENSIONS = (
     "alias_family_x_vc_right_class",
 )
 DEFAULT_PARAMS = ("offset", "preutterance", "overlap", "consonant", "cutoff", "cutoff_end_abs")
+ASSISTED_READY_THRESHOLDS_MS = {
+    "offset": 75.0,
+    "preutterance": 50.0,
+    "overlap": 30.0,
+    "consonant": 75.0,
+    "cutoff": 100.0,
+    "cutoff_end_abs": 100.0,
+}
+ASSISTED_REVIEW_THRESHOLDS_MS = {
+    "offset": 150.0,
+    "preutterance": 100.0,
+    "overlap": 60.0,
+    "consonant": 150.0,
+    "cutoff": 200.0,
+    "cutoff_end_abs": 180.0,
+}
 VOWEL_TOKENS = {"a", "i", "u", "e", "o"}
 NASAL_TOKENS = {"m", "n", "ng", "ny", "my"}
 LIQUID_TOKENS = {"r", "l", "ry"}
@@ -65,6 +82,9 @@ def _strip_token_suffix(token: str) -> str:
         return ""
     if value.startswith("-"):
         return "-"
+    attached_stripped = _strip_alias_attached_pitch_suffix_token(value).strip()
+    if attached_stripped and attached_stripped != value:
+        return attached_stripped
     stripped = re.sub(r"\d+$", "", value)
     return stripped or value
 
@@ -215,7 +235,96 @@ def _quality_summary(rows: list[dict], params: list[str]) -> dict:
         "by_exclusion_reason": dict(sorted(by_reason.items())),
         "trusted_by_param": trusted_by_param,
         "trusted_by_alias_family": _aggregate_by_alias_family(trusted_rows, params),
+        "assisted_use": _assisted_use_summary(rows, params),
     }
+
+
+def _assisted_use_summary(rows: list[dict], params: list[str]) -> dict:
+    assisted_params = _assisted_use_params(params)
+    decisions = [_assisted_use_decision(row, params) for row in rows]
+    by_tier: dict[str, int] = defaultdict(int)
+    by_reason: dict[str, int] = defaultdict(int)
+    for decision in decisions:
+        tier = str(decision.get("tier") or "manual_required")
+        by_tier[tier] += 1
+        for reason in list(decision.get("reasons") or []):
+            by_reason[str(reason)] += 1
+    ready = int(by_tier.get("assisted_ready", 0))
+    review = int(by_tier.get("review_recommended", 0))
+    total = len(rows)
+    trusted_total = sum(1 for row in rows if bool((row.get("quality") or {}).get("trusted")))
+    return {
+        "thresholds_ms": {
+            "assisted_ready": {
+                key: value for key, value in ASSISTED_READY_THRESHOLDS_MS.items() if key in assisted_params
+            },
+            "review_recommended": {
+                key: value for key, value in ASSISTED_REVIEW_THRESHOLDS_MS.items() if key in assisted_params
+            },
+        },
+        "rows_total": total,
+        "trusted_rows": trusted_total,
+        "assisted_ready_rows": ready,
+        "review_recommended_rows": review,
+        "manual_required_rows": int(by_tier.get("manual_required", 0)),
+        "assisted_ready_ratio": round(float(ready) / float(total), 4) if total else 0.0,
+        "assisted_ready_trusted_ratio": round(float(ready) / float(trusted_total), 4) if trusted_total else 0.0,
+        "by_tier": dict(sorted(by_tier.items())),
+        "by_reason": dict(sorted(by_reason.items())),
+    }
+
+
+def _assisted_use_decision(row: dict, params: list[str]) -> dict[str, object]:
+    quality = dict(row.get("quality") or {})
+    if not bool(quality.get("trusted")):
+        reason = str(quality.get("reason") or "untrusted_gold")
+        return {
+            "tier": "manual_required",
+            "reasons": [f"untrusted.{reason}"],
+            "max_ready_ratio": 0.0,
+            "max_review_ratio": 0.0,
+        }
+    delta = dict(row.get("delta") or {})
+    ready_exceeded: list[str] = []
+    review_exceeded: list[str] = []
+    max_ready_ratio = 0.0
+    max_review_ratio = 0.0
+    for param in _assisted_use_params(params):
+        if param not in delta:
+            continue
+        value = abs(_float(delta.get(param)))
+        ready_threshold = ASSISTED_READY_THRESHOLDS_MS.get(param)
+        review_threshold = ASSISTED_REVIEW_THRESHOLDS_MS.get(param)
+        if ready_threshold is not None and ready_threshold > 0.0:
+            max_ready_ratio = max(max_ready_ratio, value / float(ready_threshold))
+            if value > float(ready_threshold):
+                ready_exceeded.append(f"{param}>{ready_threshold:g}ms")
+        if review_threshold is not None and review_threshold > 0.0:
+            max_review_ratio = max(max_review_ratio, value / float(review_threshold))
+            if value > float(review_threshold):
+                review_exceeded.append(f"{param}>{review_threshold:g}ms")
+    if not ready_exceeded:
+        tier = "assisted_ready"
+        reasons: list[str] = []
+    elif not review_exceeded:
+        tier = "review_recommended"
+        reasons = ready_exceeded
+    else:
+        tier = "manual_required"
+        reasons = review_exceeded
+    return {
+        "tier": tier,
+        "reasons": reasons,
+        "max_ready_ratio": round(max_ready_ratio, 4),
+        "max_review_ratio": round(max_review_ratio, 4),
+    }
+
+
+def _assisted_use_params(params: Iterable[str]) -> list[str]:
+    out = [str(param) for param in params]
+    if "cutoff_end_abs" in out:
+        out = [param for param in out if param != "cutoff"]
+    return out
 
 
 def build_stratified_report(
@@ -244,13 +353,17 @@ def build_stratified_report(
     for row in per_row:
         tags = _row_tags(row)
         quality = _row_quality(row, language=language)
+        assisted_use = _assisted_use_decision({"delta": row.get("delta", {}), "quality": quality}, params)
         tagged = {
             "wav": row.get("wav", ""),
             "alias": row.get("alias", ""),
             "occurrence": row.get("occurrence", 0),
             "tags": tags,
             "delta": row.get("delta", {}),
-            "quality": quality,
+            "quality": {
+                **quality,
+                "assisted_use": assisted_use,
+            },
         }
         tagged_rows.append(tagged)
         if bool(trusted_only) and not bool(quality.get("trusted")):
@@ -311,6 +424,7 @@ def build_stratified_report(
         "trusted_only": bool(trusted_only),
         "base_summary": base_report,
         "quality_summary": _quality_summary(tagged_rows, params),
+        "tagged_rows": tagged_rows,
         "by_dimension": by_dimension,
         "priority_buckets": sorted(
             flat_buckets,

@@ -11,6 +11,115 @@ BREATH_ALIASES = frozenset({"br", "bre", "breath", "endbr", "exh", "axh", "息",
 _PITCH_SUFFIX_RE = re.compile(r"(?:[a-g](?:#|b)?-?\d+p?)$", re.IGNORECASE)
 
 
+def _roman_alias_stem_is_phone_like(stem: str) -> bool:
+    text = str(stem or "").strip().lower()
+    if not text or not re.fullmatch(r"[a-z]{1,6}", text):
+        return False
+    vowels = {
+        "eui",
+        "yeo",
+        "yae",
+        "wae",
+        "weo",
+        "eo",
+        "eu",
+        "ae",
+        "ya",
+        "ye",
+        "yo",
+        "yu",
+        "wa",
+        "wo",
+        "we",
+        "wi",
+        "ui",
+        "a",
+        "i",
+        "u",
+        "e",
+        "o",
+        "n",
+    }
+    consonants = {
+        "b",
+        "ch",
+        "d",
+        "dh",
+        "f",
+        "g",
+        "h",
+        "j",
+        "k",
+        "l",
+        "m",
+        "ng",
+        "ny",
+        "p",
+        "r",
+        "s",
+        "sh",
+        "ss",
+        "t",
+        "ts",
+        "v",
+        "w",
+        "y",
+        "z",
+    }
+    yoon = {"ky", "gy", "ny", "hy", "by", "py", "my", "ry", "jy", "dy", "ty"}
+    if not any(ch in VOWELS for ch in text) and text not in (vowels | consonants | yoon):
+        return False
+    units = tuple(sorted(vowels | consonants | yoon, key=len, reverse=True))
+    pos = 0
+    while pos < len(text):
+        unit = next((item for item in units if text.startswith(item, pos)), None)
+        if unit is None:
+            return False
+        pos += len(unit)
+    return True
+
+
+def _strip_roman_attached_pitch_suffix_token(token: str) -> str:
+    raw = str(token or "").strip()
+    if not raw or not all(char.isascii() for char in raw):
+        return ""
+    suffix_re = re.compile(r"[A-Za-z]{0,4}[A-Ga-g](?:#|b)?[0-8][A-Za-z]{0,4}")
+    for split in range(len(raw) - 1, 0, -1):
+        stem = raw[:split].rstrip("_- ").strip()
+        suffix = raw[split:]
+        if not stem or not suffix:
+            continue
+        if not suffix_re.fullmatch(suffix):
+            continue
+        if _roman_alias_stem_is_phone_like(stem):
+            return stem
+    return ""
+
+
+def _strip_roman_attached_pitch_suffix_alias(raw: str) -> str:
+    parts = [part for part in str(raw or "").strip().split() if part]
+    if not parts:
+        return ""
+    stripped = _strip_roman_attached_pitch_suffix_token(parts[-1])
+    if not stripped:
+        return ""
+    return " ".join([*parts[:-1], stripped]).strip()
+
+
+def _breath_alias_attached_pitch_style_suffix_stem(token: str) -> str:
+    raw = str(token or "").strip()
+    if not raw or any(char.isspace() for char in raw) or not raw.isascii():
+        return ""
+    lowered = raw.lower()
+    for stem in ("breath", "bre", "br"):
+        if not lowered.startswith(stem):
+            continue
+        suffix = raw[len(stem) :]
+        if suffix and re.fullmatch(r"[A-Ga-g](?:#|b)?[0-8][A-Za-z]{0,4}", suffix):
+            return stem
+    return ""
+
+
 @dataclass(frozen=True)
 class ManualOtoAnchorRecord:
     raw_params: dict[str, float]
@@ -36,10 +145,39 @@ def _clean_alias(alias: object) -> str:
 
 
 def _alias_core(alias: object) -> str:
-    text = _clean_alias(alias).lower()
+    raw = _clean_alias(alias)
+    text = raw.lower()
     # Auto_OTO often appends voicebank suffixes with `_suffix`; role
     # classification should stay tied to the spoken alias body.
     text = text.split("_", 1)[0].strip()
+    breath_stem = _breath_alias_attached_pitch_style_suffix_stem(raw.split("_", 1)[0].strip())
+    if breath_stem:
+        return breath_stem
+    kana_positions = [
+        idx for idx, char in enumerate(raw)
+        if "\u3040" <= char <= "\u30ff"
+    ]
+    if kana_positions:
+        suffix_start = kana_positions[-1] + 1
+        suffix = raw[suffix_start:]
+        if suffix and re.fullmatch(r"[A-Za-z]{0,4}[A-Ga-g](?:#|b)?[0-8][A-Za-z]{0,4}", suffix):
+            return raw[:suffix_start].strip().lower()
+    roman_stripped = _strip_roman_attached_pitch_suffix_alias(raw)
+    if roman_stripped:
+        return roman_stripped.lower()
+    match = _PITCH_SUFFIX_RE.search(raw)
+    if match is not None and match.start() > 0:
+        start = match.start()
+        if (
+            start > 0
+            and raw[start - 1].isupper()
+            and re.fullmatch(r"[A-Z]", raw[start - 1])
+            and (raw[: start - 1] or "") in {"R", "L"}
+        ):
+            start -= 1
+        stripped = raw[:start].rstrip("_- ").strip().lower()
+        if stripped:
+            return stripped
     return _PITCH_SUFFIX_RE.sub("", text).strip()
 
 
@@ -62,6 +200,8 @@ def _alias_part_order_terms(part: object, *, language: str = "") -> list[str]:
             if re.search(r"[\u3041-\u3096\u30A1-\u30FA\u30FC]", text):
                 terms = kana_to_romaji_syllables(text)
             elif re.fullmatch(r"[a-z]+", text):
+                if not any(ch in VOWELS for ch in text) and _roman_alias_stem_is_phone_like(text):
+                    return [text]
                 terms = split_romaji_token_to_syllables(text)
             else:
                 terms = []

@@ -198,6 +198,7 @@ def apply_no_mfa_lightgbm_safety_filter(
     capped_cv_head_vowel_pre_overlap_rows = 0
     capped_cv_pre_overlap_rows = 0
     capped_overlap_rows = 0
+    repaired_parameter_order_rows = 0
     changed_line_indices: set[int] = set()
     for key, post_record in post_records.items():
         pre_record = pre_records.get(key)
@@ -444,6 +445,14 @@ def apply_no_mfa_lightgbm_safety_filter(
         changed_line_indices.update(shifted_delayed_slot_indices)
         shifted_underscore_kana_delayed_slot_rows += len(shifted_delayed_slot_indices)
 
+    for line_index, line in enumerate(list(post_lines)):
+        repaired_line, repaired = _repair_oto_parameter_order_line(line)
+        if not repaired:
+            continue
+        post_lines[line_index] = repaired_line
+        changed_line_indices.add(line_index)
+        repaired_parameter_order_rows += 1
+
     if changed_line_indices:
         post_path.write_text("\n".join(post_lines) + "\n", encoding="utf-8")
     return {
@@ -495,6 +504,7 @@ def apply_no_mfa_lightgbm_safety_filter(
         "capped_cv_head_vowel_pre_overlap_rows": int(capped_cv_head_vowel_pre_overlap_rows),
         "capped_cv_pre_overlap_rows": int(capped_cv_pre_overlap_rows),
         "capped_overlap_rows": int(capped_overlap_rows),
+        "repaired_parameter_order_rows": int(repaired_parameter_order_rows),
         "changed_rows": int(len(changed_line_indices)),
         "max_overlap_increase_ms": float(max_overlap_increase),
     }
@@ -1877,6 +1887,42 @@ def _repair_vc_cutoff_order_line(line: str) -> tuple[str, bool]:
     repaired_cutoff = -(consonant + float(_JAPANESE_CVVC_VC_CUTOFF_ORDER_MIN_TAIL_MS))
     adjusted = _replace_oto_cutoff(line, repaired_cutoff)
     return adjusted, adjusted != line
+
+
+def _repair_oto_parameter_order_line(line: str) -> tuple[str, bool]:
+    parsed = parse_oto_line(line)
+    if not isinstance(parsed, Mapping):
+        return line, False
+    if alias_family(str(parsed.get("alias", "") or "")) != "cv_head":
+        return line, False
+    try:
+        consonant = max(0.0, float(parsed["cons"]))
+        cutoff = float(parsed["cutoff"])
+        preutterance = max(0.0, float(parsed["pre"]))
+        overlap = max(0.0, float(parsed["ovl"]))
+    except Exception:
+        return line, False
+    values = (consonant, cutoff, preutterance, overlap)
+    if not all(math.isfinite(value) for value in values):
+        return line, False
+
+    preutterance = min(preutterance, consonant)
+    overlap = min(overlap, preutterance)
+    cutoff_abs = max(abs(cutoff), consonant + 8.0)
+    repaired_cutoff = -cutoff_abs
+
+    if "=" not in line:
+        return line, False
+    wav_name, rest = line.split("=", 1)
+    parts = rest.split(",")
+    if len(parts) < 6:
+        return line, False
+    parts[2] = _format_oto_number(consonant)
+    parts[3] = _format_oto_number(repaired_cutoff)
+    parts[4] = _format_oto_number(preutterance)
+    parts[5] = _format_oto_number(overlap)
+    repaired_line = f"{wav_name}={','.join(parts)}"
+    return repaired_line, repaired_line != line
 
 
 def _should_restore_underscore_vc_positive_offset_shift(

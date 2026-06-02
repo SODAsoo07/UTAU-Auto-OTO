@@ -160,7 +160,8 @@ def test_diff_oto_out_file_is_valid_json_with_per_row_preview(tmp_path):
 
 
 def test_diff_oto_reports_alias_family_buckets(tmp_path):
-    from scripts.dev.diff_oto import alias_family, build_report
+    from core.generation.common.oto_alias_family import alias_family, alias_token_is_vowel
+    from scripts.dev.diff_oto import build_report
 
     gold = tmp_path / "gold.ini"
     pred = tmp_path / "pred.ini"
@@ -194,8 +195,15 @@ def test_diff_oto_reports_alias_family_buckets(tmp_path):
     assert alias_family("- \u3042") == "cv_head"
     assert alias_family("V -") == "terminal_v_dash"
     assert alias_family("\u3042A3") == "v"
+    assert alias_family("\u3044BA3") == "v"
     assert alias_family("a \u3042A3") == "vv"
+    assert alias_family("e \u3048BA3") == "vv"
     assert alias_family("i bA3") == "vc"
+    assert alias_family("a tsBA3") == "vc"
+    assert alias_family("o g_S") == "vc"
+    assert alias_family("brC4S") == "policy_breath"
+    assert alias_family("briC4S") == "cv"
+    assert not alias_token_is_vowel("brC4S")
     assert report["by_alias_family"]["cv_head"]["by_param"]["offset"]["MAE_ms"] == 30.0
     assert report["by_alias_family"]["vv"]["by_param"]["offset"]["MAE_ms"] == 20.0
     assert report["by_alias_family"]["vc"]["by_param"]["offset"]["MAE_ms"] == 30.0
@@ -246,6 +254,58 @@ def test_stratified_oto_residuals_reports_vc_role_buckets(tmp_path):
         bucket["dimension"] == "vc_pair" and bucket["bucket"] == "e->r"
         for bucket in report["priority_buckets"]
     )
+
+
+def test_stratified_oto_residuals_strips_attached_suffix_for_vc_buckets(tmp_path):
+    from scripts.evaluate.stratified_oto_residuals import build_stratified_report
+
+    gold = tmp_path / "gold.ini"
+    pred = tmp_path / "pred.ini"
+    gold.write_text(
+        "\n".join(
+            [
+                "f.wav=i fBA3,1000,180,-300,120,40",
+                "n.wav=a nBA3,1000,180,-300,120,40",
+                "ts.wav=a tsBA3,1000,180,-300,120,40",
+                "ny.wav=n nyA3,1000,180,-300,120,40",
+                "soft.wav=o g_S,1000,180,-300,120,40",
+                "tail.wav=a -6,1000,180,-300,120,40",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pred.write_text(
+        "\n".join(
+            [
+                "f.wav=i fBA3,1020,180,-300,120,40",
+                "n.wav=a nBA3,1030,180,-300,120,40",
+                "ts.wav=a tsBA3,1040,180,-300,120,40",
+                "ny.wav=n nyA3,1050,180,-300,120,40",
+                "soft.wav=o g_S,1060,180,-300,120,40",
+                "tail.wav=a -6,1070,180,-300,120,40",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_stratified_report(gold_path=str(gold), pred_path=str(pred), cutoff_end_mode="raw")
+
+    by_token = report["by_dimension"]["vc_right_token"]
+    by_pair = report["by_dimension"]["vc_pair"]
+    assert by_token["f"]["by_param"]["offset"]["MAE_ms"] == 20.0
+    assert by_token["n"]["by_param"]["offset"]["MAE_ms"] == 30.0
+    assert by_token["ts"]["by_param"]["offset"]["MAE_ms"] == 40.0
+    assert by_token["ny"]["by_param"]["offset"]["MAE_ms"] == 50.0
+    assert by_token["g"]["by_param"]["offset"]["MAE_ms"] == 60.0
+    assert by_token["-"]["by_param"]["offset"]["MAE_ms"] == 70.0
+    assert "fba" not in by_token
+    assert "nba" not in by_token
+    assert "g_s" not in by_token
+    assert by_pair["i->f"]["by_param"]["offset"]["MAE_ms"] == 20.0
+    assert by_pair["a->n"]["by_param"]["offset"]["MAE_ms"] == 30.0
+    assert by_pair["o->g"]["by_param"]["offset"]["MAE_ms"] == 60.0
 
 
 def test_stratified_oto_residuals_cli_writes_json_and_csv(tmp_path):
@@ -335,6 +395,60 @@ def test_stratified_oto_residuals_can_separate_low_trust_gold_rows(tmp_path):
     assert quality["trusted_by_param"]["offset"]["MAE_ms"] == 30.0
     assert report["by_dimension"]["alias_family"]["vc"]["by_param"]["offset"]["MAE_ms"] == 30.0
     assert "cv" not in report["by_dimension"]["alias_family"]
+
+
+def test_stratified_oto_residuals_reports_assisted_use_tiers(tmp_path):
+    from scripts.evaluate.stratified_oto_residuals import build_stratified_report
+
+    gold = tmp_path / "gold.ini"
+    pred = tmp_path / "pred.ini"
+    gold.write_text(
+        "\n".join(
+            [
+                "ready.wav=a,100,180,-300,120,40",
+                "review.wav=ka,100,180,-300,120,40",
+                "manual.wav=ke,100,180,-300,120,40",
+                "untrusted.wav=ko,0,0,-300,0,0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pred.write_text(
+        "\n".join(
+            [
+                "ready.wav=a,140,210,-360,150,55",
+                "review.wav=ka,210,180,-380,120,40",
+                "manual.wav=ke,310,180,-560,120,40",
+                "untrusted.wav=ko,20,180,-300,120,40",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_stratified_report(
+        gold_path=str(gold),
+        pred_path=str(pred),
+        cutoff_end_mode="raw",
+        language="korean",
+    )
+
+    assisted = report["quality_summary"]["assisted_use"]
+    assert assisted["by_tier"] == {
+        "assisted_ready": 1,
+        "manual_required": 2,
+        "review_recommended": 1,
+    }
+    assert assisted["assisted_ready_rows"] == 1
+    assert assisted["review_recommended_rows"] == 1
+    assert assisted["manual_required_rows"] == 2
+    assert assisted["assisted_ready_ratio"] == 0.25
+    by_alias = {row["alias"]: row["quality"]["assisted_use"] for row in report["tagged_rows"]}
+    assert by_alias["a"]["tier"] == "assisted_ready"
+    assert by_alias["ka"]["tier"] == "review_recommended"
+    assert by_alias["ke"]["tier"] == "manual_required"
+    assert by_alias["ko"]["reasons"] == ["untrusted.manual_zero_anchor_profile"]
 
 
 def test_build_oto_residual_dataset_rows_and_group_split(tmp_path):

@@ -2008,6 +2008,17 @@ class LayoutMixin:
             self._sync_ml_e2e_controls()
         self._save_config()
 
+    def _lightgbm_correction_disabled(self) -> bool:
+        if not hasattr(self, "disable_lightgbm_correction_var"):
+            return False
+        try:
+            return bool(self.disable_lightgbm_correction_var.get())
+        except Exception:
+            return False
+
+    def _should_apply_hsmm_lightgbm(self, enable_ml_correction: bool) -> bool:
+        return bool(enable_ml_correction) and not self._lightgbm_correction_disabled()
+
     def _sync_mapping_supervised_ui(self):
         enabled = (
             bool(self.mapping_supervised_enable_var.get())

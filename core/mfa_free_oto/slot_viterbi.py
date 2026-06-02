@@ -29,6 +29,9 @@ _KOREAN_OBSTRUENT_VC_EXPECTED_SHIFT_RATIO_BY_PHONE = {
     "p": -0.15,
     "k": -0.10,
 }
+_JAPANESE_SLOT_DURATION_PRIOR_DEFAULT_WEIGHT = 0.0
+_JAPANESE_SLOT_DURATION_PRIOR_MIN_DISTANCE = 0.85
+_JAPANESE_SLOT_DURATION_PRIOR_MAX_PENALTY = 0.28
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class SlotCandidate:
     frame_index: int
     time_ms: float
     score: float
+    expected_time_ms: float | None = None
 
 
 def expected_cv_slots_from_phones(phones: Sequence[str], *, language: str = "") -> list[ExpectedSlot]:
@@ -187,6 +191,9 @@ def assign_slots_viterbi(
                 top_k=top_k_per_slot,
                 expected_time_ms=expected_time,
                 expected_time_weight=expected_time_weight,
+                slot_period_ms=slot_period_ms,
+                slot_count=len(slots),
+                language=language,
                 min_time_ms=min_time_ms,
                 max_time_ms=None,
                 window_ms=window_ms,
@@ -336,6 +343,9 @@ def _slot_candidates(
     top_k: int,
     expected_time_ms: float | None,
     expected_time_weight: float,
+    slot_period_ms: float,
+    slot_count: int,
+    language: str,
     min_time_ms: float | None,
     max_time_ms: float | None,
     window_ms: float,
@@ -405,6 +415,11 @@ def _slot_candidates(
         else:
             return []
     duration_ms = float(max(times[-1], 1.0))
+    duration_prior_weight = _slot_duration_prior_weight(
+        slot,
+        language=language,
+        slot_count=slot_count,
+    )
     candidates: list[SlotCandidate] = []
     if fallback_indices:
         idx = next(iter(fallback_indices))
@@ -415,7 +430,20 @@ def _slot_candidates(
         score = float(values[idx])
         if expected_time_ms is not None and duration_ms > 0.0:
             score -= expected_time_weight * (abs(float(times[idx]) - expected_time_ms) / duration_ms)
-        return [SlotCandidate(frame_index=idx, time_ms=float(times[idx]), score=max(score, float(min_event_score)))]
+            score -= _slot_duration_prior_penalty(
+                float(times[idx]),
+                expected_time_ms=float(expected_time_ms),
+                slot_period_ms=slot_period_ms,
+                weight=duration_prior_weight,
+            )
+        return [
+            SlotCandidate(
+                frame_index=idx,
+                time_ms=float(times[idx]),
+                score=max(score, float(min_event_score)),
+                expected_time_ms=float(expected_time_ms) if expected_time_ms is not None else None,
+            )
+        ]
     for idx in peak_indices:
         score = float(values[idx])
         gate_score = (
@@ -441,6 +469,12 @@ def _slot_candidates(
         if expected_time_ms is not None and duration_ms > 0.0:
             distance = abs(float(times[idx]) - expected_time_ms) / duration_ms
             score -= expected_time_weight * distance
+            score -= _slot_duration_prior_penalty(
+                float(times[idx]),
+                expected_time_ms=float(expected_time_ms),
+                slot_period_ms=slot_period_ms,
+                weight=duration_prior_weight,
+            )
             if abs(float(times[idx]) - expected_time_ms) > float(window_ms):
                 score -= 0.22
         if min_time_ms is not None and float(times[idx]) + 1e-5 < float(min_time_ms):
@@ -448,10 +482,59 @@ def _slot_candidates(
         if max_time_ms is not None and float(times[idx]) - 1e-5 > float(max_time_ms):
             continue
         candidates.append(
-            SlotCandidate(frame_index=idx, time_ms=refine_peak_time(times, values, idx), score=score)
+            SlotCandidate(
+                frame_index=idx,
+                time_ms=refine_peak_time(times, values, idx),
+                score=score,
+                expected_time_ms=float(expected_time_ms) if expected_time_ms is not None else None,
+            )
         )
     candidates = sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:top_k]
     return sorted(candidates, key=lambda candidate: candidate.time_ms)
+
+
+def _slot_duration_prior_weight(
+    slot: ExpectedSlot,
+    *,
+    language: str,
+    slot_count: int,
+) -> float:
+    if not _is_japanese_language(language):
+        return 0.0
+    if int(slot_count) < 4:
+        return 0.0
+    configured = _env_float(
+        "UTOA_NO_MFA_JA_SLOT_DURATION_PRIOR_WEIGHT",
+        _JAPANESE_SLOT_DURATION_PRIOR_DEFAULT_WEIGHT,
+    )
+    weight = max(0.0, float(configured))
+    if weight <= 0.0:
+        return 0.0
+    if _is_sonorant_phone_change_slot(slot):
+        return weight * 1.25
+    return 0.0
+
+
+def _slot_duration_prior_penalty(
+    time_ms: float,
+    *,
+    expected_time_ms: float,
+    slot_period_ms: float,
+    weight: float,
+) -> float:
+    if float(weight) <= 0.0:
+        return 0.0
+    period = float(slot_period_ms)
+    if not np.isfinite(period) or period <= 0.0:
+        return 0.0
+    distance = abs(float(time_ms) - float(expected_time_ms)) / max(1.0, period)
+    min_distance = _env_float(
+        "UTOA_NO_MFA_JA_SLOT_DURATION_PRIOR_MIN_DISTANCE",
+        _JAPANESE_SLOT_DURATION_PRIOR_MIN_DISTANCE,
+    )
+    if distance < max(0.0, float(min_distance)):
+        return 0.0
+    return float(min(_JAPANESE_SLOT_DURATION_PRIOR_MAX_PENALTY, float(weight) * min(distance, 2.5)))
 
 
 def _slot_class_prior(posterior: FramePosterior, slot: ExpectedSlot) -> np.ndarray:
@@ -582,6 +665,16 @@ def _is_korean_language(language: str) -> bool:
     return bool(lang.startswith("ko") or lang.startswith("kr"))
 
 
+def _is_japanese_language(language: str) -> bool:
+    lang = str(language or "").strip().lower()
+    return bool(lang.startswith("ja") or lang == "japanese")
+
+
+def _ja_slot_active_window_enabled() -> bool:
+    raw = str(os.environ.get("UTOA_NO_MFA_JA_SLOT_ACTIVE_WINDOW", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
 def _score_track(posterior: FramePosterior, name: str, times: np.ndarray) -> np.ndarray:
     values = np.asarray(posterior.acoustic_scores.get(name, []), dtype=np.float32)
     if values.shape[0] != times.shape[0]:
@@ -661,15 +754,26 @@ def _expected_time_window(
     *,
     language: str,
 ) -> tuple[float, float]:
-    lang = str(language or "").strip().lower()
-    if not (lang.startswith("ko") or lang.startswith("kr")):
+    korean = _is_korean_language(language)
+    japanese = _is_japanese_language(language) and _ja_slot_active_window_enabled()
+    if not (korean or japanese):
         return 0.0, float(duration_ms)
     if times.size <= 2:
         return 0.0, float(duration_ms)
     silence = _score_track(posterior, "silence_likelihood", times)
     if silence.shape[0] != times.shape[0] or not np.any(np.isfinite(silence)):
         return 0.0, float(duration_ms)
-    active = silence < _env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_SILENCE_MAX", 0.66)
+    if korean:
+        silence_max = _env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_SILENCE_MAX", 0.66)
+        edge_min_ms = 80.0
+        head_margin_ms = _env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_HEAD_MARGIN_MS", 55.0)
+        tail_margin_ms = _env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_TAIL_MARGIN_MS", 60.0)
+    else:
+        silence_max = _env_float("UTOA_NO_MFA_JA_SLOT_ACTIVE_SILENCE_MAX", 0.68)
+        edge_min_ms = _env_float("UTOA_NO_MFA_JA_SLOT_ACTIVE_MIN_EDGE_MS", 120.0)
+        head_margin_ms = _env_float("UTOA_NO_MFA_JA_SLOT_ACTIVE_HEAD_MARGIN_MS", 18.0)
+        tail_margin_ms = _env_float("UTOA_NO_MFA_JA_SLOT_ACTIVE_TAIL_MARGIN_MS", 45.0)
+    active = silence < float(silence_max)
     indices = np.flatnonzero(active)
     if indices.size <= 0:
         return 0.0, float(duration_ms)
@@ -679,11 +783,11 @@ def _expected_time_window(
         return 0.0, float(duration_ms)
     leading = raw_start
     trailing = float(duration_ms) - raw_end
-    if leading < 80.0 and trailing < 80.0:
+    if leading < float(edge_min_ms) and trailing < float(edge_min_ms):
         return 0.0, float(duration_ms)
     span = max(1.0, raw_end - raw_start)
-    head_margin = min(_env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_HEAD_MARGIN_MS", 55.0), span * 0.04)
-    tail_margin = min(_env_float("UTOA_NO_MFA_KR_SLOT_ACTIVE_TAIL_MARGIN_MS", 60.0), span * 0.04)
+    head_margin = min(float(head_margin_ms), span * 0.04)
+    tail_margin = min(float(tail_margin_ms), span * 0.04)
     start = max(0.0, raw_start + head_margin)
     end = min(float(duration_ms), raw_end - tail_margin)
     if end <= start + 120.0:

@@ -1617,6 +1617,7 @@ class TabBuildersMixin:
         self._advanced_setting_vars_ready = True
         defaults = {
             "enable_ml_correction_var": ("bool", True),
+            "disable_lightgbm_correction_var": ("bool", False),
             "vc_correction_enable_var": ("bool", True),
             "kr_continuity_enable_var": ("bool", True),
             "cvn_correction_enable_var": ("bool", True),
@@ -2184,6 +2185,24 @@ class TabBuildersMixin:
         self.advanced_ml_section_frame = ml_frame
         if not hasattr(self, "mapping_supervised_enable_var"):
             self.mapping_supervised_enable_var = ctk.BooleanVar(value=True)
+
+        self.disable_lightgbm_correction_checkbox = self._ui_checkbox(
+            ml_frame,
+            text=t("HSMM LightGBM 후처리 비활성화"),
+            text_color="#9A6250",
+            variable=self.disable_lightgbm_correction_var,
+            command=self._save_config,
+        )
+        self.disable_lightgbm_correction_checkbox.pack(anchor="w", padx=12, pady=(2, 4))
+        lightgbm_disable_help = ctk.CTkLabel(
+            ml_frame,
+            text=t("ON이면 HSMM OTO 생성 후 LightGBM 보정 단계를 건너뜁니다."),
+            text_color=PALETTE.hint_text,
+            justify="left",
+            wraplength=720,
+        )
+        lightgbm_disable_help.pack(anchor="w", padx=34, pady=(0, 6))
+        self._bind_wraplength_to_container(ml_frame, [lightgbm_disable_help], padding=64, min_wrap=240)
 
         self.cvn_correction_enable_checkbox = self._ui_checkbox(
             ml_frame,

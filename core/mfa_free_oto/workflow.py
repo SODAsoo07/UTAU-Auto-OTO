@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import os
+import math
 import wave
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import mean
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Mapping, Sequence
 
 from core.generation.common.oto_alias_family import alias_family
 from core.generation.common.oto_file_utils import apply_alias_suffix
-from core.model_context.builder import row_specs_to_model_contexts
-from core.model_context.oto_rows import load_row_specs_from_source_oto
-
 from .evidence_pack import (
     build_acoustic_evidence_pack,
     candidate_priors_from_evidence_pack,
@@ -21,16 +19,25 @@ from .hsmm_adapter import decode_filename_slots_with_hsmm
 from .manifest_audit import infer_filename_phone_sequence
 from .oto_adapter import (
     OtoAdapterConfig,
+    OtoTemplateRow,
     adapt_template_row,
     anchors_from_prediction,
     assign_template_row_anchors,
     bootstrap_row,
+    _alias_phone_sequence,
+    _alias_type_for_row,
     _is_nonphonetic_special_alias,
     load_oto_template_rows_alias_only,
     repair_cvvc_row_sequence,
     timeline_expected_slots_for_template_rows,
 )
-from .row_plan import build_filename_slots, build_filename_template_rows, filename_phone_sequence_from_slots
+from .row_plan import (
+    RowPlanRecord,
+    build_filename_row_plan,
+    build_filename_slots,
+    build_filename_template_rows,
+    filename_phone_sequence_from_slots,
+)
 from .runtime_inference import RuntimePrediction, predict_wav
 
 # Weights for the aggregate NoMfaWorkflowReport.confidence score. Must sum to 1.0.
@@ -47,6 +54,7 @@ _C_ONSET_LEAD_MS = 18.0  # consonant onset placed this far before the vowel star
 _C_ONSET_REPAIR_MS = 6.0  # fallback gap when c_onset lands after the cv boundary
 _V_OFFSET_REPAIR_MS = 8.0  # fallback gap when v_offset lands before the cv boundary
 TIMELINE_DEBUG_SCHEMA_VERSION = 1
+JA_CVVC_HSMM_RUNTIME_ALIGNED_FIRST_GAP_MS = 240.0
 
 
 @dataclass(frozen=True)
@@ -183,27 +191,23 @@ def generate_no_mfa_oto_with_model_context(
 
     if source_oto:
         warnings.append("base_oto_alias_list_used")
+        warnings.append("base_oto_alias_surface_used")
+        warnings.append("base_oto_alias_order_ignored")
         template_rows = load_oto_template_rows_alias_only(source_oto)
         templates_by_wav: dict[str, list] = {}
         for row in template_rows:
             templates_by_wav.setdefault(str(row.wav).lower(), []).append(row)
-        row_specs_by_wav = load_row_specs_from_source_oto(
-            source_oto_path=source_oto,
-            wav_dir=wav_root,
-            language=language,
-            format_type=format_type,
-            alias_suffix=alias_suffix,
-            ignore_source_timing=True,
-        )
-        contexts = row_specs_to_model_contexts(row_specs_by_wav, audio_mode="duration")
-        contexts_by_wav_name: dict[str, list] = {}
-        for context in contexts:
-            contexts_by_wav_name.setdefault(str(context.wav.wav_name).lower(), []).append(context)
 
         source_ordered_lines: list[tuple[int, int, str]] = []
         source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
         total_wav_groups = len(templates_by_wav)
-        for wav_index, (wav_key, template_group) in enumerate(templates_by_wav.items(), start=1):
+        for wav_index, wav_key in enumerate(sorted(templates_by_wav), start=1):
+            template_group = _template_group_in_filename_order(
+                wav_key,
+                templates_by_wav[wav_key],
+                language=language,
+                format_type=format_type,
+            )
             wav_path = os.path.join(wav_root, wav_key)
             if not os.path.isfile(wav_path):
                 warnings.append(f"missing_wav:{wav_key}")
@@ -213,7 +217,7 @@ def generate_no_mfa_oto_with_model_context(
             row_plan_slots = build_filename_slots(wav_key, language=language, format_type=format_type)
             expected_phones = _expected_phones(
                 wav_key,
-                contexts_by_wav_name.get(wav_key, []),
+                [],
                 filename_slots=row_plan_slots,
             )
             expected_slots = timeline_expected_slots_for_template_rows(
@@ -257,18 +261,31 @@ def generate_no_mfa_oto_with_model_context(
                     prediction.posterior,
                     row_plan_slots,
                     event_priors=(*prediction_events, *candidate_priors),
+                    language=language,
                 )
                 if hsmm.ok and hsmm.events:
-                    if _hsmm_event_sequence_matches_expected(
+                    hsmm_reject_reason = ""
+                    hsmm_sequence_ok = _hsmm_event_sequence_matches_expected(
                         expected_slots or (),
                         hsmm.events,
                         runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
-                    ):
+                    )
+                    if hsmm_sequence_ok:
+                        hsmm_reject_reason = _hsmm_runtime_replacement_rejection_reason(
+                            expected_slots or (),
+                            prediction_events,
+                            language=language,
+                            format_type=format_type,
+                            template_rows=template_group,
+                        )
+                    if hsmm_sequence_ok and not hsmm_reject_reason:
                         decoded_source = list(hsmm.events)
                         selected_event_source = "filename_hsmm"
                         warnings.append("filename_hsmm_decoder_used")
                     else:
-                        warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
+                        warnings.append(
+                            f"filename_hsmm_decoder_rejected:{hsmm_reject_reason or 'event_sequence_mismatch'}"
+                        )
                 else:
                     warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
             elif hsmm_skip_no_expected:
@@ -330,8 +347,7 @@ def generate_no_mfa_oto_with_model_context(
                 row_conf = _row_confidence(adapted, evidence, policy=policy)
                 cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
                 nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
-                source_row_index = int(getattr(template_row, "source_row_index", -1))
-                source_order = source_row_index if source_row_index >= 0 else rows_total
+                source_order = rows_total
                 source_sequence = len(source_ordered_lines)
                 source_ordered_results.append(
                     (
@@ -429,18 +445,31 @@ def generate_no_mfa_oto_with_model_context(
                     prediction.posterior,
                     row_plan_slots,
                     event_priors=(*prediction_events, *candidate_priors),
+                    language=language,
                 )
                 if hsmm.ok and hsmm.events:
-                    if _hsmm_event_sequence_matches_expected(
+                    hsmm_reject_reason = ""
+                    hsmm_sequence_ok = _hsmm_event_sequence_matches_expected(
                         expected_slots or (),
                         hsmm.events,
                         runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
-                    ):
+                    )
+                    if hsmm_sequence_ok:
+                        hsmm_reject_reason = _hsmm_runtime_replacement_rejection_reason(
+                            expected_slots or (),
+                            prediction_events,
+                            language=language,
+                            format_type=format_type,
+                            template_rows=template_group,
+                        )
+                    if hsmm_sequence_ok and not hsmm_reject_reason:
                         decoded_source = list(hsmm.events)
                         selected_event_source = "filename_hsmm"
                         warnings.append("filename_hsmm_decoder_used")
                     else:
-                        warnings.append("filename_hsmm_decoder_rejected:event_sequence_mismatch")
+                        warnings.append(
+                            f"filename_hsmm_decoder_rejected:{hsmm_reject_reason or 'event_sequence_mismatch'}"
+                        )
                 else:
                     warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
             elif hsmm_skip_no_expected:
@@ -650,6 +679,164 @@ def generate_no_mfa_oto_with_model_context(
         rows=tuple(row_results),
         timeline_debug=tuple(timeline_debug),
         evidence_debug=tuple(evidence_debug),
+    )
+
+
+def _template_group_in_filename_order(
+    wav_key: str,
+    template_group: Sequence[OtoTemplateRow],
+    *,
+    language: str = "",
+    format_type: str = "",
+) -> list[OtoTemplateRow]:
+    rows = list(template_group)
+    if not rows:
+        return []
+
+    records = build_filename_row_plan(wav_key, language=language, format_type=format_type)
+    if not records:
+        return sorted(rows, key=_template_row_semantic_sort_key)
+
+    remaining = list(rows)
+    ordered: list[OtoTemplateRow] = []
+    for record in records:
+        match_index = _matching_template_row_index(remaining, record, records)
+        if match_index is None:
+            continue
+        ordered.append(remaining.pop(match_index))
+    if remaining:
+        ordered.extend(sorted(remaining, key=_template_row_semantic_sort_key))
+    return ordered
+
+
+def _matching_template_row_index(
+    rows: Sequence[OtoTemplateRow],
+    record: RowPlanRecord,
+    records: Sequence[RowPlanRecord] = (),
+) -> int | None:
+    candidates: list[tuple[int, tuple[object, ...], int]] = []
+    for idx, row in enumerate(rows):
+        score = _template_row_record_match_score(row, record, records)
+        if score <= 0:
+            continue
+        candidates.append((score, _template_row_semantic_sort_key(row), idx))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (-item[0], item[1]))[2]
+
+
+def _template_row_record_match_score(
+    row: OtoTemplateRow,
+    record: RowPlanRecord,
+    records: Sequence[RowPlanRecord] = (),
+) -> int:
+    alias = str(getattr(row, "alias", "") or "").strip()
+    record_alias = str(getattr(record, "alias", "") or "").strip()
+    if not alias or not record_alias:
+        return 0
+    if _is_nonphonetic_special_alias(alias):
+        return 0
+
+    source_phones = tuple(_alias_phone_sequence(alias))
+    record_phones = tuple(_alias_phone_sequence(record_alias))
+    record_role = str(getattr(record, "role_family", "") or "").strip().lower()
+    first_slot = int(getattr(record, "left_slot_index", -1)) == 0 and int(getattr(record, "right_slot_index", -1)) == 0
+    source_role = _alias_type_for_row(alias, "auto")
+    phones_compatible = source_phones == record_phones
+    yoon_vc_compatible = _yoon_vc_template_row_matches_record(source_phones, record_phones, record_role)
+    cv_head_initial_compatible = (
+        first_slot
+        and source_role == "cv_head"
+        and _cv_head_template_row_matches_initial_record(source_phones, record_phones, record_role)
+    )
+    if not source_phones or not (phones_compatible or yoon_vc_compatible or cv_head_initial_compatible):
+        return 0
+
+    if (
+        first_slot
+        and source_role == "cv"
+        and record_role == "cv"
+        and _initial_repeated_plain_cv_record(record, records)
+    ):
+        return 0
+    if first_slot and source_role == "cv_head" and record_role in {"cv", "v"}:
+        return 1100
+    if source_role == record_role:
+        if yoon_vc_compatible:
+            return 880
+        return 1000 if alias == record_alias else 900
+
+    return 0
+
+
+def _initial_repeated_plain_cv_record(record: RowPlanRecord, records: Sequence[RowPlanRecord]) -> bool:
+    if str(getattr(record, "role_family", "") or "").strip().lower() != "cv":
+        return False
+    if int(getattr(record, "left_slot_index", -1)) != 0 or int(getattr(record, "right_slot_index", -1)) != 0:
+        return False
+    record_phones = tuple(_alias_phone_sequence(str(getattr(record, "alias", "") or "")))
+    if len(record_phones) < 2:
+        return False
+    for other in records:
+        if other is record:
+            continue
+        if str(getattr(other, "role_family", "") or "").strip().lower() != "cv":
+            continue
+        if int(getattr(other, "left_slot_index", -1)) <= 0 or int(getattr(other, "right_slot_index", -1)) <= 0:
+            continue
+        if tuple(_alias_phone_sequence(str(getattr(other, "alias", "") or ""))) == record_phones:
+            return True
+    return False
+
+
+def _cv_head_template_row_matches_initial_record(
+    source_phones: Sequence[str],
+    record_phones: Sequence[str],
+    record_role: str,
+) -> bool:
+    if str(record_role or "").strip().lower() not in {"cv", "v"}:
+        return False
+    source = tuple(str(phone or "").strip().lower() for phone in source_phones if str(phone or "").strip())
+    record = tuple(str(phone or "").strip().lower() for phone in record_phones if str(phone or "").strip())
+    if not source or not record:
+        return False
+    if source == record:
+        return True
+    if len(source) >= len(record):
+        return False
+    return tuple(record[: len(source)]) == source
+
+
+def _yoon_vc_template_row_matches_record(
+    source_phones: Sequence[str],
+    record_phones: Sequence[str],
+    record_role: str,
+) -> bool:
+    if str(record_role or "").strip().lower() != "vc":
+        return False
+    if len(source_phones) != 3 or len(record_phones) != 2:
+        return False
+    if tuple(source_phones[:2]) != tuple(record_phones):
+        return False
+    return str(source_phones[2]).strip().lower() == "y"
+
+
+def _template_row_semantic_sort_key(row: OtoTemplateRow) -> tuple[object, ...]:
+    alias = str(getattr(row, "alias", "") or "").strip()
+    role = _alias_type_for_row(alias, "auto") if alias else ""
+    role_priority = {
+        "cv_head": 0,
+        "cv": 1,
+        "v": 1,
+        "vc": 2,
+        "vcv": 3,
+        "vv": 3,
+    }.get(role, 9)
+    return (
+        role_priority,
+        tuple(_alias_phone_sequence(alias)),
+        alias.lower(),
+        alias,
     )
 
 
@@ -1045,6 +1232,85 @@ def _adapter_config_for_row_plan_record(
     if role in {"cv", "cv_head", "vcv", "vc", "vv", "v"} and role != str(config.alias_type or "").strip().lower():
         return replace(config, alias_type=role)
     return config
+
+
+def _hsmm_runtime_replacement_rejection_reason(
+    expected_slots: Iterable[object],
+    runtime_events: Iterable[Mapping[str, object]],
+    *,
+    language: str,
+    format_type: str,
+    template_rows: Iterable[object] = (),
+) -> str:
+    if not _is_japanese_cvvc_workflow(language=language, format_type=format_type):
+        return ""
+    if _template_group_has_soft_alias_suffix(template_rows):
+        return "soft_alias_suffix_runtime_preferred"
+    if not _ja_cvvc_hsmm_runtime_gap_guard_enabled():
+        return ""
+    first_vc: object | None = None
+    first_cv: object | None = None
+    for slot in expected_slots:
+        label = str(getattr(slot, "event_label", "") or "").strip()
+        role = str(getattr(slot, "role", "") or "").strip().lower()
+        if first_vc is None and label == "phone_change" and role == "vc":
+            first_vc = slot
+            continue
+        if first_vc is not None and label == "cv_boundary" and role in {"implicit_cv", "cv", "cv_head"}:
+            first_cv = slot
+            break
+    if first_vc is None or first_cv is None:
+        return ""
+    first_vc_time = _event_time_for_slot(runtime_events, label="phone_change", phone_index=getattr(first_vc, "phone_index", -1))
+    first_cv_time = _event_time_for_slot(runtime_events, label="cv_boundary", phone_index=getattr(first_cv, "phone_index", -1))
+    if first_vc_time is None or first_cv_time is None:
+        return ""
+    gap = float(first_cv_time) - float(first_vc_time)
+    if gap > float(JA_CVVC_HSMM_RUNTIME_ALIGNED_FIRST_GAP_MS):
+        return f"runtime_first_vc_cv_gap_aligned:{gap:.1f}ms"
+    return ""
+
+
+def _template_group_has_soft_alias_suffix(template_rows: Iterable[object]) -> bool:
+    for row in template_rows:
+        alias = str(getattr(row, "alias", "") or "").strip().lower()
+        if alias.endswith("_s"):
+            return True
+    return False
+
+
+def _ja_cvvc_hsmm_runtime_gap_guard_enabled() -> bool:
+    raw = str(os.environ.get("UTOA_NO_MFA_JA_CVVC_HSMM_RUNTIME_GAP_GUARD", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
+def _is_japanese_cvvc_workflow(*, language: str, format_type: str) -> bool:
+    lang = str(language or "").strip().lower()
+    fmt = str(format_type or "").strip().lower()
+    return lang in {"japanese", "ja", "jp"} and fmt == "cvvc"
+
+
+def _event_time_for_slot(
+    events: Iterable[Mapping[str, object]],
+    *,
+    label: str,
+    phone_index: object,
+) -> float | None:
+    target_index = _int_field(phone_index, default=-1)
+    if target_index < 0:
+        return None
+    for event in events:
+        if str(event.get("label", "") or "").strip() != str(label):
+            continue
+        if _int_field(event.get("expected_phone_index", -1), default=-1) != target_index:
+            continue
+        try:
+            value = float(event.get("selected_time_ms", event.get("time_ms", 0.0)) or 0.0)
+        except Exception:
+            return None
+        if math.isfinite(value):
+            return value
+    return None
 
 
 def _hsmm_event_sequence_matches_expected(

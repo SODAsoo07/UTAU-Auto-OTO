@@ -20,6 +20,14 @@ class HSMMStateSpec:
 
 
 @dataclass(frozen=True)
+class HSMMStateFrameWindow:
+    start_min_frame: int = 0
+    start_max_frame: int | None = None
+    end_min_frame: int = 1
+    end_max_frame: int | None = None
+
+
+@dataclass(frozen=True)
 class HSMMDecodedState:
     state_id: str
     state_type: str
@@ -58,6 +66,7 @@ def decode_segmental_hsmm(
     allow_internal_gaps: bool = False,
     internal_gap_penalty_per_ms: float = 0.0,
     max_internal_gap_ms: float = 0.0,
+    state_frame_windows: Mapping[str, HSMMStateFrameWindow] | None = None,
 ) -> HSMMDecodeResult:
     if not states:
         return HSMMDecodeResult(ok=False, reason="empty_states")
@@ -72,6 +81,7 @@ def decode_segmental_hsmm(
         spec.state_id: _prefix_scores(_resolve_scores(spec, frame_scores, frame_count))
         for spec in states
     }
+    windows = _normalize_state_windows(state_frame_windows, frame_count)
 
     prev: dict[int, tuple[float, list[tuple[int, int]]]]
     if allow_leading_gap:
@@ -96,12 +106,24 @@ def decode_segmental_hsmm(
         if allow_internal_gaps and state_index > 0:
             max_gap_frames = max(0, int(math.ceil(float(max_internal_gap_ms) / frame_shift)))
         gap_penalty = max(0.0, float(internal_gap_penalty_per_ms))
+        window = windows.get(spec.state_id)
         for prev_end, (prev_score, prev_path) in prev.items():
+            first_start = prev_end
             last_start = min(frame_count - min_frames, prev_end + max_gap_frames)
-            for start_frame in range(prev_end, last_start + 1):
+            if window is not None:
+                first_start = max(first_start, int(window.start_min_frame))
+                last_start = min(last_start, int(window.start_max_frame if window.start_max_frame is not None else frame_count - min_frames))
+            if last_start < first_start:
+                continue
+            for start_frame in range(first_start, last_start + 1):
                 skipped_ms = float(max(0, start_frame - prev_end)) * frame_shift
                 first_end = start_frame + min_frames
                 last_end = min(frame_count, start_frame + max_frames)
+                if window is not None:
+                    first_end = max(first_end, int(window.end_min_frame))
+                    last_end = min(last_end, int(window.end_max_frame if window.end_max_frame is not None else frame_count))
+                if last_end < first_end:
+                    continue
                 for end in range(first_end, last_end + 1):
                     if time.perf_counter() - start_time > timeout_s:
                         return HSMMDecodeResult(
@@ -189,6 +211,160 @@ def decode_segmental_hsmm(
     )
 
 
+def decode_segmental_hsmm_coarse_to_refine(
+    states: Sequence[HSMMStateSpec],
+    frame_times_ms: Sequence[float],
+    frame_scores: Mapping[str, Sequence[float]],
+    *,
+    coarse_stride: int = 4,
+    refine_window_ms: float = 110.0,
+    fallback_to_full: bool = True,
+    beam_width_per_state: int = 64,
+    timeout_ms: int = 5000,
+    allow_leading_gap: bool = False,
+    allow_trailing_gap: bool = True,
+    leading_gap_penalty_per_ms: float = 0.0,
+    max_leading_gap_ms: float = 0.0,
+    trailing_gap_penalty_per_ms: float = 0.0,
+    allow_internal_gaps: bool = False,
+    internal_gap_penalty_per_ms: float = 0.0,
+    max_internal_gap_ms: float = 0.0,
+) -> HSMMDecodeResult:
+    """Run a low-resolution pass, then refine inside per-state frame windows.
+
+    This mirrors the practical SHIRO-style workflow: use a cheap first pass to
+    keep the expensive HSMM search from exploring every plausible boundary.
+    """
+    times = [float(t) for t in frame_times_ms]
+    stride = max(1, int(coarse_stride or 1))
+    if stride <= 1 or len(times) < max(12, stride * 4):
+        result = decode_segmental_hsmm(
+            states,
+            times,
+            frame_scores,
+            beam_width_per_state=beam_width_per_state,
+            timeout_ms=timeout_ms,
+            allow_leading_gap=allow_leading_gap,
+            allow_trailing_gap=allow_trailing_gap,
+            leading_gap_penalty_per_ms=leading_gap_penalty_per_ms,
+            max_leading_gap_ms=max_leading_gap_ms,
+            trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+            allow_internal_gaps=allow_internal_gaps,
+            internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+            max_internal_gap_ms=max_internal_gap_ms,
+        )
+        return _copy_result_with_meta(result, {"coarse_to_refine": False, "coarse_to_refine_reason": "too_short_or_disabled"})
+    if not states:
+        return HSMMDecodeResult(ok=False, reason="empty_states")
+
+    coarse_indices = list(range(0, len(times), stride))
+    if coarse_indices[-1] != len(times) - 1:
+        coarse_indices.append(len(times) - 1)
+    coarse_times = [times[idx] for idx in coarse_indices]
+    coarse_scores = {
+        key: _sample_scores_for_indices(values, coarse_indices)
+        for key, values in frame_scores.items()
+    }
+    coarse_timeout_ms = max(1, int(timeout_ms * 0.35))
+    coarse = decode_segmental_hsmm(
+        states,
+        coarse_times,
+        coarse_scores,
+        beam_width_per_state=max(8, int(beam_width_per_state)),
+        timeout_ms=coarse_timeout_ms,
+        allow_leading_gap=allow_leading_gap,
+        allow_trailing_gap=allow_trailing_gap,
+        leading_gap_penalty_per_ms=leading_gap_penalty_per_ms,
+        max_leading_gap_ms=max_leading_gap_ms,
+        trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+        allow_internal_gaps=allow_internal_gaps,
+        internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+        max_internal_gap_ms=max_internal_gap_ms,
+    )
+    if not coarse.ok:
+        if fallback_to_full:
+            fallback = decode_segmental_hsmm(
+                states,
+                times,
+                frame_scores,
+                beam_width_per_state=beam_width_per_state,
+                timeout_ms=timeout_ms,
+                allow_leading_gap=allow_leading_gap,
+                allow_trailing_gap=allow_trailing_gap,
+                leading_gap_penalty_per_ms=leading_gap_penalty_per_ms,
+                max_leading_gap_ms=max_leading_gap_ms,
+                trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+                allow_internal_gaps=allow_internal_gaps,
+                internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+                max_internal_gap_ms=max_internal_gap_ms,
+            )
+            return _copy_result_with_meta(
+                fallback,
+                {
+                    "coarse_to_refine": False,
+                    "coarse_to_refine_reason": f"coarse_failed:{coarse.reason}",
+                    "coarse_timeout": bool(coarse.timeout),
+                },
+            )
+        return _copy_result_with_meta(
+            coarse,
+            {"coarse_to_refine": False, "coarse_to_refine_reason": f"coarse_failed:{coarse.reason}"},
+        )
+
+    frame_shift = _infer_frame_shift_ms(times)
+    window_frames = max(1, int(math.ceil(max(0.0, float(refine_window_ms)) / frame_shift)))
+    windows = _windows_from_coarse_result(coarse, times, window_frames=window_frames)
+    refined = decode_segmental_hsmm(
+        states,
+        times,
+        frame_scores,
+        beam_width_per_state=beam_width_per_state,
+        timeout_ms=timeout_ms,
+        allow_leading_gap=allow_leading_gap,
+        allow_trailing_gap=allow_trailing_gap,
+        leading_gap_penalty_per_ms=leading_gap_penalty_per_ms,
+        max_leading_gap_ms=max_leading_gap_ms,
+        trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+        allow_internal_gaps=allow_internal_gaps,
+        internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+        max_internal_gap_ms=max_internal_gap_ms,
+        state_frame_windows=windows,
+    )
+    meta = {
+        "coarse_to_refine": True,
+        "coarse_stride": int(stride),
+        "refine_window_ms": float(refine_window_ms),
+        "refine_window_frames": int(window_frames),
+        "coarse_score": float(coarse.score),
+        "coarse_pruned_endpoint_count": int(coarse.pruned_endpoint_count),
+        "coarse_timeout": bool(coarse.timeout),
+        "coarse_frame_count": len(coarse_times),
+    }
+    if refined.ok:
+        return _copy_result_with_meta(refined, meta)
+    if fallback_to_full:
+        fallback = decode_segmental_hsmm(
+            states,
+            times,
+            frame_scores,
+            beam_width_per_state=beam_width_per_state,
+            timeout_ms=timeout_ms,
+            allow_leading_gap=allow_leading_gap,
+            allow_trailing_gap=allow_trailing_gap,
+            leading_gap_penalty_per_ms=leading_gap_penalty_per_ms,
+            max_leading_gap_ms=max_leading_gap_ms,
+            trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+            allow_internal_gaps=allow_internal_gaps,
+            internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+            max_internal_gap_ms=max_internal_gap_ms,
+        )
+        return _copy_result_with_meta(
+            fallback,
+            {**meta, "coarse_to_refine": False, "coarse_to_refine_reason": f"refine_failed:{refined.reason}"},
+        )
+    return _copy_result_with_meta(refined, {**meta, "coarse_to_refine_reason": f"refine_failed:{refined.reason}"})
+
+
 def _resolve_scores(
     spec: HSMMStateSpec,
     frame_scores: Mapping[str, Sequence[float]],
@@ -203,6 +379,33 @@ def _resolve_scores(
     if len(out) < frame_count:
         out = out + [-10.0] * (frame_count - len(out))
     return out[:frame_count]
+
+
+def _normalize_state_windows(
+    state_frame_windows: Mapping[str, HSMMStateFrameWindow] | None,
+    frame_count: int,
+) -> dict[str, HSMMStateFrameWindow]:
+    if not state_frame_windows:
+        return {}
+    out: dict[str, HSMMStateFrameWindow] = {}
+    for state_id, window in state_frame_windows.items():
+        start_min = max(0, min(frame_count, int(window.start_min_frame)))
+        start_max_raw = window.start_max_frame
+        start_max = None if start_max_raw is None else max(0, min(frame_count, int(start_max_raw)))
+        end_min = max(1, min(frame_count, int(window.end_min_frame)))
+        end_max_raw = window.end_max_frame
+        end_max = None if end_max_raw is None else max(1, min(frame_count, int(end_max_raw)))
+        if start_max is not None and start_max < start_min:
+            continue
+        if end_max is not None and end_max < end_min:
+            continue
+        out[str(state_id)] = HSMMStateFrameWindow(
+            start_min_frame=start_min,
+            start_max_frame=start_max,
+            end_min_frame=end_min,
+            end_max_frame=end_max,
+        )
+    return out
 
 
 def _prefix_scores(scores: Sequence[float]) -> list[float]:
@@ -237,6 +440,60 @@ def _infer_frame_shift_ms(times: Sequence[float]) -> float:
     return 5.0
 
 
+def _sample_scores_for_indices(values: Sequence[float], indices: Sequence[int]) -> list[float]:
+    src = [float(value) for value in values]
+    if not src:
+        return [0.0 for _ in indices]
+    last = len(src) - 1
+    return [src[max(0, min(last, int(index)))] for index in indices]
+
+
+def _windows_from_coarse_result(
+    coarse: HSMMDecodeResult,
+    times: Sequence[float],
+    *,
+    window_frames: int,
+) -> dict[str, HSMMStateFrameWindow]:
+    frame_count = len(times)
+    if frame_count <= 0:
+        return {}
+    frame_shift = _infer_frame_shift_ms(times)
+    out: dict[str, HSMMStateFrameWindow] = {}
+    for state in coarse.states:
+        start = _time_to_frame_index(float(state.start_ms), times, frame_shift_ms=frame_shift)
+        end = _time_to_frame_index(float(state.end_ms), times, frame_shift_ms=frame_shift)
+        end = max(start + 1, end)
+        out[state.state_id] = HSMMStateFrameWindow(
+            start_min_frame=max(0, start - int(window_frames)),
+            start_max_frame=min(frame_count - 1, start + int(window_frames)),
+            end_min_frame=max(1, end - int(window_frames)),
+            end_max_frame=min(frame_count, end + int(window_frames)),
+        )
+    return out
+
+
+def _time_to_frame_index(time_ms: float, times: Sequence[float], *, frame_shift_ms: float) -> int:
+    if not times:
+        return 0
+    if len(times) >= 2:
+        first = float(times[0])
+        return max(0, min(len(times), int(round((float(time_ms) - first) / max(0.001, frame_shift_ms)))))
+    return 0
+
+
+def _copy_result_with_meta(result: HSMMDecodeResult, extra_meta: Mapping[str, object]) -> HSMMDecodeResult:
+    return HSMMDecodeResult(
+        ok=result.ok,
+        states=result.states,
+        score=result.score,
+        reason=result.reason,
+        timeout=result.timeout,
+        pruned_endpoint_count=result.pruned_endpoint_count,
+        schema_version=result.schema_version,
+        meta={**dict(result.meta or {}), **dict(extra_meta or {})},
+    )
+
+
 def _internal_gap_ms(path: Sequence[tuple[int, int]], frame_shift_ms: float) -> float:
     total_frames = 0
     for previous, current in zip(path[:-1], path[1:]):
@@ -249,5 +506,7 @@ __all__ = [
     "HSMMDecodeResult",
     "HSMMDecodedState",
     "HSMMStateSpec",
+    "HSMMStateFrameWindow",
+    "decode_segmental_hsmm_coarse_to_refine",
     "decode_segmental_hsmm",
 ]

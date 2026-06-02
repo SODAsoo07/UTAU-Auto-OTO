@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from dataclasses import replace
 from datetime import datetime
 import hashlib
@@ -25,6 +26,7 @@ from core.generation.common.validation_diagnostics import (
 from core.generation.common.validation_splitter import (
     load_validation_records,
     load_validation_records_with_errors,
+    review_split_guard_reasons,
     split_oto_file,
 )
 from core.mfa_free_oto.evidence_pack import (
@@ -40,6 +42,7 @@ from core.mfa_free_oto.evidence_pack import (
 from core.mfa_free_oto.hsmm_adapter import decode_filename_slots_with_hsmm
 from core.mfa_free_oto.oto_adapter import OtoAdapterConfig, adapt_template_row, assign_template_row_anchors
 from core.mfa_free_oto.row_plan import build_filename_row_plan, build_filename_template_rows, write_row_plan_jsonl
+from core.mfa_free_oto.review_generation import _row_provenance_records_from_timeline_records
 from core.mfa_free_oto.workflow import generate_no_mfa_oto_with_model_context
 
 _OTO_PARAM_FIELDS = (
@@ -96,6 +99,20 @@ def _write_text_lines(path: str | Path, lines: list[str] | tuple[str, ...]) -> N
     out.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(str(line).rstrip("\n") for line in lines if str(line).strip())
     out.write_text((text + "\n") if text else "", encoding="utf-8")
+
+
+def _load_jsonl_object_records(path: str | Path) -> list[dict[str, object]]:
+    target = Path(path)
+    rows: list[dict[str, object]] = []
+    with target.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, start=1):
+            if not raw.strip():
+                continue
+            data = json.loads(raw)
+            if not isinstance(data, Mapping):
+                raise ValueError(f"{target}:{line_number}: JSONL row must be an object")
+            rows.append(dict(data))
+    return rows
 
 
 def _apply_generate_lightgbm_postprocess(
@@ -218,7 +235,8 @@ def _apply_generate_lightgbm_postprocess(
                 f"capped_cv_next_transition_cutoff={int(safety_report.get('capped_cv_next_transition_cutoff_rows', 0) or 0)}, "
                 f"capped_cv_head_vowel_pre_overlap={int(safety_report.get('capped_cv_head_vowel_pre_overlap_rows', 0) or 0)}, "
                 f"capped_cv_pre_overlap={int(safety_report.get('capped_cv_pre_overlap_rows', 0) or 0)}, "
-                f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}."
+                f"capped_overlap={int(safety_report.get('capped_overlap_rows', 0) or 0)}, "
+                f"repaired_parameter_order={int(safety_report.get('repaired_parameter_order_rows', 0) or 0)}."
             )
         return {
             "enabled": True,
@@ -772,6 +790,13 @@ def _run_generate_review(
         _write_jsonl(evidence_path, evidence_rows)
         evidence_sha256 = _sha256_file(Path(evidence_path))
         evidence_wavs = len(evidence_rows)
+    row_provenance_records = _row_provenance_records_from_timeline_records(timeline_rows)
+    row_provenance_path = ""
+    row_provenance_sha256 = ""
+    if row_provenance_records:
+        row_provenance_path = str(out_dir / f"{stem}.row_provenance.jsonl")
+        _write_jsonl(row_provenance_path, row_provenance_records)
+        row_provenance_sha256 = _sha256_file(Path(row_provenance_path))
     split = split_oto_file(
         str(generated_path),
         str(out_dir),
@@ -799,10 +824,22 @@ def _run_generate_review(
             "evidence_path": evidence_path,
             "evidence_sha256": evidence_sha256,
             "evidence_wavs": evidence_wavs,
+            "row_provenance_path": row_provenance_path,
+            "row_provenance_sha256": row_provenance_sha256,
+            "row_provenance_rows": len(row_provenance_records),
             "lightgbm_postprocess": dict(lightgbm_postprocess),
             "preferred_encoding_source": str(generated_path),
         },
     )
+    split_guard_reasons = review_split_guard_reasons(split.counts)
+    if split_guard_reasons:
+        messages.append(
+            "[No-MFA/MFA-Free] review split guard=fail "
+            + ",".join(str(reason) for reason in split_guard_reasons)
+        )
+    warnings = list(report.warnings)
+    warnings.extend(str(reason) for reason in split_guard_reasons)
+    guard_failed = bool(report.guard_failed or split_guard_reasons)
     return 0, {
         "ok": True,
         "generated_oto_path": str(generated_path),
@@ -810,10 +847,11 @@ def _run_generate_review(
         "processed": int(report.processed),
         "total": int(report.total),
         "confidence": float(report.confidence),
-        "guard_failed": bool(report.guard_failed),
-        "warnings": list(report.warnings),
+        "guard_failed": guard_failed,
+        "warnings": list(dict.fromkeys(warnings)),
         "messages": messages,
         "metrics": dict(report.metrics or {}),
+        "review_split_guard_reasons": list(split_guard_reasons),
         "row_plan_path": row_plan_path,
         "row_plan_sha256": row_plan_sha256,
         "row_plan_rows": len(row_plan_records),
@@ -823,6 +861,9 @@ def _run_generate_review(
         "evidence_path": evidence_path,
         "evidence_sha256": evidence_sha256,
         "evidence_wavs": evidence_wavs,
+        "row_provenance_path": row_provenance_path,
+        "row_provenance_sha256": row_provenance_sha256,
+        "row_provenance_rows": len(row_provenance_records),
         "lightgbm_postprocess": dict(lightgbm_postprocess),
         "split_counts": dict(split.counts),
         "split_output_paths": dict(split.output_paths),
@@ -5037,6 +5078,598 @@ def _reference_comparison_failures(reference_comparison: Mapping[str, object]) -
     return failures
 
 
+_PROVENANCE_CONTEXT_ROLES = {"cv_head", "cv", "vv", "vcv", "v"}
+_PROVENANCE_SONORANT_TOKENS = {
+    "m",
+    "n",
+    "r",
+    "l",
+    "ん",
+    "ま",
+    "み",
+    "む",
+    "め",
+    "も",
+    "な",
+    "に",
+    "ぬ",
+    "ね",
+    "の",
+    "ら",
+    "り",
+    "る",
+    "れ",
+    "ろ",
+}
+_PROVENANCE_VC_CLOSE_TO_PREV_MS = 80.0
+_PROVENANCE_VC_SAFE_AFTER_PREV_MS = 140.0
+_PROVENANCE_VC_CLOSE_TO_NEXT_MS = 45.0
+_PROVENANCE_VC_COLLAPSE_MS = 25.0
+_PROVENANCE_VV_CLOSE_TO_CONTEXT_MS = 80.0
+_PROVENANCE_LOCAL_REFINE_LARGE_MS = 70.0
+_PROVENANCE_SEQUENCE_REPAIR_LARGE_MS = 250.0
+_PROVENANCE_VC_GLIDE_TOKENS = {"w", "y"}
+_PROVENANCE_CV_HEAD_CLOSE_TO_NEXT_MS = 45.0
+_PROVENANCE_CV_HEAD_FAR_BEFORE_NEXT_MS = 850.0
+_PROVENANCE_CV_HEAD_FILE_HEAD_MS = 120.0
+_PROVENANCE_HIGH_PRIORITY_TAGS = {
+    "cv_head_at_file_head",
+    "cv_head_after_next_context",
+    "cv_head_too_close_to_next_context",
+    "cv_head_far_before_next_context",
+    "vc_at_file_head",
+    "vc_tied_to_prev_cv",
+    "vc_too_close_to_prev_cv",
+    "vc_before_prev_safe_window",
+    "vc_after_next_cv",
+    "vc_too_close_to_next_cv",
+    "vc_collapsed_with_prev_vc",
+    "vc_collapsed_with_next_vc",
+    "vv_close_to_prev_context",
+    "vv_close_to_next_context",
+}
+
+
+def _cmd_diagnose_row_provenance(args: argparse.Namespace) -> int:
+    row_provenance = Path(str(args.row_provenance or ""))
+    if not row_provenance.is_file():
+        _print_json(
+            {
+                "ok": False,
+                "reason": "row_provenance_missing",
+                "row_provenance": str(row_provenance),
+            }
+        )
+        return 2
+    try:
+        report = _build_row_provenance_diagnosis(
+            row_provenance,
+            max_rows=int(args.max_rows),
+        )
+    except Exception as exc:
+        _print_json(
+            {
+                "ok": False,
+                "reason": "row_provenance_diagnosis_failed",
+                "row_provenance": str(row_provenance),
+                "error": str(exc),
+            }
+        )
+        return 2
+    if args.out:
+        _write_json(args.out, report)
+    _print_json(report)
+    return 0
+
+
+def _build_row_provenance_diagnosis(path: str | Path, *, max_rows: int = 100) -> dict[str, object]:
+    records = _load_jsonl_object_records(path)
+    by_wav: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for record in records:
+        by_wav[str(record.get("wav", "") or "")].append(record)
+
+    role_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    rule_counts: Counter[str] = Counter()
+    tag_counts: Counter[str] = Counter()
+    tag_counts_by_role: dict[str, Counter[str]] = defaultdict(Counter)
+    suspect_row_candidates: list[dict[str, object]] = []
+    suspect_row_total = 0
+    drift_suspect_row_total = 0
+    limit = max(0, int(max_rows))
+
+    for record in records:
+        role_counts[_provenance_role(record)] += 1
+        source_counts[str(record.get("selected_event_source", "") or "unknown")] += 1
+        for rule in _provenance_rules(record):
+            rule_counts[rule] += 1
+
+    for wav, wav_rows in sorted(by_wav.items()):
+        slot_order_rows = sorted(wav_rows, key=_provenance_slot_sort_key)
+        context_rows = [row for row in slot_order_rows if _provenance_is_context_row(row)]
+        vc_rows = [row for row in slot_order_rows if _provenance_role(row) == "vc"]
+        for row in slot_order_rows:
+            prev_context, next_context = _provenance_neighbor_context_rows(row, context_rows)
+            prev_vc, next_vc = _provenance_neighbor_vc_rows(row, vc_rows)
+            tags = _provenance_row_tags(row, prev_context, next_context, prev_vc, next_vc)
+            if not tags:
+                continue
+            suspect_row_total += 1
+            if any(tag in _PROVENANCE_HIGH_PRIORITY_TAGS for tag in tags):
+                drift_suspect_row_total += 1
+            role = _provenance_role(row)
+            for tag in tags:
+                tag_counts[tag] += 1
+                tag_counts_by_role[role][tag] += 1
+            suspect_row_candidates.append(
+                _provenance_suspect_row(row, tags, prev_context, next_context, prev_vc, next_vc)
+            )
+
+    high_priority_count = sum(int(tag_counts.get(tag, 0)) for tag in _PROVENANCE_HIGH_PRIORITY_TAGS)
+    suspect_row_candidates.sort(key=_provenance_suspect_sort_key)
+    suspect_rows = suspect_row_candidates if limit == 0 else suspect_row_candidates[:limit]
+    return {
+        "ok": True,
+        "diagnostic_version": 1,
+        "row_provenance": str(path),
+        "row_provenance_sha256": _sha256_file(Path(path)) if Path(path).is_file() else "",
+        "total_rows": len(records),
+        "wav_count": len(by_wav),
+        "suspect_row_count": int(suspect_row_total),
+        "drift_suspect_row_count": int(drift_suspect_row_total),
+        "suspect_tag_total": int(sum(tag_counts.values())),
+        "high_priority_suspect_count": int(high_priority_count),
+        "role_counts": dict(sorted(role_counts.items())),
+        "selected_event_source_counts": dict(sorted(source_counts.items())),
+        "applied_rule_counts": dict(sorted(rule_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
+        "tag_counts": dict(sorted(tag_counts.items(), key=lambda item: (-int(item[1]), item[0]))),
+        "tag_counts_by_role": {
+            role: dict(sorted(counter.items(), key=lambda item: (-int(item[1]), item[0])))
+            for role, counter in sorted(tag_counts_by_role.items())
+        },
+        "suspect_rows_limited": limit != 0,
+        "suspect_rows_limit": limit,
+        "suspect_rows": suspect_rows,
+    }
+
+
+def _provenance_role(row: Mapping[str, object]) -> str:
+    return str(row.get("role", "") or row.get("mode", "") or "unknown").strip().lower() or "unknown"
+
+
+def _provenance_rules(row: Mapping[str, object]) -> list[str]:
+    rules = row.get("applied_rules", [])
+    if not isinstance(rules, (list, tuple)):
+        return []
+    return [str(rule) for rule in rules if str(rule).strip()]
+
+
+def _provenance_warnings(row: Mapping[str, object]) -> list[str]:
+    warnings = row.get("warnings", [])
+    if not isinstance(warnings, (list, tuple)):
+        return []
+    return [str(warning) for warning in warnings if str(warning).strip()]
+
+
+def _provenance_slot_payload(row: Mapping[str, object]) -> Mapping[str, object]:
+    slot = row.get("slot")
+    if isinstance(slot, Mapping):
+        return slot
+    row_plan = row.get("row_plan")
+    if isinstance(row_plan, Mapping):
+        return row_plan
+    return {}
+
+
+def _provenance_slot_value(row: Mapping[str, object], name: str) -> int | None:
+    payload = _provenance_slot_payload(row)
+    value = _int_or_none(payload.get(name))
+    if value is not None:
+        return value
+    row_plan = row.get("row_plan")
+    if isinstance(row_plan, Mapping):
+        return _int_or_none(row_plan.get(name))
+    return None
+
+
+def _provenance_offset_abs(row: Mapping[str, object] | None) -> float | None:
+    if not isinstance(row, Mapping):
+        return None
+    absolute = row.get("absolute")
+    if isinstance(absolute, Mapping):
+        value = _float_or_none(absolute.get("offset_abs"))
+        if value is not None:
+            return value
+    timing = row.get("timing")
+    if isinstance(timing, Mapping):
+        return _float_or_none(timing.get("offset"))
+    return None
+
+
+def _provenance_slot_sort_key(row: Mapping[str, object]) -> tuple[int, int, float, int]:
+    slot_index = _provenance_slot_value(row, "slot_index")
+    expected_phone_index = _provenance_slot_value(row, "expected_phone_index")
+    offset_abs = _provenance_offset_abs(row)
+    global_row_index = _int_or_none(row.get("global_row_index"))
+    invalid_slot = 1 if slot_index is None or slot_index < 0 else 0
+    return (
+        invalid_slot,
+        int(slot_index if slot_index is not None else 999999),
+        float(offset_abs if offset_abs is not None else 999999.0),
+        int(global_row_index if global_row_index is not None else 999999),
+    )
+
+
+def _provenance_is_context_row(row: Mapping[str, object]) -> bool:
+    return _provenance_role(row) in _PROVENANCE_CONTEXT_ROLES and _provenance_offset_abs(row) is not None
+
+
+def _provenance_neighbor_context_rows(
+    row: Mapping[str, object],
+    context_rows: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object] | None, Mapping[str, object] | None]:
+    left_slot = _provenance_slot_value(row, "left_slot_index")
+    right_slot = _provenance_slot_value(row, "right_slot_index")
+    offset_abs = _provenance_offset_abs(row)
+    prev_candidates: list[Mapping[str, object]] = []
+    next_candidates: list[Mapping[str, object]] = []
+    if left_slot is not None and left_slot >= 0:
+        for candidate in context_rows:
+            candidate_right = _provenance_slot_value(candidate, "right_slot_index")
+            candidate_offset = _provenance_offset_abs(candidate)
+            if candidate is row or candidate_right is None or candidate_right < 0:
+                continue
+            if (
+                offset_abs is not None
+                and candidate_offset is not None
+                and candidate_right == left_slot
+                and candidate_offset > offset_abs
+            ):
+                continue
+            if candidate_right <= left_slot:
+                prev_candidates.append(candidate)
+    if right_slot is not None and right_slot >= 0:
+        for candidate in context_rows:
+            candidate_left = _provenance_slot_value(candidate, "left_slot_index")
+            candidate_offset = _provenance_offset_abs(candidate)
+            if candidate is row or candidate_left is None or candidate_left < 0:
+                continue
+            if (
+                offset_abs is not None
+                and candidate_offset is not None
+                and candidate_left == right_slot
+                and candidate_offset < offset_abs
+            ):
+                continue
+            if candidate_left >= right_slot:
+                next_candidates.append(candidate)
+
+    prev_context = max(prev_candidates, key=_provenance_slot_sort_key) if prev_candidates else None
+    next_context = min(next_candidates, key=_provenance_slot_sort_key) if next_candidates else None
+    if (prev_context is None or next_context is None) and offset_abs is not None:
+        before = [
+            candidate
+            for candidate in context_rows
+            if candidate is not row
+            and (candidate_offset := _provenance_offset_abs(candidate)) is not None
+            and candidate_offset <= offset_abs
+        ]
+        after = [
+            candidate
+            for candidate in context_rows
+            if candidate is not row
+            and (candidate_offset := _provenance_offset_abs(candidate)) is not None
+            and candidate_offset >= offset_abs
+        ]
+        prev_context = prev_context or (max(before, key=lambda item: _provenance_offset_abs(item) or -1.0) if before else None)
+        next_context = next_context or (min(after, key=lambda item: _provenance_offset_abs(item) or 999999.0) if after else None)
+    return prev_context, next_context
+
+
+def _provenance_neighbor_vc_rows(
+    row: Mapping[str, object],
+    vc_rows: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object] | None, Mapping[str, object] | None]:
+    sorted_vc = list(vc_rows)
+    index = next((i for i, candidate in enumerate(sorted_vc) if candidate is row), -1)
+    if index < 0:
+        return None, None
+    prev_vc = sorted_vc[index - 1] if index > 0 else None
+    next_vc = sorted_vc[index + 1] if index + 1 < len(sorted_vc) else None
+    return prev_vc, next_vc
+
+
+def _provenance_row_tags(
+    row: Mapping[str, object],
+    prev_context: Mapping[str, object] | None,
+    next_context: Mapping[str, object] | None,
+    prev_vc: Mapping[str, object] | None,
+    next_vc: Mapping[str, object] | None,
+) -> list[str]:
+    role = _provenance_role(row)
+    rules = set(_provenance_rules(row))
+    warnings = _provenance_warnings(row)
+    tags: list[str] = []
+
+    if "special_alias_source_timing_preserve" in rules:
+        tags.append("source_timing_preserved")
+    if "oto_parameter_order_repair" in rules:
+        tags.append("parameter_order_repaired")
+    if any("timing_clamp_large_delta" in warning for warning in warnings):
+        tags.append("timing_clamp_large_delta")
+    if any("local_refine_rejected_slot_boundary" in warning for warning in warnings):
+        tags.append("local_refine_rejected_slot_boundary")
+    if any("alias_target_backtrack" in warning for warning in warnings):
+        tags.append("alias_target_backtrack")
+    if any("low_boundary_confidence" in warning for warning in warnings):
+        tags.append("low_boundary_confidence")
+    if any("low_nucleus_confidence" in warning for warning in warnings):
+        tags.append("low_nucleus_confidence")
+    if any("local_refine_low_margin" in warning for warning in warnings):
+        tags.append("local_refine_low_margin")
+    if _provenance_warning_delta_abs(warnings, "local_refine_delta_ms") >= _PROVENANCE_LOCAL_REFINE_LARGE_MS:
+        tags.append("large_local_refine_delta")
+
+    offset_abs = _provenance_offset_abs(row)
+    if role == "vc":
+        _provenance_extend_vc_tags(row, prev_context, next_context, prev_vc, next_vc, tags)
+    elif role == "cv_head":
+        _provenance_extend_cv_head_tags(row, prev_context, next_context, tags)
+    elif role == "vv":
+        _provenance_extend_vv_tags(row, prev_context, next_context, tags)
+    if offset_abs is not None and offset_abs <= 120.0 and role == "vc":
+        tags.append("vc_at_file_head")
+    return _dedupe_preserve_order(tags)
+
+
+def _provenance_extend_vc_tags(
+    row: Mapping[str, object],
+    prev_context: Mapping[str, object] | None,
+    next_context: Mapping[str, object] | None,
+    prev_vc: Mapping[str, object] | None,
+    next_vc: Mapping[str, object] | None,
+    tags: list[str],
+) -> None:
+    offset_abs = _provenance_offset_abs(row)
+    left_slot = _provenance_slot_value(row, "left_slot_index")
+    right_slot = _provenance_slot_value(row, "right_slot_index")
+    rules = set(_provenance_rules(row))
+    if left_slot is None or right_slot is None or left_slot < 0 or right_slot < 0:
+        tags.append("vc_invalid_slot")
+    if _provenance_alias_right_is_sonorant(str(row.get("alias", "") or "")):
+        tags.append("vc_sonorant_context")
+    if _provenance_alias_right_is_glide(str(row.get("alias", "") or "")):
+        tags.append("vc_glide_context")
+    if _provenance_alias_right_is_yoon(str(row.get("alias", "") or "")):
+        tags.append("vc_yoon_context")
+    if "cvvc_headed_regular_vc_from_next_cv_repair" in rules:
+        tags.append("rule_headed_regular_vc_from_next_cv")
+    if "cvvc_internal_vc_slot_bound_repair" in rules:
+        tags.append("rule_internal_vc_slot_bound")
+    if offset_abs is None:
+        return
+
+    prev_offset = _provenance_offset_abs(prev_context)
+    next_offset = _provenance_offset_abs(next_context)
+    if prev_offset is None:
+        tags.append("vc_missing_prev_context")
+    else:
+        delta_prev = offset_abs - prev_offset
+        if abs(delta_prev) <= _PROVENANCE_VC_COLLAPSE_MS:
+            tags.append("vc_tied_to_prev_cv")
+        if delta_prev < _PROVENANCE_VC_CLOSE_TO_PREV_MS:
+            tags.append("vc_too_close_to_prev_cv")
+        if delta_prev < _PROVENANCE_VC_SAFE_AFTER_PREV_MS:
+            tags.append("vc_before_prev_safe_window")
+    if next_offset is None:
+        tags.append("vc_missing_next_context")
+    else:
+        delta_next = next_offset - offset_abs
+        if delta_next <= -_PROVENANCE_VC_COLLAPSE_MS:
+            tags.append("vc_after_next_cv")
+        elif delta_next < _PROVENANCE_VC_CLOSE_TO_NEXT_MS:
+            tags.append("vc_too_close_to_next_cv")
+
+    prev_vc_offset = _provenance_offset_abs(prev_vc)
+    if prev_vc_offset is not None and abs(offset_abs - prev_vc_offset) <= _PROVENANCE_VC_COLLAPSE_MS:
+        tags.append("vc_collapsed_with_prev_vc")
+    next_vc_offset = _provenance_offset_abs(next_vc)
+    if next_vc_offset is not None and abs(next_vc_offset - offset_abs) <= _PROVENANCE_VC_COLLAPSE_MS:
+        tags.append("vc_collapsed_with_next_vc")
+
+
+def _provenance_extend_cv_head_tags(
+    row: Mapping[str, object],
+    prev_context: Mapping[str, object] | None,
+    next_context: Mapping[str, object] | None,
+    tags: list[str],
+) -> None:
+    offset_abs = _provenance_offset_abs(row)
+    if offset_abs is None:
+        return
+    if offset_abs <= _PROVENANCE_CV_HEAD_FILE_HEAD_MS:
+        tags.append("cv_head_at_file_head")
+
+    prev_offset = _provenance_offset_abs(prev_context)
+    if prev_offset is not None and abs(offset_abs - prev_offset) <= _PROVENANCE_VC_COLLAPSE_MS:
+        tags.append("cv_head_tied_to_prev_context")
+
+    next_offset = _provenance_offset_abs(next_context)
+    if next_offset is None:
+        tags.append("cv_head_missing_next_context")
+        return
+
+    delta_next = next_offset - offset_abs
+    if delta_next <= -_PROVENANCE_VC_COLLAPSE_MS:
+        tags.append("cv_head_after_next_context")
+    elif delta_next < _PROVENANCE_CV_HEAD_CLOSE_TO_NEXT_MS:
+        tags.append("cv_head_too_close_to_next_context")
+    elif delta_next > _PROVENANCE_CV_HEAD_FAR_BEFORE_NEXT_MS:
+        tags.append("cv_head_far_before_next_context")
+
+
+def _provenance_extend_vv_tags(
+    row: Mapping[str, object],
+    prev_context: Mapping[str, object] | None,
+    next_context: Mapping[str, object] | None,
+    tags: list[str],
+) -> None:
+    warnings = _provenance_warnings(row)
+    if _provenance_sequence_repair_delta_abs(warnings) >= _PROVENANCE_SEQUENCE_REPAIR_LARGE_MS:
+        tags.append("vv_large_sequence_repair")
+    offset_abs = _provenance_offset_abs(row)
+    if offset_abs is None:
+        return
+    prev_offset = _provenance_offset_abs(prev_context)
+    next_offset = _provenance_offset_abs(next_context)
+    if prev_offset is not None and abs(offset_abs - prev_offset) < _PROVENANCE_VV_CLOSE_TO_CONTEXT_MS:
+        tags.append("vv_close_to_prev_context")
+    if next_offset is not None and abs(next_offset - offset_abs) < _PROVENANCE_VV_CLOSE_TO_CONTEXT_MS:
+        tags.append("vv_close_to_next_context")
+
+
+def _provenance_warning_delta_abs(warnings: Sequence[str], prefix: str) -> float:
+    marker = f"{prefix}:"
+    values: list[float] = []
+    for warning in warnings:
+        if not str(warning).startswith(marker):
+            continue
+        value = _float_or_none(str(warning).split(":", 1)[1])
+        if value is not None:
+            values.append(abs(value))
+    return max(values) if values else 0.0
+
+
+def _provenance_sequence_repair_delta_abs(warnings: Sequence[str]) -> float:
+    values: list[float] = []
+    for warning in warnings:
+        text = str(warning)
+        if not text.startswith("cvvc_pure_vowel_sequence_row_repaired:"):
+            continue
+        payload = text.split(":", 1)[1]
+        if "->" not in payload:
+            continue
+        left, right = payload.split("->", 1)
+        left_value = _float_or_none(left)
+        right_value = _float_or_none(right)
+        if left_value is not None and right_value is not None:
+            values.append(abs(right_value - left_value))
+    return max(values) if values else 0.0
+
+
+def _provenance_alias_right_is_sonorant(alias: str) -> bool:
+    parts = [part.strip() for part in str(alias or "").split() if part.strip()]
+    if len(parts) < 2:
+        return False
+    token = parts[-1].strip().lower()
+    if token in _PROVENANCE_SONORANT_TOKENS:
+        return True
+    return bool(token) and token[0] in {"m", "n", "r", "l"}
+
+
+def _provenance_alias_right_is_glide(alias: str) -> bool:
+    parts = [part.strip() for part in str(alias or "").split() if part.strip()]
+    if len(parts) < 2:
+        return False
+    token = parts[-1].strip().lower()
+    return token in _PROVENANCE_VC_GLIDE_TOKENS or (bool(token) and token[0] in _PROVENANCE_VC_GLIDE_TOKENS)
+
+
+def _provenance_alias_right_is_yoon(alias: str) -> bool:
+    parts = [part.strip() for part in str(alias or "").split() if part.strip()]
+    if len(parts) < 2:
+        return False
+    token = parts[-1].strip().lower()
+    return len(token) > 1 and token.endswith("y")
+
+
+def _dedupe_preserve_order(items: Sequence[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _provenance_suspect_row(
+    row: Mapping[str, object],
+    tags: Sequence[str],
+    prev_context: Mapping[str, object] | None,
+    next_context: Mapping[str, object] | None,
+    prev_vc: Mapping[str, object] | None,
+    next_vc: Mapping[str, object] | None,
+) -> dict[str, object]:
+    offset_abs = _provenance_offset_abs(row)
+    prev_context_offset = _provenance_offset_abs(prev_context)
+    next_context_offset = _provenance_offset_abs(next_context)
+    prev_vc_offset = _provenance_offset_abs(prev_vc)
+    next_vc_offset = _provenance_offset_abs(next_vc)
+    context: dict[str, object] = {
+        "prev_context": _provenance_row_brief(prev_context),
+        "next_context": _provenance_row_brief(next_context),
+        "prev_vc": _provenance_row_brief(prev_vc),
+        "next_vc": _provenance_row_brief(next_vc),
+    }
+    if offset_abs is not None and prev_context_offset is not None:
+        context["delta_from_prev_context_ms"] = _round_ms(offset_abs - prev_context_offset)
+    if offset_abs is not None and next_context_offset is not None:
+        context["delta_to_next_context_ms"] = _round_ms(next_context_offset - offset_abs)
+    if offset_abs is not None and prev_vc_offset is not None:
+        context["delta_from_prev_vc_ms"] = _round_ms(offset_abs - prev_vc_offset)
+    if offset_abs is not None and next_vc_offset is not None:
+        context["delta_to_next_vc_ms"] = _round_ms(next_vc_offset - offset_abs)
+    return {
+        "wav": str(row.get("wav", "") or ""),
+        "alias": str(row.get("alias", "") or ""),
+        "global_row_index": int(_int_or_none(row.get("global_row_index")) or -1),
+        "role": _provenance_role(row),
+        "selected_event_source": str(row.get("selected_event_source", "") or ""),
+        "slot": {
+            "slot_index": _provenance_slot_value(row, "slot_index"),
+            "left_slot_index": _provenance_slot_value(row, "left_slot_index"),
+            "right_slot_index": _provenance_slot_value(row, "right_slot_index"),
+            "expected_phone_index": _provenance_slot_value(row, "expected_phone_index"),
+        },
+        "offset_abs_ms": _round_ms(offset_abs) if offset_abs is not None else None,
+        "tags": list(tags),
+        "context": context,
+        "applied_rules": _provenance_rules(row),
+        "warnings": _provenance_warnings(row)[:12],
+    }
+
+
+def _provenance_row_brief(row: Mapping[str, object] | None) -> dict[str, object]:
+    if not isinstance(row, Mapping):
+        return {}
+    offset_abs = _provenance_offset_abs(row)
+    return {
+        "wav": str(row.get("wav", "") or ""),
+        "alias": str(row.get("alias", "") or ""),
+        "role": _provenance_role(row),
+        "slot_index": _provenance_slot_value(row, "slot_index"),
+        "left_slot_index": _provenance_slot_value(row, "left_slot_index"),
+        "right_slot_index": _provenance_slot_value(row, "right_slot_index"),
+        "offset_abs_ms": _round_ms(offset_abs) if offset_abs is not None else None,
+    }
+
+
+def _provenance_suspect_sort_key(row: Mapping[str, object]) -> tuple[int, int, int]:
+    tags = row.get("tags", [])
+    tag_list = [str(tag) for tag in tags] if isinstance(tags, (list, tuple)) else []
+    role = str(row.get("role", "") or "")
+    if any(tag in _PROVENANCE_HIGH_PRIORITY_TAGS for tag in tag_list):
+        priority = 0
+    elif role in {"vc", "vv"}:
+        priority = 1
+    else:
+        priority = 2
+    global_row_index = _int_or_none(row.get("global_row_index"))
+    return (priority, -len(tag_list), int(global_row_index if global_row_index is not None else 999999))
+
+
 def _load_oto_param_rows(path: Path) -> tuple[dict[tuple[str, str, int], dict[str, object]], int]:
     rows: dict[tuple[str, str, int], dict[str, object]] = {}
     occurrence: dict[tuple[str, str], int] = {}
@@ -5246,6 +5879,20 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--beam-width", type=int, default=64)
     replay_parser.add_argument("--timeout-ms", type=int, default=5000)
     replay_parser.set_defaults(func=_cmd_replay_evidence_hsmm)
+
+    diagnose_parser = subparsers.add_parser(
+        "diagnose-row-provenance",
+        help="Classify HSMM row_provenance.jsonl rows into slot/timing drift diagnostic tags.",
+    )
+    diagnose_parser.add_argument("--row-provenance", required=True, help="row_provenance.jsonl emitted by generate.")
+    diagnose_parser.add_argument("--out", default="", help="Optional JSON report path.")
+    diagnose_parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=100,
+        help="Maximum suspect row records embedded in the report. Use 0 for all rows.",
+    )
+    diagnose_parser.set_defaults(func=_cmd_diagnose_row_provenance)
 
     merge_parser = subparsers.add_parser("merge", help="Merge clean rows and edited review rows into final.ini.")
     merge_parser.add_argument("--validation-jsonl", required=True, help="validation.jsonl emitted by split.")

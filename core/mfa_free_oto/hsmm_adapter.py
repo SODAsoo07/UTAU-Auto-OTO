@@ -5,7 +5,12 @@ from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
-from core.alignment.hsmm_decoder import HSMMDecodeResult, HSMMStateSpec, decode_segmental_hsmm
+from core.alignment.hsmm_decoder import (
+    HSMMDecodeResult,
+    HSMMStateSpec,
+    decode_segmental_hsmm,
+    decode_segmental_hsmm_coarse_to_refine,
+)
 
 from .row_plan import FilenameSlot
 from .types import FramePosterior
@@ -34,15 +39,24 @@ def build_hsmm_states_for_slots(
     slots: Sequence[FilenameSlot],
     *,
     duration_ms: float = 0.0,
+    enable_sonorant_hold: bool = False,
 ) -> tuple[HSMMStateSpec, ...]:
     if not slots:
         return ()
-    state_count = sum(1 + (1 if slot.onset_phones else 0) for slot in slots)
+    state_count = sum(
+        1 + _onset_state_count(slot.onset_phones, enable_sonorant_hold=enable_sonorant_hold)
+        for slot in slots
+    )
     base_duration = float(duration_ms or 0.0) / float(max(1, state_count)) if duration_ms > 0.0 else 90.0
     states: list[HSMMStateSpec] = []
     for slot in slots:
+        sonorant_onset = bool(enable_sonorant_hold) and _phones_include_sonorant(slot.onset_phones)
         if slot.onset_phones:
-            cons_mode = _clamp(base_duration * 0.65, 28.0, 95.0)
+            cons_mode = _clamp(
+                base_duration * (0.48 if sonorant_onset else 0.65),
+                22.0 if sonorant_onset else 28.0,
+                95.0,
+            )
             states.append(
                 HSMMStateSpec(
                     state_id=_state_id(slot, "onset"),
@@ -53,7 +67,20 @@ def build_hsmm_states_for_slots(
                     duration_sigma_ms=max(12.0, cons_mode * 0.55),
                 )
             )
-        vowel_mode = _clamp(base_duration * (1.20 if slot.onset_phones else 1.55), 48.0, 240.0)
+            if sonorant_onset:
+                hold_mode = _clamp(base_duration * 0.45, 24.0, 105.0)
+                states.append(
+                    HSMMStateSpec(
+                        state_id=_state_id(slot, "onset_hold"),
+                        state_type="consonant",
+                        min_duration_ms=max(12.0, min(36.0, hold_mode * 0.42)),
+                        max_duration_ms=max(54.0, min(220.0, hold_mode * 2.6)),
+                        mode_duration_ms=hold_mode,
+                        duration_sigma_ms=max(16.0, hold_mode * 0.62),
+                    )
+                )
+        vowel_scale = 1.12 if sonorant_onset else (1.20 if slot.onset_phones else 1.55)
+        vowel_mode = _clamp(base_duration * vowel_scale, 48.0, 240.0)
         states.append(
             HSMMStateSpec(
                 state_id=_state_id(slot, "vowel"),
@@ -73,6 +100,7 @@ def build_hsmm_frame_scores(
     *,
     slots: Sequence[FilenameSlot] = (),
     state_interval_priors: Mapping[str, Sequence[float]] | None = None,
+    use_vowel_start_score: bool = False,
 ) -> dict[str, tuple[float, ...]]:
     times = np.asarray(posterior.times_ms, dtype=np.float32)
     frame_count = int(times.size)
@@ -87,6 +115,12 @@ def build_hsmm_frame_scores(
         posterior.acoustic_scores,
         posterior.event_scores,
         keys=("transition_likelihood", "cv_boundary", "phone_change", "flux_likelihood"),
+    )
+    vowel_start = _first_track(
+        frame_count,
+        posterior.event_scores,
+        posterior.acoustic_scores,
+        keys=("cv_boundary", "vowel_boundary_likelihood", "phone_change", "transition_likelihood"),
     )
     onset = _first_track(
         frame_count,
@@ -112,6 +146,11 @@ def build_hsmm_frame_scores(
         0.0,
         1.0,
     )
+    sonorant_hold_score = np.clip(
+        (0.30 * voicing) + (0.26 * active) + (0.22 * consonant) + (0.22 * (1.0 - transition)),
+        0.0,
+        1.0,
+    )
     vowel_score = np.clip(
         (0.50 * vowel) + (0.22 * voicing) + (0.18 * nucleus) + (0.10 * active),
         0.0,
@@ -126,15 +165,32 @@ def build_hsmm_frame_scores(
         for slot in slots
         if slot.onset_phones and _phones_include_sonorant(slot.onset_phones)
     }
+    sonorant_hold_state_ids = {
+        _state_id(slot, "onset_hold")
+        for slot in slots
+        if slot.onset_phones and _phones_include_sonorant(slot.onset_phones)
+    }
     for order, state in enumerate(states):
         if state.state_type == "consonant" and state.state_id in sonorant_onset_state_ids:
             base = sonorant_consonant_score
+        elif state.state_type == "consonant" and state.state_id in sonorant_hold_state_ids:
+            base = sonorant_hold_score
         else:
             base = consonant_score if state.state_type == "consonant" else vowel_score
         prior = _position_prior(times, expected_ms=(order + 0.5) * duration / float(order_count), sigma_ms=max(40.0, duration / float(order_count + 1)))
         event_prior = _track(state_interval_priors or {}, state.state_id, frame_count)
+        start_prior = (
+            _state_start_interval_track(times, vowel_start, state.mode_duration_ms)
+            if bool(use_vowel_start_score) and state.state_type == "vowel"
+            else np.zeros((frame_count,), dtype=np.float32)
+        )
         if np.any(event_prior):
-            scored = np.clip((0.58 * base) + (0.12 * prior) + (0.30 * event_prior), 0.0, 1.0)
+            if np.any(start_prior):
+                scored = np.clip((0.50 * base) + (0.10 * prior) + (0.28 * event_prior) + (0.12 * start_prior), 0.0, 1.0)
+            else:
+                scored = np.clip((0.58 * base) + (0.12 * prior) + (0.30 * event_prior), 0.0, 1.0)
+        elif np.any(start_prior):
+            scored = np.clip((0.72 * base) + (0.12 * prior) + (0.16 * start_prior), 0.0, 1.0)
         else:
             scored = np.clip((0.86 * base) + (0.14 * prior), 0.0, 1.0)
         out[state.state_id] = tuple(float(value) for value in scored)
@@ -148,11 +204,25 @@ def decode_filename_slots_with_hsmm(
     beam_width_per_state: int = 64,
     timeout_ms: int = 5000,
     event_priors: Iterable[Mapping[str, object]] = (),
+    use_coarse_to_refine: bool | None = None,
+    coarse_stride: int = 4,
+    refine_window_ms: float = 110.0,
+    language: str = "",
+    enable_sonorant_hold: bool | None = None,
+    use_vowel_start_score: bool | None = None,
 ) -> FilenameHSMMDecode:
     event_prior_items = tuple(dict(event or {}) for event in event_priors)
     times = [float(value) for value in posterior.times_ms]
     duration = _posterior_duration_ms(np.asarray(times, dtype=np.float32))
-    states = build_hsmm_states_for_slots(slots, duration_ms=duration)
+    korean_mode = _is_korean_language(language)
+    coarse_enabled = korean_mode if use_coarse_to_refine is None else bool(use_coarse_to_refine)
+    sonorant_hold_enabled = korean_mode if enable_sonorant_hold is None else bool(enable_sonorant_hold)
+    vowel_start_enabled = korean_mode if use_vowel_start_score is None else bool(use_vowel_start_score)
+    states = build_hsmm_states_for_slots(
+        slots,
+        duration_ms=duration,
+        enable_sonorant_hold=sonorant_hold_enabled,
+    )
     state_interval_priors = build_state_interval_priors_for_slots(
         posterior,
         slots,
@@ -164,22 +234,30 @@ def decode_filename_slots_with_hsmm(
         states,
         slots=slots,
         state_interval_priors=state_interval_priors,
+        use_vowel_start_score=vowel_start_enabled,
     )
-    result = decode_segmental_hsmm(
-        states,
-        times,
-        frame_scores,
-        beam_width_per_state=beam_width_per_state,
-        timeout_ms=timeout_ms,
-        allow_leading_gap=True,
-        allow_trailing_gap=True,
-        leading_gap_penalty_per_ms=0.00005,
-        max_leading_gap_ms=_max_leading_gap_ms(duration, len(states)),
-        trailing_gap_penalty_per_ms=0.00002,
-        allow_internal_gaps=True,
-        internal_gap_penalty_per_ms=0.00006,
-        max_internal_gap_ms=_max_internal_gap_ms(duration, len(states)),
-    )
+    decode_fn = decode_segmental_hsmm_coarse_to_refine if bool(coarse_enabled) else decode_segmental_hsmm
+    decode_kwargs = {
+        "beam_width_per_state": beam_width_per_state,
+        "timeout_ms": timeout_ms,
+        "allow_leading_gap": True,
+        "allow_trailing_gap": True,
+        "leading_gap_penalty_per_ms": 0.00005,
+        "max_leading_gap_ms": _max_leading_gap_ms(duration, len(states)),
+        "trailing_gap_penalty_per_ms": 0.00002,
+        "allow_internal_gaps": True,
+        "internal_gap_penalty_per_ms": 0.00006,
+        "max_internal_gap_ms": _max_internal_gap_ms(duration, len(states)),
+    }
+    if bool(coarse_enabled):
+        decode_kwargs.update(
+            {
+                "coarse_stride": int(coarse_stride),
+                "refine_window_ms": float(refine_window_ms),
+                "fallback_to_full": True,
+            }
+        )
+    result = decode_fn(states, times, frame_scores, **decode_kwargs)
     events = hsmm_result_to_slot_events(result, slots) if result.ok else ()
     diagnostics = build_hsmm_diagnostics(
         result,
@@ -512,6 +590,17 @@ def _phones_include_sonorant(phones: Sequence[str]) -> bool:
     return False
 
 
+def _onset_state_count(phones: Sequence[str], *, enable_sonorant_hold: bool = False) -> int:
+    if not phones:
+        return 0
+    return 2 if bool(enable_sonorant_hold) and _phones_include_sonorant(phones) else 1
+
+
+def _is_korean_language(language: str) -> bool:
+    value = str(language or "").strip().lower()
+    return value.startswith(("ko", "kr")) or value == "korean"
+
+
 def _track(mapping: Mapping[str, Sequence[float]], key: str, frame_count: int) -> np.ndarray:
     values = mapping.get(key)
     if values is None:
@@ -541,6 +630,35 @@ def _position_prior(times: np.ndarray, *, expected_ms: float, sigma_ms: float) -
     sigma = max(1.0, float(sigma_ms))
     z = (times.astype(np.float32) - float(expected_ms)) / sigma
     return np.exp(-0.5 * z * z).astype(np.float32)
+
+
+def _state_start_interval_track(
+    times: np.ndarray,
+    boundary_scores: np.ndarray,
+    mode_duration_ms: float,
+    *,
+    top_k: int = 8,
+) -> np.ndarray:
+    if times.size == 0 or boundary_scores.size != times.size or not np.any(boundary_scores):
+        return np.zeros_like(times, dtype=np.float32)
+    peak = float(np.max(boundary_scores))
+    if peak < 0.18:
+        return np.zeros_like(times, dtype=np.float32)
+    threshold = max(0.18, peak * 0.55)
+    indices = np.flatnonzero(boundary_scores >= threshold)
+    if indices.size == 0:
+        return np.zeros_like(times, dtype=np.float32)
+    if indices.size > top_k:
+        order = np.argsort(boundary_scores[indices])[-top_k:]
+        indices = indices[order]
+    duration = max(20.0, float(mode_duration_ms or 0.0))
+    sigma = max(18.0, duration * 0.36)
+    out = np.zeros_like(times, dtype=np.float32)
+    for idx in indices:
+        center = float(times[int(idx)]) + (0.50 * duration)
+        weight = float(boundary_scores[int(idx)])
+        out = np.maximum(out, weight * _position_prior(times, expected_ms=center, sigma_ms=sigma))
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 def _interval_prior_from_start(times: np.ndarray, start_ms: float, mode_duration_ms: float) -> np.ndarray:
