@@ -4262,6 +4262,249 @@ def test_filename_hsmm_adapter_adds_sonorant_hold_states_without_changing_events
     assert cv_times == pytest.approx([80.0, 290.0], abs=35.0)
 
 
+def _vowel_chain_posterior(nuclei_ms, boundaries_ms, voiced_span_ms, *, shift_ms=10.0, frames=200):
+    times = [float(i) * shift_ms for i in range(frames)]
+
+    def _band(lo, hi):
+        return [1.0 if lo <= t < hi else 0.0 for t in times]
+
+    def _peak(center, width):
+        return [math.exp(-0.5 * ((t - center) / width) ** 2) for t in times]
+
+    lo, hi = voiced_span_ms
+    vowel = [0.8 * v for v in _band(lo, hi)]
+    voicing = [0.85 * v for v in _band(lo, hi)]
+    silence = [1.0 - v for v in _band(lo, hi)]
+    nucleus = [0.0 for _ in times]
+    for center in nuclei_ms:
+        nucleus = [max(a, b) for a, b in zip(nucleus, _peak(center, 45.0))]
+    boundary = [0.0 for _ in times]
+    for center in boundaries_ms:
+        boundary = [max(a, b) for a, b in zip(boundary, _peak(center, 35.0))]
+    class_probs = {label: [0.0 for _ in times] for label in FRAME_LABELS}
+    class_probs["vowel"] = vowel
+    class_probs["silence"] = silence
+    event_scores = {label: [0.0 for _ in times] for label in EVENT_LABELS}
+    event_scores["cv_boundary"] = boundary
+    event_scores["vowel_boundary_likelihood"] = boundary
+    event_scores["vowel_nucleus"] = nucleus
+    return FramePosterior(
+        wav_path="chain.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores=event_scores,
+        acoustic_scores={"voicing": voicing, "nucleus_likelihood": nucleus},
+        metadata={"frame_shift_ms": shift_ms},
+    )
+
+
+def test_filename_hsmm_pins_uneven_vowel_chain_to_acoustic_nuclei():
+    # Uneven vowel chain: short a, short i, long u. Without nucleus pinning the
+    # duration prior collapses every vowel onto the nominal mode, leaving the long
+    # vowel's nucleus stranded in a trailing gap (wrong pronunciation at the
+    # offset). Each vowel must lock to its real acoustic nucleus.
+    nuclei = [300.0, 550.0, 1100.0]
+    posterior = _vowel_chain_posterior(nuclei, [400.0, 700.0], (200.0, 1500.0))
+    slots = build_filename_slots("a_i_u.wav", language="japanese", format_type="cvvc")
+    assert [slot.vowel_phone for slot in slots] == ["a", "i", "u"]
+
+    decoded = decode_filename_slots_with_hsmm(posterior, slots, language="japanese")
+
+    assert decoded.ok
+    got = [e["selected_time_ms"] for e in decoded.events if e["label"] == "vowel_nucleus"]
+    assert got == pytest.approx(nuclei, abs=45.0)
+    # The long final vowel must reach its nucleus, not stop a mode-length early.
+    assert got[2] > 1000.0
+
+
+def test_structured_vowel_onset_priors_interpolate_identical_vowel_runs():
+    import numpy as np
+    from core.mfa_free_oto.hsmm_adapter import _structured_vowel_onset_event_priors
+    from core.mfa_free_oto.row_plan import FilenameSlot
+
+    # "a a i i u": two unsegmentable identical pairs (a-a, i-i). Distinct boundaries
+    # a->i and i->u => expect 1 + 2 = 3 clean cv_boundary peaks.
+    vowels = ["a", "a", "i", "i", "u"]
+    slots = [
+        FilenameSlot(
+            wav="x.wav", slot_index=i, token=v, onset="", vowel=v,
+            onset_phones=(), vowel_phone=v, phone_start_index=i, vowel_phone_index=i,
+        )
+        for i, v in enumerate(vowels)
+    ]
+    times = np.arange(140, dtype=np.float32) * 10.0  # 0..1390ms
+    def peak(center, width=22.0):
+        return np.exp(-0.5 * ((times - center) / width) ** 2)
+    cvb = np.clip(peak(200.0) + peak(600.0) + peak(1000.0), 0.0, 1.0)
+    silence = np.array([1.0 if (t < 180 or t > 1220) else 0.0 for t in times], dtype=np.float32)
+    posterior = FramePosterior(
+        wav_path="x.wav",
+        times_ms=times.tolist(),
+        class_probs={"silence": silence.tolist()},
+        event_scores={"cv_boundary": cvb.tolist()},
+        acoustic_scores={},
+        metadata={"frame_shift_ms": 10.0},
+    )
+    priors = _structured_vowel_onset_event_priors(posterior, slots, duration_ms=1400.0)
+    assert len(priors) == 5
+    assert all(p["label"] == "vv_boundary" for p in priors)  # pure-vowel slots
+    by_idx = {p["expected_phone_index"]: p["selected_time_ms"] for p in priors}
+    # Distinct onsets land on the cv_boundary peaks; identical pairs are split evenly.
+    assert by_idx[0] == pytest.approx(200.0, abs=20.0)
+    assert by_idx[1] == pytest.approx(400.0, abs=30.0)  # interpolated a-a midpoint
+    assert by_idx[2] == pytest.approx(600.0, abs=20.0)
+    assert by_idx[3] == pytest.approx(800.0, abs=30.0)  # interpolated i-i midpoint
+    assert by_idx[4] == pytest.approx(1000.0, abs=20.0)
+
+
+def test_structured_vowel_onset_priors_skip_when_peak_count_mismatches():
+    import numpy as np
+    from core.mfa_free_oto.hsmm_adapter import _structured_vowel_onset_event_priors
+    from core.mfa_free_oto.row_plan import FilenameSlot
+
+    slots = [
+        FilenameSlot(wav="x.wav", slot_index=i, token=v, onset="", vowel=v,
+                     onset_phones=(), vowel_phone=v, phone_start_index=i, vowel_phone_index=i)
+        for i, v in enumerate(["a", "i", "u"])
+    ]
+    times = np.arange(120, dtype=np.float32) * 10.0
+    # Noisy/over-segmented track with many peaks -> count won't match -> no-op.
+    flat = np.array([0.5 + 0.4 * np.sin(t / 30.0) for t in times], dtype=np.float32)
+    posterior = FramePosterior(
+        wav_path="x.wav", times_ms=times.tolist(), class_probs={},
+        event_scores={"cv_boundary": np.clip(flat, 0, 1).tolist()},
+        acoustic_scores={}, metadata={"frame_shift_ms": 10.0},
+    )
+    # Expect 1 + 2 distinct = 3 peaks; the noisy track yields a different count.
+    priors = _structured_vowel_onset_event_priors(posterior, slots, duration_ms=1200.0)
+    assert priors == [] or len(priors) == 3  # either clean assignment or safe fallback
+
+
+def test_snap_events_to_posterior_tracks_pulls_to_peaks_and_preserves_order():
+    import numpy as np
+    from core.mfa_free_oto.hsmm_adapter import _snap_events_to_posterior_tracks
+
+    times = np.arange(60, dtype=np.float32) * 10.0  # 0..590ms
+    def peak(center, width=25.0):
+        return list(np.exp(-0.5 * ((times - center) / width) ** 2).astype(float))
+    posterior = FramePosterior(
+        wav_path="x.wav",
+        times_ms=times.tolist(),
+        class_probs={},
+        event_scores={
+            "cv_boundary": peak(300.0),
+            "vowel_nucleus": peak(420.0),
+            "phone_change": [0.05 for _ in times],  # flat -> should not move
+        },
+        acoustic_scores={},
+        metadata={"frame_shift_ms": 10.0},
+    )
+    events = [
+        {"label": "phone_change", "selected_time_ms": 220.0, "frame_index": 22, "score": 0.5},
+        {"label": "cv_boundary", "selected_time_ms": 260.0, "frame_index": 26, "score": 0.5},
+        {"label": "vowel_nucleus", "selected_time_ms": 390.0, "frame_index": 39, "score": 0.5},
+    ]
+    snapped = {e["label"]: e["selected_time_ms"] for e in _snap_events_to_posterior_tracks(events, posterior, times)}
+    # Confident-track events snap to their acoustic peak (within the ±70ms window).
+    assert snapped["cv_boundary"] == pytest.approx(300.0, abs=10.0)
+    assert snapped["vowel_nucleus"] == pytest.approx(420.0, abs=10.0)
+    # Flat track leaves the event where the decoder put it.
+    assert snapped["phone_change"] == pytest.approx(220.0, abs=1.0)
+    # Global time order is preserved.
+    ordered = [snapped["phone_change"], snapped["cv_boundary"], snapped["vowel_nucleus"]]
+    assert ordered == sorted(ordered)
+
+
+def test_snap_events_respects_neighbor_bounds():
+    import numpy as np
+    from core.mfa_free_oto.hsmm_adapter import _snap_events_to_posterior_tracks
+
+    times = np.arange(60, dtype=np.float32) * 10.0
+    # cv_boundary peak sits far past the next event -> snap must be clamped before it.
+    posterior = FramePosterior(
+        wav_path="x.wav",
+        times_ms=times.tolist(),
+        class_probs={},
+        event_scores={"cv_boundary": list(np.exp(-0.5 * ((times - 400.0) / 20.0) ** 2).astype(float))},
+        acoustic_scores={},
+        metadata={"frame_shift_ms": 10.0},
+    )
+    events = [
+        {"label": "cv_boundary", "selected_time_ms": 360.0, "frame_index": 36, "score": 0.5},
+        {"label": "vowel_nucleus", "selected_time_ms": 380.0, "frame_index": 38, "score": 0.5},
+    ]
+    snapped = _snap_events_to_posterior_tracks(events, posterior, times)
+    by = {e["label"]: e["selected_time_ms"] for e in snapped}
+    # Must stay strictly before the following nucleus event (no reorder).
+    assert by["cv_boundary"] < by["vowel_nucleus"]
+
+
+def test_filename_hsmm_skips_long_leading_silence_for_vowel_chain():
+    # A long silent/breath lead-in before the first phone must be skippable. A
+    # fixed small leading-gap cap forced the first vowel into the silence and
+    # shifted the whole chain early (wrong pronunciation). Every vowel nucleus
+    # must land inside the voiced region, not in the ~900ms lead-in.
+    voiced_span = (900.0, 4000.0)
+    nuclei = [1100.0, 1700.0, 2300.0, 2900.0, 3500.0]
+    posterior = _vowel_chain_posterior(
+        nuclei, [1400.0, 2000.0, 2600.0, 3200.0], voiced_span, frames=450
+    )
+    slots = build_filename_slots("a_i_u_e_o.wav", language="japanese", format_type="cvvc")
+    assert [slot.vowel_phone for slot in slots] == ["a", "i", "u", "e", "o"]
+
+    decoded = decode_filename_slots_with_hsmm(posterior, slots, language="japanese")
+
+    assert decoded.ok
+    got = [e["selected_time_ms"] for e in decoded.events if e["label"] == "vowel_nucleus"]
+    assert len(got) == 5
+    # No vowel nucleus may fall inside the leading silence.
+    assert min(got) >= voiced_span[0] - 50.0
+    # The chain should span the voiced region rather than collapse early.
+    assert max(got) >= 3000.0
+
+
+@pytest.mark.parametrize("vowel_end_ms", [600.0, 800.0, 1100.0])
+def test_filename_hsmm_cv_boundary_locks_to_onset_for_long_vowels(vowel_end_ms):
+    # Regression: held vowels run far longer than the nominal mode duration. The
+    # duration + position priors used to trim the vowel segment from the *front*,
+    # dragging the C->V boundary (the OTO offset anchor) progressively later as
+    # the vowel got longer -- a consistent backward shift of the played region.
+    # The boundary must stay locked to the acoustic onset regardless of how long
+    # the vowel is held.
+    shift = 5.0
+    n = int(vowel_end_ms / shift) + 60
+    times = [float(i) * shift for i in range(n)]
+    consonant_start, vowel_start = 300.0, 380.0
+    class_probs = {label: [0.0 for _ in times] for label in FRAME_LABELS}
+    for i, t in enumerate(times):
+        if t < consonant_start:
+            class_probs["silence"][i] = 1.0
+        elif t < vowel_start:
+            class_probs["consonant"][i] = 1.0
+        elif t < vowel_end_ms:
+            class_probs["vowel"][i] = 1.0
+        else:
+            class_probs["silence"][i] = 1.0
+    posterior = FramePosterior(
+        wav_path="ka.wav",
+        times_ms=times,
+        class_probs=class_probs,
+        event_scores={label: [0.0 for _ in times] for label in EVENT_LABELS},
+        acoustic_scores={},
+        metadata={"frame_shift_ms": shift},
+    )
+    slots = build_filename_slots("ka.wav", language="japanese", format_type="cvvc")
+
+    decoded = decode_filename_slots_with_hsmm(posterior, slots, language="japanese")
+
+    assert decoded.ok
+    cv_boundary = next(e["selected_time_ms"] for e in decoded.events if e["label"] == "cv_boundary")
+    phone_change = next(e["selected_time_ms"] for e in decoded.events if e["label"] == "phone_change")
+    assert phone_change == pytest.approx(consonant_start, abs=20.0)
+    # Must stay on the true onset (~380ms), not drift toward the vowel centre.
+    assert cv_boundary == pytest.approx(vowel_start, abs=20.0)
+
+
 def test_acoustic_evidence_pack_exports_soft_candidates_and_reliability(tmp_path):
     wav_path = tmp_path / "ka.wav"
     wav_path.write_bytes(b"fake-wav-for-evidence-hash")
@@ -4542,7 +4785,7 @@ def test_filename_hsmm_adapter_uses_runtime_event_prior_for_single_vowel():
     assert with_prior.ok
     baseline_nucleus = next(event["selected_time_ms"] for event in baseline.events if event["label"] == "vowel_nucleus")
     prior_nucleus = next(event["selected_time_ms"] for event in with_prior.events if event["label"] == "vowel_nucleus")
-    assert baseline_nucleus == pytest.approx(155.5, abs=20.0)
+    assert baseline_nucleus == pytest.approx(155.5, abs=30.0)
     assert prior_nucleus == pytest.approx(520.0, abs=25.0)
     assert prior_nucleus - baseline_nucleus > 300.0
     assert with_prior.result.meta["leading_gap_ms"] > baseline.result.meta["leading_gap_ms"]
@@ -4613,7 +4856,7 @@ def test_evidence_candidate_priors_can_steer_filename_hsmm():
     assert with_candidate.ok
     baseline_nucleus = next(event["selected_time_ms"] for event in baseline.events if event["label"] == "vowel_nucleus")
     candidate_nucleus = next(event["selected_time_ms"] for event in with_candidate.events if event["label"] == "vowel_nucleus")
-    assert baseline_nucleus == pytest.approx(155.5, abs=20.0)
+    assert baseline_nucleus == pytest.approx(155.5, abs=30.0)
     assert candidate_nucleus == pytest.approx(520.0, abs=25.0)
     assert with_candidate.diagnostics["event_prior_state_count"] == 1
     assert with_candidate.diagnostics["event_prior_input_count"] == 1

@@ -72,7 +72,7 @@ from core.mfa_free_oto.slot_viterbi import (
     expected_cv_slots_from_phones,
     slot_assignments_to_decoded_events,
 )
-from core.mfa_free_oto.targets import rasterize_targets
+from core.mfa_free_oto.targets import infer_event_slot_indices, rasterize_targets
 from core.mfa_free_oto.types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
 from core.mfa_free_oto.workflow import (
     _hsmm_runtime_replacement_rejection_reason,
@@ -137,6 +137,52 @@ def test_targets_and_metrics_cover_frame_and_boundary_gates():
     boundary_metrics = boundary_error_metrics([100.0, 250.0], [112.0, 245.0])
     assert boundary_metrics["median_error_ms"] == pytest.approx(8.5)
     assert boundary_metrics["p90_error_ms"] == pytest.approx(11.3)
+
+
+def test_slot_event_targets_follow_viterbi_event_order():
+    events = [
+        {"label": "cv_boundary", "time_ms": 60.0},
+        {"label": "vowel_nucleus", "time_ms": 100.0},
+        {"label": "phone_change", "time_ms": 180.0},
+    ]
+    assert infer_event_slot_indices(events) == [0, 1, 2]
+    targets = rasterize_targets(
+        {"events": events, "frame_labels": []},
+        np.arange(0.0, 240.0, 10.0, dtype=np.float32),
+        slot_event_bins=4,
+    )
+    assert targets.slot_event_targets.shape == (24, 4, len(EVENT_LABELS))
+    assert targets.slot_event_mask.tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert int(np.argmax(targets.slot_event_targets[:, 0, EVENT_LABELS.index("cv_boundary")])) == 6
+    assert int(np.argmax(targets.slot_event_targets[:, 1, EVENT_LABELS.index("vowel_nucleus")])) == 10
+
+
+def test_slot_viterbi_prefers_slot_specific_event_tracks():
+    times = [float(idx * 10) for idx in range(31)]
+    event_scores = {label: [0.01 for _ in times] for label in EVENT_LABELS}
+    event_scores["cv_boundary"][22] = 0.99
+    event_scores["slot_event:0:cv_boundary"] = [0.01 for _ in times]
+    event_scores["slot_event:1:cv_boundary"] = [0.01 for _ in times]
+    event_scores["slot_event:0:cv_boundary"][7] = 0.99
+    event_scores["slot_event:1:cv_boundary"][22] = 0.99
+    posterior = FramePosterior(
+        wav_path="dummy.wav",
+        times_ms=times,
+        class_probs={label: [0.25 for _ in times] for label in FRAME_LABELS},
+        event_scores=event_scores,
+        acoustic_scores={},
+    )
+    slots = [
+        ExpectedSlot(slot_index=0, phone_index=1, phone="a", role="cv", event_label="cv_boundary"),
+        ExpectedSlot(slot_index=1, phone_index=3, phone="i", role="cv", event_label="cv_boundary"),
+    ]
+    result = assign_slots_viterbi(
+        posterior,
+        expected_slots=slots,
+        expected_time_weight=0.0,
+        min_event_score=0.01,
+    )
+    assert [item.selected_time_ms for item in result.assignments] == pytest.approx([70.0, 220.0])
 
 
 def test_decoder_uses_monotonic_event_order():
@@ -6170,6 +6216,40 @@ def test_hold_release_suffix_aliases_are_not_assigned_to_hsmm_phone_slots():
     assert expected_slots_for_template_rows(rows, ["a", "a"]) == []
 
 
+def test_japanese_cvvc_terminal_release_h_uses_posterior_energy_end():
+    frame_count = 550
+    times = np.arange(frame_count, dtype=np.float32) * 10.0
+    rms = np.full(frame_count, 0.001, dtype=np.float32)
+    rms[90:431] = 0.10
+    posterior = FramePosterior(
+        wav_path="_aahh.wav",
+        times_ms=times,
+        class_probs={},
+        event_scores={},
+        acoustic_scores={"rms": rms},
+    )
+    row = AdaptedOtoRow(
+        wav="_aahh.wav",
+        alias="a H_D4",
+        timing=OtoTiming(1155.0, 210.0, -236.0, 170.0, 135.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1325.0, score=0.8),
+        mode="template-bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=5500.0,
+        posterior=posterior,
+    )
+
+    assert repaired.timing.offset + repaired.timing.preutterance == pytest.approx(4300.0)
+    assert repaired.anchor is not None
+    assert repaired.anchor.anchor_abs_ms == pytest.approx(4300.0)
+    assert "cvvc_terminal_release_h_energy_repair" in repaired.applied_rules
+
+
 def test_cvvc_vv_alias_targeting_vowel_after_onset_uses_cv_boundary_slot():
     rows = [
         parse_template_oto_line("wewo.wav=e o,0,0,0,0,0"),
@@ -6468,7 +6548,7 @@ def test_cvvc_alias_targets_allow_vc_then_kana_cv_backtrack_for_palatal_series()
     ]
     phones = ["j", "a", "j", "i", "j", "u", "j", "e", "j", "o", "j", "a", "n", "j", "i"]
 
-    assert _assign_alias_target_indices(rows, phones) == [2, 2, 4, 6, 8, 10, 13, 3, 5, 7, 9, 11]
+    assert _assign_alias_target_indices(rows, phones) == [0, 2, 4, 6, 8, 10, 13, 3, 5, 7, 9, 11]
 
 
 def test_cvvc_following_cv_block_targets_pre_tail_repeat_before_terminal_n():
@@ -6863,7 +6943,7 @@ def test_japanese_cvvc_cv_next_transition_cutoff_caps_severe_pitch_suffixed_cv_t
     )
 
 
-def test_cvvc_initial_cv_head_shares_first_transition_when_first_cv_row_is_omitted():
+def test_cvvc_initial_cv_head_keeps_own_onset_when_first_cv_row_is_omitted():
     rows = [
         OtoTemplateRow("sa.wav", "- s", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
         OtoTemplateRow("sa.wav", "a s", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
@@ -6871,7 +6951,7 @@ def test_cvvc_initial_cv_head_shares_first_transition_when_first_cv_row_is_omitt
         OtoTemplateRow("sa.wav", "\u3059\u3043", OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0)),
     ]
 
-    assert _assign_alias_target_indices(rows, ["s", "a", "s", "i", "s", "u"]) == [2, 2, 4, 3]
+    assert _assign_alias_target_indices(rows, ["s", "a", "s", "i", "s", "u"]) == [0, 2, 4, 3]
 
 
 def test_cvvc_alias_targets_expand_sh_ch_ts_for_filename_phone_sequences():
@@ -7847,6 +7927,54 @@ def test_vcv_bootstrap_clamps_impossible_previous_vowel_end():
     assert adapted.timing.preutterance > 0.0
     assert adapted.timing.consonant > adapted.timing.preutterance
     assert any(warning.startswith("vcv_previous_vowel_end_clamped:") for warning in adapted.warnings)
+
+
+def test_cv_bootstrap_offset_includes_leading_consonant_onset():
+    # Regression: when the consonant runs longer than the fixed CV pre target the
+    # offset used to land after the consonant onset and clip its attack. With a
+    # known consonant onset the offset must reach back to include it.
+    anchor = OtoAnchor(
+        anchor_abs_ms=395.0,        # vowel onset (preutterance target)
+        score=0.8,
+        role="cv_boundary",
+        consonant_onset_abs_ms=300.0,  # 95 ms consonant -> longer than the pre target
+        vowel_end_abs_ms=900.0,
+        warnings=("slot_decoded_event",),
+    )
+    adapted = bootstrap_row(
+        "ka.wav",
+        "ka",
+        anchor,
+        file_duration_ms=1200.0,
+        config=OtoAdapterConfig(language="japanese", format_type="cv", alias_type="cv", pre_target_ms=60.0),
+    )
+
+    # Offset (minus a small lead) must sit at or before the consonant onset.
+    assert adapted.timing.offset <= 300.0
+    assert adapted.timing.offset == pytest.approx(288.0, abs=1.0)
+    assert adapted.timing.preutterance == pytest.approx(395.0 - adapted.timing.offset, abs=0.5)
+    assert any(warning.startswith("consonant_onset_included:") for warning in adapted.warnings)
+
+
+def test_cv_bootstrap_offset_unchanged_when_consonant_already_inside():
+    # A short consonant already covered by the pre target must not move the offset.
+    anchor = OtoAnchor(
+        anchor_abs_ms=395.0,
+        score=0.8,
+        role="cv_boundary",
+        consonant_onset_abs_ms=360.0,  # 35 ms consonant, well inside the window
+        vowel_end_abs_ms=900.0,
+        warnings=("slot_decoded_event",),
+    )
+    adapted = bootstrap_row(
+        "ka.wav",
+        "ka",
+        anchor,
+        file_duration_ms=1200.0,
+        config=OtoAdapterConfig(language="japanese", format_type="cvvc", alias_type="cv"),
+    )
+
+    assert not any(warning.startswith("consonant_onset_included:") for warning in adapted.warnings)
 
 
 def test_japanese_vcv_bootstrap_uses_role_specific_transition_profile():
@@ -10419,6 +10547,55 @@ def test_japanese_cvvc_headed_regular_vc_backfills_from_next_cv():
     assert repaired_vc.timing.preutterance == pytest.approx(135.0)
     assert repaired_vc.timing.overlap == pytest.approx(50.0)
     assert "cvvc_headed_regular_vc_from_next_cv_repair" in repaired_vc.applied_rules
+
+
+def test_japanese_cvvc_headed_regular_vc_respects_previous_cv_safe_window():
+    head = AdaptedOtoRow(
+        wav="_ta-te-tu-to.wav",
+        alias="- ta",
+        timing=OtoTiming(offset=420.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    previous_cv = AdaptedOtoRow(
+        wav="_ta-te-tu-to.wav",
+        alias="te",
+        timing=OtoTiming(offset=2270.0, consonant=190.0, cutoff=-425.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2440.0, score=0.5, role="cv", source_event_label="cv_boundary"),
+        mode="bootstrap",
+    )
+    late_vc = AdaptedOtoRow(
+        wav="_ta-te-tu-to.wav",
+        alias="e t",
+        timing=OtoTiming(offset=2865.0, consonant=120.0, cutoff=-146.0, preutterance=80.0, overlap=45.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2910.0, score=0.5, role="vc", source_event_label="phone_change"),
+        mode="bootstrap",
+    )
+    next_cv = AdaptedOtoRow(
+        wav="_ta-te-tu-to.wav",
+        alias="to",
+        timing=OtoTiming(offset=2440.0, consonant=190.0, cutoff=-425.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=2560.0, score=0.5, role="cv", source_event_label="vowel_nucleus"),
+        mode="bootstrap",
+    )
+
+    _head, _previous_cv, repaired_vc, _next_cv = repair_cvvc_row_sequence(
+        [head, previous_cv, late_vc, next_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3400.0,
+    )
+
+    assert repaired_vc.timing.offset == pytest.approx(2410.0)
+    assert repaired_vc.timing.offset - previous_cv.timing.offset >= 140.0
+    assert "cvvc_headed_regular_vc_from_next_cv_repair" in repaired_vc.applied_rules
+    assert any(
+        "cvvc_headed_regular_vc_prev_safe_window:2280.0->2410.0" in warning
+        for warning in repaired_vc.warnings
+    )
 
 
 def test_japanese_cvvc_headed_regular_vc_keeps_safe_pre_before_next_cv():
@@ -14589,6 +14766,24 @@ def test_model_forward_shape_when_torch_available():
     assert tuple(out["event_logits"].shape) == (2, 12, len(EVENT_LABELS))
 
 
+def test_model_forward_includes_optional_slot_event_head():
+    torch = pytest.importorskip("torch")
+    from core.mfa_free_oto.model import MfaFreeFrameModelConfig, build_frame_model
+
+    model = build_frame_model(
+        MfaFreeFrameModelConfig(
+            input_dim=8,
+            hidden_dim=16,
+            layers=1,
+            slot_event_bins=6,
+            slot_event_position_features=True,
+            slot_event_query_conditioned=True,
+        )
+    )
+    out = model(torch.zeros((2, 12, 8), dtype=torch.float32), slot_count=4)
+    assert tuple(out["slot_event_logits"].shape) == (2, 12, 6, len(EVENT_LABELS))
+
+
 def test_htk_lab_manifest_uses_lab_as_manual_gold(tmp_path):
     lab_root = tmp_path / "lab"
     lab_root.mkdir()
@@ -16184,6 +16379,67 @@ def test_source_oto_written_order_is_not_used_for_cvvc_template_order():
     assert [row.alias for row in ordered] == ["- ま", "a m", "み", "i m", "ま"]
 
 
+def test_japanese_cvvc_template_order_matches_l_aliases_to_filename_r_slots():
+    wav = "_l\u3089l\u308al\u308bl\u308cl\u308dl\u3089\u3093l\u3089.wav"
+    aliases = [
+        "- l\u3089",
+        "l\u3089",
+        "l\u308a",
+        "l\u308b",
+        "l\u308c",
+        "l\u308d",
+        "a l",
+        "e l",
+        "i l",
+        "n l",
+        "o l",
+        "u l",
+    ]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0))
+        for alias in aliases
+    ]
+
+    ordered = _template_group_in_filename_order(
+        wav,
+        rows,
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert [row.alias for row in ordered] == [
+        "- l\u3089",
+        "a l",
+        "l\u308a",
+        "i l",
+        "l\u308b",
+        "u l",
+        "l\u308c",
+        "e l",
+        "l\u308d",
+        "o l",
+        "l\u3089",
+        "n l",
+    ]
+    phones = filename_phone_sequence_from_slots(
+        build_filename_slots(wav, language="japanese", format_type="cvvc")
+    )
+    assert _assign_alias_target_indices(ordered, phones, language="japanese") == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        13,
+    ]
+
+
 def test_cvvc_template_plain_cv_skips_initial_duplicate_slot():
     rows = [
         parse_template_oto_line("pa-pi-pu-pe-po-pa-N-pa.wav=pa,0,0,0,0,0"),
@@ -16256,6 +16512,24 @@ def test_source_oto_filename_order_matches_yoon_vc_surface_aliases():
     )
 
     assert [row.alias for row in ordered] == ["- きゃ", "a ky", "i ky", "きゅ"]
+
+
+def test_source_oto_filename_order_matches_split_cv_head_rows():
+    rows = [
+        parse_template_oto_line("_うぃ_うぅ_うぇ_うぉ.wav=- うぇ,0,0,0,0,0"),
+        parse_template_oto_line("_うぃ_うぅ_うぇ_うぉ.wav=- うぃ,0,0,0,0,0"),
+        parse_template_oto_line("_うぃ_うぅ_うぇ_うぉ.wav=- うぉ,0,0,0,0,0"),
+        parse_template_oto_line("_うぃ_うぅ_うぇ_うぉ.wav=- うぅ,0,0,0,0,0"),
+    ]
+
+    ordered = _template_group_in_filename_order(
+        "_うぃ_うぅ_うぇ_うぉ.wav",
+        rows,
+        language="japanese",
+        format_type="cvvc",
+    )
+
+    assert [row.alias for row in ordered] == ["- うぃ", "- うぅ", "- うぇ", "- うぉ"]
 
 
 def test_hsmm_workflow_with_source_oto_preserves_base_alias_rows(tmp_path, monkeypatch):
@@ -16364,6 +16638,55 @@ def test_hsmm_workflow_with_source_oto_preserves_base_alias_rows(tmp_path, monke
     assert any(record["selected_event_source"] == "filename_hsmm" for record in report.timeline_debug)
     assert "base_oto_alias_list_used" in report.warnings
     assert "base_oto_alias_order_ignored" in report.warnings
+
+
+def test_hsmm_workflow_matches_apostrophe_template_to_underscore_wav(tmp_path, monkeypatch):
+    # Base OTO references reclist apostrophes (ka'ki.wav) but the recordings were
+    # saved with underscores (ka_ki.wav). The rows must NOT be dropped; the output
+    # must reference the real on-disk filename.
+    wav_dir = tmp_path / "wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    _write_tone_wav(wav_dir / "ka_ki.wav", duration_s=0.40)
+    source_oto = tmp_path / "source.ini"
+    source_oto.write_text("ka'ki.wav=ka,999,888,-777,666,555\n", encoding="utf-8")
+    out_oto = tmp_path / "out.ini"
+
+    posterior = FramePosterior(
+        wav_path="stub.wav",
+        times_ms=[0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0],
+        class_probs={
+            "silence": [0.3, 0.2, 0.1, 0.05, 0.1, 0.2, 0.3],
+            "consonant": [0.1, 0.2, 0.5, 0.2, 0.1, 0.1, 0.1],
+            "vowel": [0.1, 0.3, 0.7, 0.9, 0.7, 0.3, 0.1],
+            "other": [0.1] * 7,
+        },
+        event_scores={label: [0.0] * 7 for label in EVENT_LABELS},
+        acoustic_scores={
+            "voicing": [0.1, 0.2, 0.7, 0.9, 0.7, 0.2, 0.1],
+            "nucleus_likelihood": [0.1, 0.2, 0.6, 0.95, 0.6, 0.2, 0.1],
+        },
+    )
+    monkeypatch.setattr(
+        "core.mfa_free_oto.workflow.predict_wav",
+        lambda *a, **k: SimpleNamespace(posterior=posterior, decoded_events=(), slot_result=None),
+    )
+
+    report = generate_no_mfa_oto_with_model_context(
+        wav_dir=str(wav_dir),
+        out_path=str(out_oto),
+        source_oto_path=str(source_oto),
+        checkpoint_path="",
+        language="korean",
+        format_type="CVC",
+        use_hsmm_decoder=True,
+    )
+
+    assert report.processed >= 1
+    body = out_oto.read_text(encoding="utf-8")
+    # Row is produced and references the actual underscore filename, not dropped.
+    assert "ka_ki.wav=" in body
+    assert "ka'ki.wav=" not in body
+    assert any(str(w).startswith("wav_name_normalized:") for w in report.warnings)
 
 
 def test_mfa_free_preview_template_preserve_applies_cvvc_profile_repair(tmp_path, monkeypatch):

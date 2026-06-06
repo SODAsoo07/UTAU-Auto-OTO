@@ -268,11 +268,44 @@ class LayoutMixin:
         )
         self.suffix_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.suffix_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        suffix_apply_btn = ctk.CTkButton(
+            row_suffix,
+            text=t("적용"),
+            width=90,
+            command=self._apply_suffix_to_generated_oto,
+        )
+        _style_primary_button(suffix_apply_btn)
+        suffix_apply_btn.pack(side="left", padx=(0, 8))
         ctk.CTkLabel(
             row_suffix,
-            text=t("(출력 alias 접미사)"),
+            text=t("(생성된 oto에 접미사 적용)"),
             text_color=PALETTE.neutral_text,
         ).pack(side="left")
+
+        row_boundary_model = build_form_row(form_body)
+        build_left_label(row_boundary_model, t("경계 모델:")).pack(side="left")
+        self.use_boundary_model_checkbox = ctk.CTkCheckBox(
+            row_boundary_model,
+            text=t("학습된 경계 모델 사용"),
+            variable=self.use_boundary_model_var,
+            command=self._on_use_boundary_model_toggle,
+        )
+        self.use_boundary_model_checkbox.pack(side="left", padx=(6, 8))
+        self.boundary_model_entry = ctk.CTkEntry(
+            row_boundary_model,
+            placeholder_text=t("체크포인트(.pt) 경로 — 비우면 규칙 기반 사용"),
+            textvariable=self.boundary_model_path_var,
+        )
+        self.boundary_model_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
+        self.boundary_model_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        boundary_browse_btn = ctk.CTkButton(
+            row_boundary_model,
+            text=t("찾아보기"),
+            width=90,
+            command=lambda: self._browse_file_by_var(self.boundary_model_path_var, [("PyTorch 체크포인트", "*.pt")]),
+        )
+        _style_primary_button(boundary_browse_btn)
+        boundary_browse_btn.pack(side="left")
 
         row_format = build_form_row(form_body)
         build_left_label(row_format, t("형식 지정:")).pack(side="left")
@@ -2128,6 +2161,18 @@ class LayoutMixin:
             self.ja_vc_neighbor_enable_var.set(enabled)
         if hasattr(self, "_sync_vc_correction_toggle"):
             self._sync_vc_correction_toggle()
+        self._save_config()
+
+    def _on_use_boundary_model_toggle(self):
+        enabled = bool(self.use_boundary_model_var.get())
+        if enabled:
+            path = str(self.boundary_model_path_var.get() or "").strip()
+            if not path or not os.path.isfile(path):
+                self._append_log("⚠ 학습된 경계 모델 경로가 없거나 잘못되었습니다. 규칙 기반으로 동작합니다.")
+            else:
+                self._append_log(f"ℹ 학습된 경계 모델 사용: {os.path.basename(path)}")
+        else:
+            self._append_log("ℹ 경계 모델 끔 — 규칙 기반(world_v1) 인코더 사용")
         self._save_config()
 
     def _on_no_base_oto_toggle(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import math
+import re
 import wave
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -27,6 +28,9 @@ from .oto_adapter import (
     _alias_phone_sequence,
     _alias_type_for_row,
     _is_nonphonetic_special_alias,
+    _is_japanese_language_name,
+    _phone_matches,
+    _phone_sequence_variants_match,
     load_oto_template_rows_alias_only,
     repair_cvvc_row_sequence,
     timeline_expected_slots_for_template_rows,
@@ -198,20 +202,42 @@ def generate_no_mfa_oto_with_model_context(
         for row in template_rows:
             templates_by_wav.setdefault(str(row.wav).lower(), []).append(row)
 
+        # Index actual wavs by a separator-normalised name so a base OTO that
+        # references reclist apostrophes (ga'gi'gu.wav) still matches recordings
+        # saved with underscores (ga_gi_gu.wav). Without this the mismatched wavs
+        # are dropped from the output entirely.
+        actual_wavs_by_norm: dict[str, str] = {}
+        try:
+            for _name in os.listdir(wav_root):
+                if _name.lower().endswith(".wav"):
+                    actual_wavs_by_norm.setdefault(_normalize_wav_name(_name), _name)
+        except Exception:
+            actual_wavs_by_norm = {}
+
         source_ordered_lines: list[tuple[int, int, str]] = []
         source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
         total_wav_groups = len(templates_by_wav)
-        for wav_index, wav_key in enumerate(sorted(templates_by_wav), start=1):
+        for wav_index, raw_wav_key in enumerate(sorted(templates_by_wav), start=1):
+            wav_key = raw_wav_key
             template_group = _template_group_in_filename_order(
-                wav_key,
-                templates_by_wav[wav_key],
+                raw_wav_key,
+                templates_by_wav[raw_wav_key],
                 language=language,
                 format_type=format_type,
             )
             wav_path = os.path.join(wav_root, wav_key)
             if not os.path.isfile(wav_path):
-                warnings.append(f"missing_wav:{wav_key}")
-                continue
+                resolved = actual_wavs_by_norm.get(_normalize_wav_name(raw_wav_key))
+                if resolved and os.path.isfile(os.path.join(wav_root, resolved)):
+                    # Re-point the group at the real file so it is processed and the
+                    # output references the on-disk filename UTAU can actually find.
+                    wav_key = resolved
+                    wav_path = os.path.join(wav_root, resolved)
+                    template_group = [replace(r, wav=resolved) for r in template_group]
+                    warnings.append(f"wav_name_normalized:{raw_wav_key}->{resolved}")
+                else:
+                    warnings.append(f"missing_wav:{raw_wav_key}")
+                    continue
             if callback:
                 callback(f"[No-MFA/MFA-Free] wav {wav_index}/{total_wav_groups}: {wav_key}")
             row_plan_slots = build_filename_slots(wav_key, language=language, format_type=format_type)
@@ -325,6 +351,7 @@ def generate_no_mfa_oto_with_model_context(
                 adapted_group,
                 adapter_config,
                 file_duration_ms=file_duration_ms,
+                posterior=prediction.posterior,
             )
             for template_row, adapted in zip(template_group, adapted_group):
                 timeline_rows.append(
@@ -529,6 +556,7 @@ def generate_no_mfa_oto_with_model_context(
                 adapted_rows,
                 adapter_config,
                 file_duration_ms=file_duration_ms,
+                posterior=prediction.posterior,
             )
             for adapted in adapted_rows:
                 rows_total += 1
@@ -700,12 +728,35 @@ def _template_group_in_filename_order(
     remaining = list(rows)
     ordered: list[OtoTemplateRow] = []
     for record in records:
-        match_index = _matching_template_row_index(remaining, record, records)
+        match_index = _matching_template_row_index(
+            remaining,
+            record,
+            records,
+            language=language,
+        )
         if match_index is None:
             continue
         ordered.append(remaining.pop(match_index))
-    if remaining:
-        ordered.extend(sorted(remaining, key=_template_row_semantic_sort_key))
+    # CV_head aliases like "- w", "- ka" (consonant-led head) represent the file's
+    # first phonetic onset. If one ended up in remaining (no row_plan match) it
+    # would be appended at the end, causing anchor assignment to place it near the
+    # file end — a catastrophic 3-4 second error. Promote unmatched consonant-led
+    # cv_head to position 0. Vowel-only heads ("- あ") are NOT promoted because in
+    # VV-chain reclists they don't necessarily correspond to the file start.
+    unmatched_heads: list[OtoTemplateRow] = []
+    unmatched_rest: list[OtoTemplateRow] = []
+    for row in remaining:
+        if (
+            _alias_type_for_row(row.alias, "auto") == "cv_head"
+            and _cv_head_has_consonant_onset(row.alias)
+        ):
+            unmatched_heads.append(row)
+        else:
+            unmatched_rest.append(row)
+    if unmatched_rest:
+        ordered.extend(sorted(unmatched_rest, key=_template_row_semantic_sort_key))
+    if unmatched_heads:
+        ordered = unmatched_heads + ordered
     return ordered
 
 
@@ -713,10 +764,17 @@ def _matching_template_row_index(
     rows: Sequence[OtoTemplateRow],
     record: RowPlanRecord,
     records: Sequence[RowPlanRecord] = (),
+    *,
+    language: str = "",
 ) -> int | None:
     candidates: list[tuple[int, tuple[object, ...], int]] = []
     for idx, row in enumerate(rows):
-        score = _template_row_record_match_score(row, record, records)
+        score = _template_row_record_match_score(
+            row,
+            record,
+            records,
+            language=language,
+        )
         if score <= 0:
             continue
         candidates.append((score, _template_row_semantic_sort_key(row), idx))
@@ -729,6 +787,8 @@ def _template_row_record_match_score(
     row: OtoTemplateRow,
     record: RowPlanRecord,
     records: Sequence[RowPlanRecord] = (),
+    *,
+    language: str = "",
 ) -> int:
     alias = str(getattr(row, "alias", "") or "").strip()
     record_alias = str(getattr(record, "alias", "") or "").strip()
@@ -737,19 +797,36 @@ def _template_row_record_match_score(
     if _is_nonphonetic_special_alias(alias):
         return 0
 
-    source_phones = tuple(_alias_phone_sequence(alias))
+    source_phones = tuple(_template_alias_phone_sequence(alias, language=language))
     record_phones = tuple(_alias_phone_sequence(record_alias))
     record_role = str(getattr(record, "role_family", "") or "").strip().lower()
     first_slot = int(getattr(record, "left_slot_index", -1)) == 0 and int(getattr(record, "right_slot_index", -1)) == 0
     source_role = _alias_type_for_row(alias, "auto")
-    phones_compatible = source_phones == record_phones
+    phones_compatible = (
+        source_phones == record_phones
+        or _phone_sequence_variants_match(source_phones, record_phones)
+        or (
+            _is_japanese_language_name(language)
+            and _japanese_liquid_phone_sequences_match(source_phones, record_phones)
+        )
+    )
     yoon_vc_compatible = _yoon_vc_template_row_matches_record(source_phones, record_phones, record_role)
     cv_head_initial_compatible = (
         first_slot
         and source_role == "cv_head"
         and _cv_head_template_row_matches_initial_record(source_phones, record_phones, record_role)
     )
-    if not source_phones or not (phones_compatible or yoon_vc_compatible or cv_head_initial_compatible):
+    cv_head_exact_compatible = (
+        source_role == "cv_head"
+        and record_role in {"cv", "v"}
+        and phones_compatible
+    )
+    if not source_phones or not (
+        phones_compatible
+        or yoon_vc_compatible
+        or cv_head_initial_compatible
+        or cv_head_exact_compatible
+    ):
         return 0
 
     if (
@@ -761,12 +838,48 @@ def _template_row_record_match_score(
         return 0
     if first_slot and source_role == "cv_head" and record_role in {"cv", "v"}:
         return 1100
+    if cv_head_exact_compatible:
+        return 975 if alias == record_alias else 925
     if source_role == record_role:
         if yoon_vc_compatible:
             return 880
         return 1000 if alias == record_alias else 900
 
     return 0
+
+
+def _template_alias_phone_sequence(alias: str, *, language: str) -> tuple[str, ...]:
+    phones = tuple(_alias_phone_sequence(alias))
+    if phones or not _is_japanese_language_name(language):
+        return phones
+    liquid_normalized = re.sub(
+        r"l(?=[\u3040-\u30ff])",
+        "",
+        str(alias or ""),
+        flags=re.IGNORECASE,
+    )
+    if liquid_normalized == str(alias or ""):
+        return phones
+    return tuple(_alias_phone_sequence(liquid_normalized))
+
+
+def _japanese_liquid_phone_sequences_match(
+    source_phones: Sequence[str],
+    record_phones: Sequence[str],
+) -> bool:
+    if len(source_phones) != len(record_phones) or not source_phones:
+        return False
+    saw_liquid_variant = False
+    for source_phone, record_phone in zip(source_phones, record_phones):
+        source = str(source_phone or "").strip().lower()
+        record = str(record_phone or "").strip().lower()
+        if source == record or _phone_matches(source, record):
+            continue
+        if {source, record} == {"l", "r"}:
+            saw_liquid_variant = True
+            continue
+        return False
+    return saw_liquid_variant
 
 
 def _initial_repeated_plain_cv_record(record: RowPlanRecord, records: Sequence[RowPlanRecord]) -> bool:
@@ -1513,6 +1626,37 @@ def _expanded_multichar_phones(phones: Iterable[str]) -> tuple[str, ...]:
         else:
             expanded.append(text)
     return tuple(expanded)
+
+
+def _cv_head_has_consonant_onset(alias: str) -> bool:
+    """Return True if a cv_head alias starts with a consonant, e.g. '- w', '- ka'."""
+    stripped = str(alias or "").strip()
+    if stripped.startswith("-"):
+        stripped = stripped[1:].strip()
+    # Remove common suffix tokens
+    for suffix in ("_D4", "_C4", "_A3", "_F4", "_S", "_P"):
+        if stripped.endswith(suffix):
+            stripped = stripped[: -len(suffix)].strip()
+    if not stripped:
+        return False
+    first = stripped[0].lower()
+    vowels = set("aiueoあいうえおアイウエオ")
+    return first not in vowels
+
+
+def _normalize_wav_name(name: str) -> str:
+    """Canonicalise a wav filename for matching across separator variants.
+
+    UTAU/Windows commonly rewrite reclist apostrophes into underscores, so a base
+    OTO that references ``ga'gi'gu.wav`` must still match a recorded
+    ``ga_gi_gu.wav``. Unify apostrophe / hyphen / space separators to '_'.
+    """
+    text = os.path.basename(str(name or "")).strip().lower()
+    for ch in ("'", "’", "ʼ", "`", "\"", "-", " "):
+        text = text.replace(ch, "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text
 
 
 def _normalize_out_path(path: str) -> str:

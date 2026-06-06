@@ -360,6 +360,17 @@ def _slot_candidates(
     event_values = np.asarray(posterior.event_scores.get(slot.event_label, []), dtype=np.float32)
     if event_values.shape[0] != times.shape[0]:
         return []
+    slot_event_values = np.asarray(
+        posterior.event_scores.get(f"slot_event:{slot.slot_index}:{slot.event_label}", []),
+        dtype=np.float32,
+    )
+    if slot_event_values.shape[0] == times.shape[0]:
+        event_values = np.clip(
+            0.30 * np.clip(event_values, 0.0, 1.0)
+            + 0.70 * np.clip(slot_event_values, 0.0, 1.0),
+            0.0,
+            1.0,
+        )
     class_prior = _slot_class_prior(posterior, slot)
     acoustic_prior = _slot_acoustic_prior(posterior, slot)
     sonorant_phone_change = _is_sonorant_phone_change_slot(slot)

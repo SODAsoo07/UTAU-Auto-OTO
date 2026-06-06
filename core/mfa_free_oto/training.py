@@ -38,6 +38,64 @@ class TrainPocConfig:
     focus_cv_radius_frames: int = 3
     focus_nucleus_radius_frames: int = 4
     focus_weight_max: float = 2.0
+    slot_event_bins: int = 0
+    slot_event_loss_weight: float = 0.0
+    slot_event_positive_weight: float = 8.0
+    slot_event_position_features: bool = True
+    slot_event_query_conditioned: bool = True
+    slot_event_detach_backbone: bool = False
+    # Structural priors over the per-slot boundary positions (soft-argmax over
+    # frames). Slot-wise BCE detects each boundary independently; these teach the
+    # ORDER and SPACING the BCE never sees. Off by default (weight 0).
+    slot_order_loss_weight: float = 0.0          # monotonic: pos[k] + margin <= pos[k+1]
+    slot_spacing_loss_weight: float = 0.0        # min/max gap between adjacent slots
+    slot_order_margin_frames: float = 2.0
+    slot_min_gap_frames: float = 3.0
+    slot_max_gap_frames: float = 80.0
+
+
+def _slot_order_spacing_loss(
+    slot_logits,
+    *,
+    active_slot_count: int,
+    event_labels: Sequence[str],
+    order_weight: float,
+    spacing_weight: float,
+    margin_frames: float,
+    min_gap_frames: float,
+    max_gap_frames: float,
+):
+    """Structural prior over per-slot boundary positions.
+
+    ``slot_logits`` is ``[batch, frames, slots, events]``. For each ordering
+    channel (vowel onset, then nucleus) take the soft-argmax frame position per
+    active slot and penalise (a) non-monotonic / too-tight ordering and (b)
+    adjacent gaps outside [min, max]. This is what teaches the model the order and
+    spacing that the independent per-slot BCE never sees.
+    """
+    import torch
+
+    _, frames, slots, _ = slot_logits.shape
+    n = max(1, min(int(active_slot_count), int(slots)))
+    if n < 2:
+        return slot_logits.new_zeros(())
+    frame_idx = torch.arange(frames, device=slot_logits.device, dtype=slot_logits.dtype)
+    channels = [event_labels.index(name) for name in ("cv_boundary", "vowel_nucleus") if name in event_labels]
+    if not channels:
+        return slot_logits.new_zeros(())
+    total = slot_logits.new_zeros(())
+    for chan in channels:
+        probs = torch.softmax(slot_logits[0, :, :n, chan], dim=0)  # [frames, n]
+        pos = (probs * frame_idx[:, None]).sum(dim=0)              # [n]
+        diffs = pos[1:] - pos[:-1]                                  # [n-1]
+        if order_weight > 0.0:
+            total = total + order_weight * torch.relu(margin_frames - diffs).mean()
+        if spacing_weight > 0.0:
+            total = total + spacing_weight * (
+                torch.relu(min_gap_frames - diffs).mean()
+                + torch.relu(diffs - max_gap_frames).mean()
+            )
+    return total / float(len(channels))
 
 
 def train_poc(config: TrainPocConfig) -> dict:
@@ -66,6 +124,14 @@ def train_poc(config: TrainPocConfig) -> dict:
         dropout=config.dropout,
         frame_labels=FRAME_LABELS,
         event_labels=EVENT_LABELS,
+        slot_event_bins=max(0, int(config.slot_event_bins)),
+        slot_event_position_features=bool(
+            config.slot_event_position_features and int(config.slot_event_bins) > 0
+        ),
+        slot_event_query_conditioned=bool(
+            config.slot_event_query_conditioned and int(config.slot_event_bins) > 0
+        ),
+        slot_event_detach_backbone=bool(config.slot_event_detach_backbone),
     )
     model = build_frame_model(model_cfg)
     device = config.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,11 +147,17 @@ def train_poc(config: TrainPocConfig) -> dict:
         losses: list[float] = []
         class_losses: list[float] = []
         event_losses: list[float] = []
+        slot_event_losses: list[float] = []
+        slot_struct_losses: list[float] = []
         model.train()
         for row_idx in order:
             row = rows[row_idx]
             batch = batches[row_idx]
-            targets = rasterize_targets(row, batch.times_ms)
+            targets = rasterize_targets(
+                row,
+                batch.times_ms,
+                slot_event_bins=config.slot_event_bins,
+            )
             features = batch.features
             if config.specaugment:
                 features = _apply_feature_masking(
@@ -107,7 +179,8 @@ def train_poc(config: TrainPocConfig) -> dict:
                     max_weight=config.focus_weight_max,
                 )[None, :]
             ).float().to(device)
-            output = model(x)
+            active_slot_count = int(np.count_nonzero(targets.slot_event_mask))
+            output = model(x, slot_count=active_slot_count)
             frame_logits = output["frame_logits"]
             event_logits = output["event_logits"]
             flat_loss = F.cross_entropy(
@@ -121,7 +194,52 @@ def train_poc(config: TrainPocConfig) -> dict:
             weighted_valid = valid * torch.clamp(frame_weights, min=1.0)
             class_loss = (flat_loss * weighted_valid).sum() / torch.clamp(weighted_valid.sum(), min=1.0)
             event_loss = F.binary_cross_entropy_with_logits(event_logits, event_targets)
-            loss = class_loss + float(config.event_loss_weight) * event_loss
+            slot_event_loss = torch.zeros((), dtype=event_loss.dtype, device=device)
+            if (
+                int(config.slot_event_bins) > 0
+                and float(config.slot_event_loss_weight) > 0.0
+                and "slot_event_logits" in output
+                and bool(np.any(targets.slot_event_mask > 0.0))
+            ):
+                slot_targets = torch.from_numpy(targets.slot_event_targets[None, :, :, :]).float().to(device)
+                slot_mask = torch.from_numpy(targets.slot_event_mask[None, None, :, None]).float().to(device)
+                slot_raw = F.binary_cross_entropy_with_logits(
+                    output["slot_event_logits"],
+                    slot_targets,
+                    reduction="none",
+                )
+                slot_weights = 1.0 + (
+                    torch.clamp(slot_targets, min=0.0, max=1.0)
+                    * max(0.0, float(config.slot_event_positive_weight) - 1.0)
+                )
+                weighted_slot_mask = slot_mask * slot_weights
+                slot_event_loss = (slot_raw * weighted_slot_mask).sum() / torch.clamp(
+                    weighted_slot_mask.sum(),
+                    min=1.0,
+                )
+            slot_struct_loss = torch.zeros((), dtype=event_loss.dtype, device=device)
+            if (
+                int(config.slot_event_bins) > 0
+                and "slot_event_logits" in output
+                and active_slot_count >= 2
+                and (float(config.slot_order_loss_weight) > 0.0 or float(config.slot_spacing_loss_weight) > 0.0)
+            ):
+                slot_struct_loss = _slot_order_spacing_loss(
+                    output["slot_event_logits"],
+                    active_slot_count=active_slot_count,
+                    event_labels=EVENT_LABELS,
+                    order_weight=float(config.slot_order_loss_weight),
+                    spacing_weight=float(config.slot_spacing_loss_weight),
+                    margin_frames=float(config.slot_order_margin_frames),
+                    min_gap_frames=float(config.slot_min_gap_frames),
+                    max_gap_frames=float(config.slot_max_gap_frames),
+                )
+            loss = (
+                class_loss
+                + float(config.event_loss_weight) * event_loss
+                + float(config.slot_event_loss_weight) * slot_event_loss
+                + slot_struct_loss
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -129,12 +247,16 @@ def train_poc(config: TrainPocConfig) -> dict:
             losses.append(float(loss.detach().cpu()))
             class_losses.append(float(class_loss.detach().cpu()))
             event_losses.append(float(event_loss.detach().cpu()))
+            slot_event_losses.append(float(slot_event_loss.detach().cpu()))
+            slot_struct_losses.append(float(slot_struct_loss.detach().cpu()))
         history.append(
             {
                 "epoch": epoch,
                 "loss": float(np.mean(losses)),
                 "frame_loss": float(np.mean(class_losses)),
                 "event_loss": float(np.mean(event_losses)),
+                "slot_event_loss": float(np.mean(slot_event_losses)),
+                "slot_struct_loss": float(np.mean(slot_struct_losses)) if slot_struct_losses else 0.0,
             }
         )
     out_path = Path(config.out_path)

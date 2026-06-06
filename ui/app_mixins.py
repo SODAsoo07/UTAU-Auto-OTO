@@ -52,6 +52,27 @@ class FileDialogMixin:
         if path:
             var.set(path)
 
+    def _apply_boundary_model_env(self):
+        """Set/unset UTOA_NO_MFA_BOUNDARY_MODEL from the UI toggle.
+
+        When the toggle is on and the checkpoint exists, the no-MFA/HSMM encoder
+        loads the trained boundary model; otherwise the rule-based world_v1
+        encoder is used. Returns the resolved checkpoint path ('' when rule-based).
+        """
+        use = bool(self.use_boundary_model_var.get()) if hasattr(self, "use_boundary_model_var") else False
+        raw = str(self.boundary_model_path_var.get() or "").strip() if hasattr(self, "boundary_model_path_var") else ""
+        if use and raw and os.path.isfile(raw):
+            resolved = os.path.abspath(raw)
+            os.environ["UTOA_NO_MFA_BOUNDARY_MODEL"] = resolved
+            return resolved
+        if use and (not raw or not os.path.isfile(raw)):
+            try:
+                self._append_log("⚠ 경계 모델 경로가 유효하지 않아 규칙 기반으로 생성합니다.")
+            except Exception:
+                pass
+        os.environ.pop("UTOA_NO_MFA_BOUNDARY_MODEL", None)
+        return ""
+
     def _ml_model_repo_root(self):
         base_dir = getattr(self, "app_dir", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         external_root = os.path.join(base_dir, "models")
@@ -3352,6 +3373,8 @@ class ConfigMixin:
             "out_path": self.out_entry.get(),
             "custom_phonemes": self.custom_phoneme_var.get(),
             "alias_suffix": self.alias_suffix_var.get(),
+            "use_boundary_model": self.use_boundary_model_var.get() if hasattr(self, "use_boundary_model_var") else False,
+            "boundary_model_path": self.boundary_model_path_var.get() if hasattr(self, "boundary_model_path_var") else "",
             "openutau_compatible": self.openutau_var.get(),
             "gen_missing_vowels": self.gen_missing_vowels_var.get(),
             "gen_dash_alias": self.gen_dash_alias_var.get() if hasattr(self, "gen_dash_alias_var") else True,
@@ -3581,6 +3604,10 @@ class ConfigMixin:
                 self.recursive_voicebank_scan_var.set(bool(config.get("recursive_voicebank_scan", False)))
             if hasattr(self, "enable_ml_correction_var"):
                 self.enable_ml_correction_var.set(bool(config.get("enable_ml_correction", True)))
+            if "boundary_model_path" in config and hasattr(self, "boundary_model_path_var"):
+                self.boundary_model_path_var.set(str(config.get("boundary_model_path", "") or ""))
+            if "use_boundary_model" in config and hasattr(self, "use_boundary_model_var"):
+                self.use_boundary_model_var.set(bool(config.get("use_boundary_model", False)))
             if hasattr(self, "disable_lightgbm_correction_var"):
                 self.disable_lightgbm_correction_var.set(bool(config.get("disable_lightgbm_correction", False)))
             if hasattr(self, "cvn_correction_enable_var"):

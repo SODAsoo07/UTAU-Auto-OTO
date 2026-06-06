@@ -13,6 +13,12 @@ from core.no_mfa_oto_builder import (
     generate_no_mfa_auto_oto,
     resolve_no_mfa_source_oto,
 )
+from core.oto_file_utils import (
+    apply_alias_suffix_to_oto_file,
+    detect_oto_text_encoding,
+    normalize_alias_suffix,
+    reencode_oto_file,
+)
 from core.oto_generator import generate_oto
 from core.pipeline_status import normalize_aligner_name
 from core.preflight_common import collect_runtime_preflight_issues
@@ -212,6 +218,19 @@ class OtoActionsMixin:
                     self._append_log("ℹ 하위 폴더 자동 탐색 활성화: 처리 대상 1개를 찾았습니다.")
                 _update_oto_stage(t("입력 경로 확인 완료"), 0.07, force=True)
 
+                # 일본어: 베이스 OTO가 Shift-JIS(cp932)면 생성 결과도 같은 인코딩으로 보존한다.
+                preserve_out_encoding = ""
+                if lang == "japanese" and base_tpl_path and os.path.isfile(base_tpl_path):
+                    try:
+                        base_encoding = detect_oto_text_encoding(base_tpl_path)
+                    except Exception:
+                        base_encoding = "utf-8"
+                    if str(base_encoding or "").strip().lower() not in {"utf-8", "utf_8", "utf-8-sig", "utf_8_sig"}:
+                        preserve_out_encoding = base_encoding
+                        self._append_log(
+                            f"ℹ 베이스 OTO 인코딩 감지: {base_encoding} → 생성 OTO 인코딩 보존"
+                        )
+
                 # 일반 OTO 경로에서는 파이프라인과 동일한 사전 점검을 먼저 수행합니다.
                 # (영어 Preview / 한국어 템플릿 전용 포맷은 별도 전용 분기에서 검사)
                 if (not batch_scan_enabled) and not (
@@ -319,6 +338,12 @@ class OtoActionsMixin:
                 )
                 enable_ml_correction = bool(auto_policy.get("enable_ml"))
                 self._apply_advanced_tuning_envs()
+                boundary_model_path = (
+                    self._apply_boundary_model_env() if hasattr(self, "_apply_boundary_model_env") else ""
+                )
+                self._append_log(
+                    f"ℹ 경계 인코더: {'학습 모델 ' + os.path.basename(boundary_model_path) if boundary_model_path else '규칙 기반(world_v1)'}"
+                )
                 preset_applied, preset_total = self._apply_recommended_format_env_preset()
                 if preset_applied > 0:
                     self._append_log(
@@ -710,6 +735,15 @@ class OtoActionsMixin:
                     last_total = total
                     if ok:
                         success_count += 1
+                        if preserve_out_encoding:
+                            try:
+                                changed, used = reencode_oto_file(target_out_path, preserve_out_encoding)
+                                if changed:
+                                    self._append_log(
+                                        f"ℹ 생성 OTO 인코딩 보존: {os.path.basename(target_out_path)} → {used}"
+                                    )
+                            except Exception as enc_exc:
+                                self._append_log(f"⚠ OTO 인코딩 보존 실패({preserve_out_encoding}): {enc_exc}")
                     else:
                         failed_count += 1
                     if fatal:
@@ -731,6 +765,101 @@ class OtoActionsMixin:
 
             except Exception as e:
                 self._handle_error("OTO 생성", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
+
+    def _resolve_generated_oto_paths(self) -> list[str]:
+        """Resolve the oto.ini path(s) for the current output/batch settings."""
+        root_wav_dir = str(self.wav_entry.get() or "").strip()
+        base_out_path = str(self.out_entry.get() or "").strip()
+        batch_scan_enabled = (
+            bool(self.recursive_voicebank_scan_var.get())
+            if hasattr(self, "recursive_voicebank_scan_var")
+            else False
+        )
+        out_paths: list[str] = []
+        batch_targets = []
+        try:
+            batch_targets = resolve_voicebank_batch_targets(
+                root_wav_dir,
+                base_out_path,
+                batch_scan_enabled=batch_scan_enabled,
+            )
+        except Exception:
+            batch_targets = []
+        target_wav_dirs = [target.wav_dir for target in (batch_targets or [])]
+        target_count = len(target_wav_dirs)
+        if target_count == 0:
+            if base_out_path:
+                out_paths.append(base_out_path)
+        else:
+            for target_wav_dir in target_wav_dirs:
+                resolved = self._resolve_recursive_out_path(
+                    root_wav_dir,
+                    base_out_path,
+                    target_wav_dir,
+                    target_count,
+                )
+                if resolved:
+                    out_paths.append(resolved)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for path in out_paths:
+            key = os.path.abspath(path)
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+        return unique
+
+    def _apply_suffix_to_generated_oto(self):
+        """Append the current alias suffix to already-generated oto.ini file(s).
+
+        Lets the user type a suffix *after* generation and apply it without a full
+        regeneration. Idempotent: aliases that already end with the suffix are left
+        untouched, so it is safe to run repeatedly.
+        """
+        def task():
+            self._set_running(True)
+            self._set_status(t("접미사 적용 중..."))
+            try:
+                suffix = str(self.alias_suffix_var.get() or "").strip()
+                if not normalize_alias_suffix(suffix):
+                    self._append_log("오류: 적용할 접미사를 입력해 주세요.")
+                    self._set_status("오류: 접미사 없음")
+                    return
+                out_paths = self._resolve_generated_oto_paths()
+                if not out_paths:
+                    self._append_log("오류: 출력 경로를 입력해 주세요.")
+                    self._set_status("오류: 출력 경로 없음")
+                    return
+                normalized = normalize_alias_suffix(suffix)
+                total_changed = 0
+                files_applied = 0
+                files_missing = 0
+                for path in out_paths:
+                    if not os.path.isfile(path):
+                        files_missing += 1
+                        self._append_log(f"⚠ oto.ini 없음(먼저 OTO를 생성하세요): {path}")
+                        continue
+                    changed, alias_total = apply_alias_suffix_to_oto_file(path, suffix)
+                    files_applied += 1
+                    total_changed += changed
+                    self._append_log(
+                        f"[접미사] {os.path.basename(path)}: "
+                        f"alias {changed}/{alias_total}개에 _{normalized} 적용"
+                    )
+                if files_applied == 0:
+                    self._set_status("오류: 적용할 oto.ini를 찾지 못했습니다")
+                    return
+                self._save_config()
+                self._set_status(
+                    f"완료: 접미사 _{normalized} 적용 "
+                    f"(alias {total_changed}개 / 파일 {files_applied}개)"
+                )
+            except Exception as e:
+                self._handle_error("접미사 적용", e)
             finally:
                 self._set_running(False)
 

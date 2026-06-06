@@ -136,3 +136,5 @@ MANIFEST
 ml/workspace/mfa_free_oto/c4_manual_gold_manifest.jsonl
 ml/workspace/mfa_free_oto/c4_manual_gold_summary.json
 /plans
+/ml/workspace/mfa_free_oto/gold_kr_cvc
+/ml/workspace/mfa_free_oto

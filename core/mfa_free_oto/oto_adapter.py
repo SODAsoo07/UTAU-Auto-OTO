@@ -1202,6 +1202,10 @@ class OtoAnchor:
     vowel_nucleus_abs_ms: float | None = None
     vowel_start_abs_ms: float | None = None
     vowel_end_abs_ms: float | None = None
+    # Absolute onset of the leading consonant for headed (C->V) anchors. Used so
+    # the generated offset reaches back far enough to include the whole
+    # consonant instead of clipping its attack.
+    consonant_onset_abs_ms: float | None = None
     previous_vowel_end_abs_ms: float | None = None
     next_onset_abs_ms: float | None = None
     next_vowel_abs_ms: float | None = None
@@ -1580,6 +1584,14 @@ def bootstrap_row(
         target_pre = min(float(pre_target_ms), anchor_abs)
         offset = max(anchor_abs - target_pre, 0.0)
         pre = max(anchor_abs - offset, 0.0)
+    if alias_type in {"cv", "cv_head", "vcv"}:
+        offset, pre, consonant_include_warnings = _include_leading_consonant_in_offset(
+            offset,
+            pre,
+            anchor_abs,
+            anchor.consonant_onset_abs_ms,
+        )
+        anchor_warnings.extend(consonant_include_warnings)
     overlap = max(0.0, pre - ovl_gap_ms)
     consonant = pre + cons_gap_ms
     cutoff_warnings: tuple[str, ...] = ()
@@ -1629,11 +1641,23 @@ def anchors_from_prediction(
 ) -> list[OtoAnchor]:
     anchors: list[OtoAnchor] = []
     previous_vowel_end: float | None = None
+    pending_consonant_onset: float | None = None
     decoded = [_event_to_dict(event) for event in decoded_events]
     for idx, event in enumerate(decoded):
         if event["label"] not in {"cv_boundary", "phone_change", "vowel_nucleus", "vv_boundary"}:
             continue
         anchor_ms = float(event["time_ms"])
+        # A phone_change immediately preceding a cv_boundary marks the leading
+        # consonant onset for that CV; remember it so the CV anchor can keep the
+        # consonant inside its offset window.
+        if str(event["label"]) == "phone_change":
+            pending_consonant_onset = anchor_ms
+        consonant_onset_abs = None
+        if str(event["label"]) == "cv_boundary" and pending_consonant_onset is not None:
+            if 0.0 <= float(pending_consonant_onset) < anchor_ms:
+                consonant_onset_abs = float(pending_consonant_onset)
+        if str(event["label"]) != "phone_change":
+            pending_consonant_onset = None
         span = estimate_vowel_span(posterior, anchor_ms)
         nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
             posterior,
@@ -1668,6 +1692,7 @@ def anchors_from_prediction(
             vowel_nucleus_abs_ms=selected_nucleus,
             vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
             vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+            consonant_onset_abs_ms=consonant_onset_abs,
             previous_vowel_end_abs_ms=previous_vowel_end,
             next_vowel_abs_ms=next_vowel,
             boundary_confidence=boundary_conf,
@@ -3052,6 +3077,7 @@ def repair_cvvc_row_sequence(
     config: OtoAdapterConfig | None = None,
     *,
     file_duration_ms: float | None = None,
+    posterior: FramePosterior | None = None,
 ) -> list[AdaptedOtoRow]:
     cfg = config or OtoAdapterConfig()
     out = repair_cvvc_vc_row_sequence(rows, cfg)
@@ -3215,10 +3241,12 @@ def repair_cvvc_row_sequence(
         out = _repair_cvvc_headless_pitch_suffix_cv_head_rows(out, cfg)
     if dispatch.starts_with_vc_block:
         out = _repair_cvvc_grouped_initial_vc_from_final_cv_rows(out, cfg)
+    out = _repair_cvvc_internal_vc_slot_bound_rows(out, cfg)
     if _ja_cvvc_reference_derived_repairs_enabled():
         out = _repair_cvvc_cv_head_role_profile_rows(out, cfg)
         out = _repair_cvvc_unrepaired_vv_long_cutoff_rows(out, cfg)
     out = _repair_cvvc_vc_cutoff_order_rows(out, cfg)
+    out = _repair_cvvc_terminal_release_h_rows(out, cfg, posterior=posterior)
     return _repair_oto_parameter_order_rows(out, file_duration_ms=file_duration_ms)
 
 
@@ -9963,6 +9991,47 @@ def _japanese_vowel_boundary_local_refine_supersedes_anchor_lead(
     )
 
 
+# Small lead kept before the detected consonant onset so the attack/burst is not
+# clipped, plus a ceiling on how far the offset may be pushed back to swallow an
+# implausibly early (mis-detected) consonant onset.
+_CONSONANT_INCLUDE_LEAD_MS = 12.0
+_CONSONANT_INCLUDE_MAX_PRE_MS = 320.0
+
+
+def _include_leading_consonant_in_offset(
+    offset: float,
+    pre: float,
+    anchor_abs_ms: float,
+    consonant_onset_abs_ms: float | None,
+) -> tuple[float, float, tuple[str, ...]]:
+    """Pull the offset back so the leading consonant stays inside the window.
+
+    A headed CV anchor sits on the vowel onset, while the offset is derived from a
+    fixed preutterance target. When the consonant runs longer than that target the
+    offset lands *after* the consonant onset and clips its attack. If we know the
+    consonant onset, lower the offset (bounded) so the consonant is included.
+    """
+    if consonant_onset_abs_ms is None:
+        return offset, pre, ()
+    c_onset = float(consonant_onset_abs_ms)
+    if not np.isfinite(c_onset) or c_onset < 0.0 or c_onset >= float(anchor_abs_ms):
+        return offset, pre, ()
+    desired_offset = max(0.0, c_onset - _CONSONANT_INCLUDE_LEAD_MS)
+    # Never grow the preutterance past a sane ceiling on a single (possibly
+    # mis-detected) consonant onset.
+    min_offset = max(0.0, float(anchor_abs_ms) - _CONSONANT_INCLUDE_MAX_PRE_MS)
+    desired_offset = max(desired_offset, min_offset)
+    if desired_offset >= float(offset) - 1e-6:
+        return offset, pre, ()
+    new_offset = float(desired_offset)
+    new_pre = max(float(anchor_abs_ms) - new_offset, 0.0)
+    return (
+        new_offset,
+        new_pre,
+        (f"consonant_onset_included:{float(offset):.1f}->{new_offset:.1f}",),
+    )
+
+
 def _cvvc_cv_context_pre_ms(
     config: OtoAdapterConfig,
     anchor: OtoAnchor,
@@ -11397,7 +11466,9 @@ def _repair_cvvc_headed_regular_vc_from_next_cv_rows(
         )
         if has_cv_head:
             for index in range(segment_start, segment_end - 1):
+                previous_cv = _previous_cvvc_cv_like_row(out, config, segment_start, index)
                 out[index] = _repair_cvvc_headed_regular_vc_from_next_cv_row(
+                    previous_cv,
                     out[index],
                     out[index + 1],
                     config,
@@ -11407,6 +11478,7 @@ def _repair_cvvc_headed_regular_vc_from_next_cv_rows(
 
 
 def _repair_cvvc_headed_regular_vc_from_next_cv_row(
+    previous_cv: AdaptedOtoRow | None,
     row: AdaptedOtoRow,
     next_row: AdaptedOtoRow,
     config: OtoAdapterConfig,
@@ -11431,6 +11503,11 @@ def _repair_cvvc_headed_regular_vc_from_next_cv_row(
         return row
 
     candidate_offset = max(0.0, next_offset - float(JAPANESE_CVVC_HEADED_REGULAR_VC_FROM_NEXT_CV_LEAD_MS))
+    candidate_offset, safe_window_warnings = _cvvc_bound_vc_candidate_after_previous_cv(
+        candidate_offset,
+        previous_cv,
+        next_row,
+    )
     backshift = current_offset - candidate_offset
     if backshift <= float(JAPANESE_CVVC_HEADED_REGULAR_VC_REPAIR_MIN_BACKSHIFT_MS):
         return row
@@ -11453,11 +11530,63 @@ def _repair_cvvc_headed_regular_vc_from_next_cv_row(
                     *row.warnings,
                     f"cvvc_headed_regular_vc_from_next_cv:{current_offset:.1f}->{float(timing.offset):.1f}",
                     f"cvvc_headed_regular_vc_next_cv:{next_row.alias}",
+                    *safe_window_warnings,
                     *timing_warnings,
                 )
             )
         ),
         applied_rules=tuple(dict.fromkeys((*row.applied_rules, "cvvc_headed_regular_vc_from_next_cv_repair"))),
+    )
+
+
+def _cvvc_bound_vc_candidate_after_previous_cv(
+    candidate_offset: float,
+    previous_cv: AdaptedOtoRow | None,
+    next_cv: AdaptedOtoRow,
+) -> tuple[float, tuple[str, ...]]:
+    if previous_cv is None:
+        return float(candidate_offset), ()
+    previous_offset = float(previous_cv.timing.offset)
+    next_offset = float(next_cv.timing.offset)
+    candidate = float(candidate_offset)
+    if not all(np.isfinite(value) for value in (candidate, previous_offset, next_offset)):
+        return candidate, ()
+    span = next_offset - previous_offset
+    if span <= 0.0:
+        return candidate, ()
+    min_after_previous = _cvvc_vc_min_after_previous_for_span(span)
+    lower_bound = previous_offset + min_after_previous
+    upper_bound = next_offset - float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_NEXT_MARGIN_MS)
+    if candidate >= lower_bound - 1e-6:
+        return candidate, ()
+    bounded = max(candidate, lower_bound)
+    if upper_bound >= lower_bound:
+        bounded = min(bounded, upper_bound)
+    bounded = min(bounded, next_offset - 1.0)
+    if bounded <= candidate + 1e-6:
+        return candidate, ()
+    return (
+        float(bounded),
+        (
+            "cvvc_headed_regular_vc_prev_safe_window:"
+            f"{candidate:.1f}->{float(bounded):.1f}",
+            f"cvvc_headed_regular_vc_prev:{previous_cv.alias}@{previous_offset:.1f}",
+        ),
+    )
+
+
+def _cvvc_vc_min_after_previous_for_span(span_ms: float) -> float:
+    span = float(span_ms)
+    if not np.isfinite(span) or span <= 0.0:
+        return float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MIN_AFTER_PREVIOUS_MS)
+    if span < float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MIN_SPAN_MS):
+        return float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MIN_AFTER_PREVIOUS_MS)
+    return max(
+        float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MIN_AFTER_PREVIOUS_MS),
+        min(
+            float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MAX_AFTER_PREVIOUS_MS),
+            span * 0.32,
+        ),
     )
 
 
@@ -11560,13 +11689,7 @@ def _repair_cvvc_internal_vc_slot_bound_row(
     ):
         return row
 
-    min_after_previous = max(
-        float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MIN_AFTER_PREVIOUS_MS),
-        min(
-            float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_MAX_AFTER_PREVIOUS_MS),
-            span * 0.32,
-        ),
-    )
+    min_after_previous = _cvvc_vc_min_after_previous_for_span(span)
     lower_bound = previous_offset + min_after_previous
     upper_bound = next_offset - float(JAPANESE_CVVC_INTERNAL_VC_SLOT_BOUND_NEXT_MARGIN_MS)
     if upper_bound <= lower_bound:
@@ -16685,6 +16808,122 @@ def _repair_cvvc_terminal_release_r_rows(
     return out
 
 
+def _repair_cvvc_terminal_release_h_rows(
+    rows: Sequence[AdaptedOtoRow],
+    config: OtoAdapterConfig,
+    *,
+    posterior: FramePosterior | None,
+) -> list[AdaptedOtoRow]:
+    if not _is_japanese_cvvc_config(config) or posterior is None:
+        return list(rows)
+    out = list(rows)
+    for index, row in enumerate(out):
+        left_phones = _cvvc_terminal_release_h_left_phones(row.alias)
+        if len(left_phones) != 1:
+            continue
+        active_end_ms = _posterior_terminal_release_h_active_end_ms(
+            posterior,
+            moraic_n=left_phones[0] == "n",
+        )
+        if active_end_ms is None:
+            continue
+        current_pre_abs = float(row.timing.offset) + float(row.timing.preutterance)
+        if (
+            not np.isfinite(current_pre_abs)
+            or active_end_ms - current_pre_abs < 240.0
+        ):
+            continue
+        preutterance = max(0.0, float(row.timing.preutterance))
+        timing = OtoTiming(
+            offset=max(0.0, float(active_end_ms) - preutterance),
+            consonant=float(row.timing.consonant),
+            cutoff=float(row.timing.cutoff),
+            preutterance=preutterance,
+            overlap=float(row.timing.overlap),
+        )
+        timing, timing_warnings = _validate_timing_with_warnings(timing, file_duration_ms=0.0)
+        anchor = row.anchor
+        if anchor is not None:
+            anchor = replace(
+                anchor,
+                anchor_abs_ms=float(active_end_ms),
+                warnings=tuple(
+                    dict.fromkeys(
+                        (
+                            *anchor.warnings,
+                            f"terminal_release_h_energy_end:{float(active_end_ms):.1f}",
+                        )
+                    )
+                ),
+            )
+        out[index] = replace(
+            row,
+            timing=timing,
+            anchor=anchor,
+            warnings=tuple(
+                dict.fromkeys(
+                    (
+                        *row.warnings,
+                        f"cvvc_terminal_release_h_energy_repaired:{current_pre_abs:.1f}->{float(active_end_ms):.1f}",
+                        *timing_warnings,
+                    )
+                )
+            ),
+            applied_rules=tuple(
+                dict.fromkeys((*row.applied_rules, "cvvc_terminal_release_h_energy_repair"))
+            ),
+        )
+    return out
+
+
+def _cvvc_terminal_release_h_left_phones(alias: str) -> tuple[str, ...]:
+    parts = [part.strip() for part in str(alias or "").split() if part.strip()]
+    if len(parts) < 2:
+        return ()
+    right = _strip_alias_attached_pitch_suffix_token_preserve_case(parts[-1])
+    if right != "H":
+        return ()
+    left_phones = tuple(str(phone).strip().lower() for phone in _alias_phone_sequence(parts[0]))
+    if len(left_phones) != 1 or not is_vowel_phone(left_phones[0], "japanese"):
+        return ()
+    return left_phones
+
+
+def _posterior_terminal_release_h_active_end_ms(
+    posterior: FramePosterior,
+    *,
+    moraic_n: bool,
+) -> float | None:
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    rms = np.asarray(posterior.acoustic_scores.get("rms", ()), dtype=np.float32)
+    if times.size == 0 or rms.shape[0] != times.shape[0]:
+        return None
+    finite = np.isfinite(rms)
+    if not np.any(finite):
+        return None
+    peak = float(np.max(rms[finite]))
+    if peak <= 1e-7:
+        return None
+    threshold_db = -25.0 if moraic_n else -15.0
+    active = finite & (rms >= peak * float(10.0 ** (threshold_db / 20.0)))
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for frame_index, is_active in enumerate(active):
+        if bool(is_active):
+            if run_start is None:
+                run_start = frame_index
+            continue
+        if run_start is not None:
+            if frame_index - run_start >= 3:
+                runs.append((run_start, frame_index - 1))
+            run_start = None
+    if run_start is not None and active.size - run_start >= 3:
+        runs.append((run_start, int(active.size) - 1))
+    if not runs:
+        return None
+    return float(times[runs[-1][1]])
+
+
 def _is_cvvc_standalone_release_r_wav(wav_name_lower: str) -> bool:
     return bool(re.fullmatch(r"[aeioun]r\.wav", str(wav_name_lower or "").strip().lower()))
 
@@ -18100,6 +18339,12 @@ def _repair_cvvc_initial_cv_head_targets(
                 continue
             if not _phone_sequence_variants_match(follow_phones[1:], phones):
                 continue
+            if (
+                current_target is not None
+                and int(current_target) < int(follow_target)
+                and _cv_head_target_matches_expected_onset(expected, phones, int(current_target))
+            ):
+                continue
             out[row_idx] = follow_target
             continue
         if follow_role == "vv" and current_target is None:
@@ -18108,6 +18353,26 @@ def _repair_cvvc_initial_cv_head_targets(
                 continue
             out[row_idx] = follow_target
     return out
+
+
+def _cv_head_target_matches_expected_onset(
+    expected: Sequence[str],
+    phones: Sequence[str],
+    target_index: int,
+) -> bool:
+    if not expected or not phones:
+        return False
+    start = int(target_index)
+    if start < 0 or start >= len(expected):
+        return False
+    variants = _alias_match_phone_variants([str(phone or "").strip().lower() for phone in phones])
+    for variant in variants:
+        end = start + len(variant)
+        if end > len(expected):
+            continue
+        if _phone_sequence_matches(expected[start:end], variant):
+            return True
+    return False
 
 
 def _first_following_phonetic_template_row(
@@ -18358,7 +18623,7 @@ def _alias_target_candidates(
     *,
     language: str = "",
 ) -> list[AliasTargetCandidate]:
-    phones = _alias_phone_sequence(alias)
+    phones = _alias_phone_sequence_for_matching(alias, language=language)
     if not expected or not phones:
         return []
     out: list[AliasTargetCandidate] = []
@@ -18408,9 +18673,8 @@ def _alias_represented_start_index(
     *,
     language: str = "",
 ) -> int:
-    del language
     target = max(0, int(target_phone_index))
-    phones = _alias_phone_sequence(alias)
+    phones = _alias_phone_sequence_for_matching(alias, language=language)
     if not expected or not phones:
         return target
     normalized_role = str(role or "").strip().lower()
@@ -18487,7 +18751,7 @@ def _alias_target_phone_index(
     language: str = "",
 ) -> int | None:
     expected = [str(phone or "").strip().lower() for phone in expected_phones]
-    phones = _alias_phone_sequence(alias)
+    phones = _alias_phone_sequence_for_matching(alias, language=language)
     if not expected or not phones:
         return None
     if role == "vc" and len(phones) >= 2:
@@ -18594,6 +18858,12 @@ def _vc_right_matches(
     for phones in _alias_match_phone_variants(right):
         if _phone_sequence_matches(expected[start_idx : start_idx + len(phones)], phones):
             return True
+    if (
+        _is_japanese_language_name(language)
+        and len(right) == 1
+        and {str(expected[start_idx]).strip().lower(), str(right[0]).strip().lower()} == {"l", "r"}
+    ):
+        return True
     if _is_korean_language_name(language) and len(right) == 1:
         if _korean_coda_matches_following_onset(expected[start_idx], right[0]):
             return True
@@ -18616,6 +18886,21 @@ def _is_korean_language_name(language: str) -> bool:
 
 def _is_japanese_language_name(language: str) -> bool:
     return str(language or "").strip().lower() in {"japanese", "ja", "jp"}
+
+
+def _alias_phone_sequence_for_matching(alias: str, *, language: str) -> list[str]:
+    phones = _alias_phone_sequence(alias)
+    if phones or not _is_japanese_language_name(language):
+        return phones
+    liquid_normalized = re.sub(
+        r"l(?=[\u3040-\u30ff])",
+        "",
+        str(alias or ""),
+        flags=re.IGNORECASE,
+    )
+    if liquid_normalized == str(alias or ""):
+        return phones
+    return _alias_phone_sequence(liquid_normalized)
 
 
 def _ja_cvvc_leading_context_slots_enabled() -> bool:
@@ -18755,6 +19040,16 @@ def _expand_optional_w_vowel_phones(phones: Sequence[str]) -> tuple[str, ...]:
     while idx < len(phones):
         phone = str(phones[idx] or "").strip().lower()
         next_phone = str(phones[idx + 1] or "").strip().lower() if idx + 1 < len(phones) else ""
+        compact_w_vowel = {
+            "wa": ("w", "a"),
+            "wi": ("w", "i"),
+            "we": ("w", "e"),
+            "wo": ("w", "o"),
+        }.get(phone)
+        if compact_w_vowel:
+            out.extend(compact_w_vowel)
+            idx += 1
+            continue
         if phone in {"k", "g"} and next_phone in {"a", "i", "e", "o"}:
             out.extend((phone, "w", next_phone))
             idx += 2

@@ -15,6 +15,8 @@ class TrainingTargets:
     frame_class: np.ndarray
     frame_mask: np.ndarray
     event_targets: np.ndarray
+    slot_event_targets: np.ndarray
+    slot_event_mask: np.ndarray
 
 
 def frame_times_ms(frame_count: int, hop_ms: float) -> np.ndarray:
@@ -26,6 +28,7 @@ def rasterize_targets(
     times_ms: Sequence[float],
     *,
     event_sigma_ms: float = 18.0,
+    slot_event_bins: int = 0,
 ) -> TrainingTargets:
     times = np.asarray(times_ms, dtype=np.float32)
     frame_class = np.full((times.shape[0],), IGNORE_INDEX, dtype=np.int64)
@@ -40,15 +43,60 @@ def rasterize_targets(
         frame_mask[mask] = max(0.0, min(1.0, confidence))
 
     event_targets = np.zeros((times.shape[0], len(EVENT_LABELS)), dtype=np.float32)
+    slot_bins = max(0, int(slot_event_bins))
+    slot_event_targets = np.zeros(
+        (times.shape[0], slot_bins, len(EVENT_LABELS)),
+        dtype=np.float32,
+    )
+    slot_event_mask = np.zeros((slot_bins,), dtype=np.float32)
     sigma = max(1.0, float(event_sigma_ms))
-    for event in row.get("events") or []:
+    events = list(row.get("events") or [])
+    inferred_slots = infer_event_slot_indices(events)
+    for event, inferred_slot in zip(events, inferred_slots):
         label = str(event["label"])
         time_ms = float(event["time_ms"])
         confidence = float(event.get("confidence", 1.0))
         col = EVENT_LABEL_TO_ID[label]
         peak = np.exp(-0.5 * ((times - time_ms) / sigma) ** 2).astype(np.float32)
         event_targets[:, col] = np.maximum(event_targets[:, col], peak * confidence)
-    return TrainingTargets(frame_class=frame_class, frame_mask=frame_mask, event_targets=event_targets)
+        slot_index = _event_slot_index(event, inferred_slot)
+        if 0 <= slot_index < slot_bins:
+            slot_event_targets[:, slot_index, col] = np.maximum(
+                slot_event_targets[:, slot_index, col],
+                peak * confidence,
+            )
+            slot_event_mask[slot_index] = 1.0
+    return TrainingTargets(
+        frame_class=frame_class,
+        frame_mask=frame_mask,
+        event_targets=event_targets,
+        slot_event_targets=slot_event_targets,
+        slot_event_mask=slot_event_mask,
+    )
+
+
+def infer_event_slot_indices(events: Sequence[dict]) -> list[int]:
+    out: list[int] = []
+    current_slot = -1
+    for event in events:
+        explicit = event.get("slot_index")
+        if explicit is not None:
+            try:
+                current_slot = max(0, int(explicit))
+                out.append(current_slot)
+                continue
+            except (TypeError, ValueError):
+                pass
+        current_slot += 1
+        out.append(current_slot)
+    return out
+
+
+def _event_slot_index(event: dict, inferred_slot: int) -> int:
+    try:
+        return int(event.get("slot_index", inferred_slot))
+    except (TypeError, ValueError):
+        return int(inferred_slot)
 
 
 def labels_from_class_ids(class_ids: Sequence[int]) -> list[str]:
