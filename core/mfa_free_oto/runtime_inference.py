@@ -11,7 +11,13 @@ import numpy as np
 from .decode import decode_monotonic_events
 from .features import extract_features, feature_timebase_metadata
 from .model import MfaFreeFrameModelConfig, build_frame_model
-from .slot_viterbi import ExpectedSlot, SlotViterbiResult, assign_slots_viterbi, slot_assignments_to_decoded_events
+from .slot_viterbi import (
+    ExpectedSlot,
+    SlotViterbiResult,
+    assign_slots_viterbi,
+    expected_cv_slots_from_phones,
+    slot_assignments_to_decoded_events,
+)
 from .types import DecodedEvent, EVENT_LABELS, FRAME_LABELS, FramePosterior
 
 WORLD_V1_CHECKPOINT_FORMAT = "mfa_free_oto_frame_model_world_v1_v1"
@@ -84,6 +90,11 @@ def predict_wav(
 ) -> RuntimePrediction:
     checkpoint_file = str(Path(checkpoint_path)) if checkpoint_path else ""
     encoder_name = str(encoder or "acoustic_world_v1")
+    slot_count = (
+        len(expected_slots)
+        if expected_slots is not None
+        else len(expected_cv_slots_from_phones(expected_phones or [], language=language))
+    )
     checkpoint = None
     if checkpoint_file and os.path.isfile(checkpoint_file):
         try:
@@ -97,6 +108,7 @@ def predict_wav(
                 target_device=target_device,
                 encoder=encoder_name,
                 requested_device=device,
+                slot_count=slot_count,
             )
         except Exception as exc:
             posterior = _predict_posterior_rule_based(
@@ -182,6 +194,7 @@ def _predict_posterior_with_loaded_model(
     target_device: str,
     encoder: str,
     requested_device: str | None,
+    slot_count: int = 0,
 ) -> FramePosterior:
     try:
         import torch
@@ -191,14 +204,14 @@ def _predict_posterior_with_loaded_model(
     timebase_metadata = feature_timebase_metadata(batch)
     with torch.no_grad():
         x = torch.from_numpy(batch.features[None, :, :]).float().to(target_device)
-        output = model(x)
+        output = model(x, slot_count=slot_count)
         frame_probs = torch.softmax(output["frame_logits"], dim=-1)[0].detach().cpu().numpy()
-        event_scores = torch.sigmoid(output["event_logits"])[0].detach().cpu().numpy()
+        event_tracks = _event_tracks_from_output(output)
     return FramePosterior(
         wav_path=str(wav_path),
         times_ms=batch.times_ms.tolist(),
         class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
-        event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
+        event_scores=event_tracks,
         acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
         metadata={
             "encoder": encoder,
@@ -210,6 +223,26 @@ def _predict_posterior_with_loaded_model(
             **timebase_metadata,
         },
     )
+
+
+def _event_tracks_from_output(output: dict) -> dict[str, list[float]]:
+    import torch
+
+    event_scores = torch.sigmoid(output["event_logits"])[0].detach().cpu().numpy()
+    tracks = {
+        label: event_scores[:, idx].astype(float).tolist()
+        for idx, label in enumerate(EVENT_LABELS)
+    }
+    slot_logits = output.get("slot_event_logits")
+    if slot_logits is None:
+        return tracks
+    slot_scores = torch.sigmoid(slot_logits)[0].detach().cpu().numpy()
+    for slot_index in range(slot_scores.shape[1]):
+        for label_index, label in enumerate(EVENT_LABELS):
+            tracks[f"slot_event:{slot_index}:{label}"] = (
+                slot_scores[:, slot_index, label_index].astype(float).tolist()
+            )
+    return tracks
 
 
 def _predict_posterior_rule_based(

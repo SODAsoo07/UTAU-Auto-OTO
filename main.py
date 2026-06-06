@@ -352,6 +352,17 @@ class App(
         self.no_base_oto_var = ctk.BooleanVar(value=False)
         self.recursive_voicebank_scan_var = ctk.BooleanVar(value=False)
         self.enable_ml_correction_var = ctk.BooleanVar(value=True)
+        # Trained acoustic boundary model (HSMM/no-MFA encoder). When off, the
+        # rule-based world_v1 encoder is used. Path defaults to the bundled
+        # checkpoint if present.
+        self.use_boundary_model_var = ctk.BooleanVar(value=False)
+        _default_boundary_model = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "models", "mfa_free_oto", "frame_world_v1_otopseudo.pt",
+        )
+        self.boundary_model_path_var = ctk.StringVar(
+            value=_default_boundary_model if os.path.isfile(_default_boundary_model) else ""
+        )
         self.ml_route_var = ctk.StringVar(value="자동(자동 라우팅)")
         self.ml_selector_mode_var = ctk.StringVar(value="델타+셀렉터")
         self.ml_coupled_enable_var = ctk.BooleanVar(value=True)

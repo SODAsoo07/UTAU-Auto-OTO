@@ -11,8 +11,9 @@ from .features import extract_features, feature_timebase_metadata
 from .manifest import load_manifest_jsonl
 from .metrics import boundary_error_metrics, frame_classification_metrics, gate_report, row_failure_metrics
 from .model import MfaFreeFrameModelConfig, build_frame_model
+from .runtime_inference import _event_tracks_from_output
 from .slot_viterbi import assign_slots_viterbi, slot_assignments_to_decoded_events
-from .targets import IGNORE_INDEX, rasterize_targets
+from .targets import IGNORE_INDEX, infer_event_slot_indices, rasterize_targets
 from .types import EVENT_LABELS, FRAME_LABELS, FramePosterior
 
 
@@ -47,14 +48,14 @@ def predict_row_posterior(
     batch = extract_features(row["wav_path"], encoder=encoder_name, device=device)
     with torch.no_grad():
         x = torch.from_numpy(batch.features[None, :, :]).float().to(target_device)
-        output = model(x)
+        output = model(x, slot_count=len(row.get("events") or []))
         frame_probs = torch.softmax(output["frame_logits"], dim=-1)[0].detach().cpu().numpy()
-        event_scores = torch.sigmoid(output["event_logits"])[0].detach().cpu().numpy()
+        event_tracks = _event_tracks_from_output(output)
     return FramePosterior(
         wav_path=row["wav_path"],
         times_ms=batch.times_ms.tolist(),
         class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
-        event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
+        event_scores=event_tracks,
         acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
         metadata={"encoder": encoder_name, **feature_timebase_metadata(batch)},
     )
@@ -83,6 +84,10 @@ def evaluate_manifest(
     all_predicted_cv: list[float] = []
     all_reference_vn: list[float] = []
     all_predicted_vn: list[float] = []
+    slot_event_errors: list[float] = []
+    long_slot_event_errors: list[float] = []
+    long_slot_rows = 0
+    long_slot_collapsed_rows = 0
     row_results: list[dict] = []
     predictions: list[dict] = []
     for row in rows:
@@ -91,9 +96,9 @@ def evaluate_manifest(
             targets = rasterize_targets(row, batch.times_ms)
             with torch.no_grad():
                 x = torch.from_numpy(batch.features[None, :, :]).float().to(target_device)
-                output = model(x)
+                output = model(x, slot_count=len(row.get("events") or []))
                 frame_probs = torch.softmax(output["frame_logits"], dim=-1)[0].detach().cpu().numpy()
-                event_scores = torch.sigmoid(output["event_logits"])[0].detach().cpu().numpy()
+                event_tracks = _event_tracks_from_output(output)
             valid = targets.frame_class != IGNORE_INDEX
             y_true.extend(targets.frame_class[valid].astype(int).tolist())
             y_pred.extend(np.argmax(frame_probs[valid], axis=-1).astype(int).tolist())
@@ -101,10 +106,16 @@ def evaluate_manifest(
                 wav_path=row["wav_path"],
                 times_ms=batch.times_ms.tolist(),
                 class_probs={label: frame_probs[:, idx].astype(float).tolist() for idx, label in enumerate(FRAME_LABELS)},
-                event_scores={label: event_scores[:, idx].astype(float).tolist() for idx, label in enumerate(EVENT_LABELS)},
+                event_scores=event_tracks,
                 acoustic_scores={key: value.astype(float).tolist() for key, value in batch.acoustic_scores.items()},
                 metadata={"encoder": encoder_name, **feature_timebase_metadata(batch)},
             )
+            row_slot_metrics = _slot_event_row_metrics(row, posterior)
+            slot_event_errors.extend(row_slot_metrics["absolute_errors_ms"])
+            if row_slot_metrics["slot_count"] >= 6:
+                long_slot_rows += 1
+                long_slot_event_errors.extend(row_slot_metrics["absolute_errors_ms"])
+                long_slot_collapsed_rows += int(row_slot_metrics["collapsed"])
             expected_phones = _expected_phones(row)
             slot_result = assign_slots_viterbi(posterior, expected_phones=expected_phones) if use_slot_viterbi and expected_phones else None
             decoded = (
@@ -143,6 +154,11 @@ def evaluate_manifest(
                     "failure_tags": failure_tags,
                     "cv_boundary": row_error,
                     "vowel_nucleus": row_nucleus_error,
+                    "slot_event": {
+                        key: value
+                        for key, value in row_slot_metrics.items()
+                        if key != "absolute_errors_ms"
+                    },
                 }
             )
             predictions.append(
@@ -211,6 +227,17 @@ def evaluate_manifest(
         "vowel_nucleus_median_error_ms": nucleus_metrics["median_error_ms"],
         "vowel_nucleus_p90_error_ms": nucleus_metrics["p90_error_ms"],
         "vowel_nucleus": nucleus_metrics,
+        "slot_event": _absolute_error_summary(slot_event_errors),
+        "long_slot_event": {
+            **_absolute_error_summary(long_slot_event_errors),
+            "rows": long_slot_rows,
+            "collapsed_rows": long_slot_collapsed_rows,
+            "collapse_rate": (
+                float(long_slot_collapsed_rows / long_slot_rows)
+                if long_slot_rows
+                else None
+            ),
+        },
         **failure_metrics,
         "gate_report": {},
         "row_results": row_results,
@@ -239,6 +266,51 @@ def _expected_phones(row: dict) -> list[str]:
         else:
             phones.append(str(item))
     return phones
+
+
+def _slot_event_row_metrics(row: dict, posterior: FramePosterior) -> dict:
+    events = list(row.get("events") or [])
+    slot_indices = infer_event_slot_indices(events)
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    errors: list[float] = []
+    predicted_frames: list[int] = []
+    for event, slot_index in zip(events, slot_indices):
+        label = str(event.get("label") or "")
+        values = np.asarray(
+            posterior.event_scores.get(f"slot_event:{slot_index}:{label}", []),
+            dtype=np.float32,
+        )
+        if times.size == 0 or values.shape[0] != times.shape[0]:
+            continue
+        frame_index = int(np.argmax(values))
+        predicted_frames.append(frame_index)
+        errors.append(abs(float(times[frame_index]) - float(event["time_ms"])))
+    collapsed = any(cur <= prev for prev, cur in zip(predicted_frames[:-1], predicted_frames[1:]))
+    summary = _absolute_error_summary(errors)
+    return {
+        "slot_count": len(events),
+        "predicted_count": len(predicted_frames),
+        "collapsed": collapsed,
+        **summary,
+        "absolute_errors_ms": errors,
+    }
+
+
+def _absolute_error_summary(errors: Sequence[float]) -> dict:
+    if not errors:
+        return {
+            "count": 0,
+            "median_abs_error_ms": None,
+            "p90_abs_error_ms": None,
+            "within_100ms_pct": None,
+        }
+    values = np.asarray(errors, dtype=np.float32)
+    return {
+        "count": int(values.size),
+        "median_abs_error_ms": float(np.median(values)),
+        "p90_abs_error_ms": float(np.percentile(values, 90)),
+        "within_100ms_pct": float(np.mean(values <= 100.0) * 100.0),
+    }
 
 
 def _failure_tags(row_error: dict, slot_result, reference_cv: Sequence[float], predicted_cv: Sequence[float]) -> list[str]:

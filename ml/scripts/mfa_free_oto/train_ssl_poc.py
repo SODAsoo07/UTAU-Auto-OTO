@@ -45,6 +45,24 @@ def main() -> int:
     parser.add_argument("--focus-cv-radius-frames", type=int, default=3)
     parser.add_argument("--focus-nucleus-radius-frames", type=int, default=4)
     parser.add_argument("--focus-weight-max", type=float, default=2.0)
+    parser.add_argument("--slot-event-bins", type=int, default=0)
+    parser.add_argument("--slot-event-loss-weight", type=float, default=0.0)
+    parser.add_argument("--slot-event-positive-weight", type=float, default=8.0)
+    parser.add_argument(
+        "--disable-slot-event-position-features",
+        action="store_true",
+        help="Disable normalized absolute-time features in the slot event head.",
+    )
+    parser.add_argument(
+        "--disable-slot-event-query-conditioning",
+        action="store_true",
+        help="Disable relative slot-position queries in the slot event head.",
+    )
+    parser.add_argument(
+        "--slot-event-detach-backbone",
+        action="store_true",
+        help="Train the slot head without propagating its loss into the shared backbone.",
+    )
     args = parser.parse_args()
 
     result = train_poc(
@@ -70,6 +88,12 @@ def main() -> int:
             focus_cv_radius_frames=args.focus_cv_radius_frames,
             focus_nucleus_radius_frames=args.focus_nucleus_radius_frames,
             focus_weight_max=args.focus_weight_max,
+            slot_event_bins=args.slot_event_bins,
+            slot_event_loss_weight=args.slot_event_loss_weight,
+            slot_event_positive_weight=args.slot_event_positive_weight,
+            slot_event_position_features=not args.disable_slot_event_position_features,
+            slot_event_query_conditioned=not args.disable_slot_event_query_conditioning,
+            slot_event_detach_backbone=args.slot_event_detach_backbone,
         )
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

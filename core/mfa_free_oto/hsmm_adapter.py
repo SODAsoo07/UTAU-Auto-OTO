@@ -86,9 +86,15 @@ def build_hsmm_states_for_slots(
                 state_id=_state_id(slot, "vowel"),
                 state_type="vowel",
                 min_duration_ms=max(18.0, min(52.0, vowel_mode * 0.40)),
-                max_duration_ms=max(80.0, min(420.0, vowel_mode * 2.8)),
+                max_duration_ms=max(80.0, min(900.0, vowel_mode * 3.4)),
                 mode_duration_ms=vowel_mode,
                 duration_sigma_ms=max(20.0, vowel_mode * 0.62),
+                # Held vowels routinely run far longer than the nominal mode.
+                # Penalising the over-length side symmetrically caused the vowel
+                # segment to be trimmed from the front, pushing the C->V boundary
+                # (the OTO offset anchor) late. Keep the over-length penalty weak
+                # so the vowel locks to its acoustic onset and only the tail moves.
+                over_duration_penalty_scale=0.12,
             )
         )
     return tuple(states)
@@ -178,22 +184,333 @@ def build_hsmm_frame_scores(
         else:
             base = consonant_score if state.state_type == "consonant" else vowel_score
         prior = _position_prior(times, expected_ms=(order + 0.5) * duration / float(order_count), sigma_ms=max(40.0, duration / float(order_count + 1)))
+        is_vowel = state.state_type == "vowel"
         event_prior = _track(state_interval_priors or {}, state.state_id, frame_count)
         start_prior = (
             _state_start_interval_track(times, vowel_start, state.mode_duration_ms)
             if bool(use_vowel_start_score) and state.state_type == "vowel"
             else np.zeros((frame_count,), dtype=np.float32)
         )
+
+        # The uniform-position prior biases each state toward its expected slot.
+        # For vowels that pull is harmful: it drags the segment toward the file
+        # centre and trims the acoustic onset, shifting the C->V boundary late.
+        # Suppress the positional pull on vowels (handing the freed weight back to
+        # the acoustic base score) so the vowel locks to its real onset -- but only
+        # when no stronger locating signal is present. When an explicit runtime
+        # event prior is supplied it should keep steering the segment, so leave the
+        # blend untouched there.
+        # TUNED: reduced position-prior pull (0.18→0.11 for vowels, 1.0→0.60 general)
+        # to curb timing dispersion caused by the uniform-position prior dragging
+        # segments away from their acoustic boundaries.
+        pos_w = 0.11 if (is_vowel and not np.any(event_prior)) else 0.60
+
+        def _blend(base_coef: float, prior_coef: float, *extra: tuple[float, np.ndarray]) -> np.ndarray:
+            scaled_prior = prior_coef * pos_w
+            effective_base = base_coef + (prior_coef - scaled_prior)
+            total = (effective_base * base) + (scaled_prior * prior)
+            for coef, track in extra:
+                total = total + (coef * track)
+            return np.clip(total, 0.0, 1.0)
+
         if np.any(event_prior):
             if np.any(start_prior):
-                scored = np.clip((0.50 * base) + (0.10 * prior) + (0.28 * event_prior) + (0.12 * start_prior), 0.0, 1.0)
+                scored = _blend(0.40, 0.06, (0.34, event_prior), (0.20, start_prior))
             else:
-                scored = np.clip((0.58 * base) + (0.12 * prior) + (0.30 * event_prior), 0.0, 1.0)
+                scored = _blend(0.52, 0.10, (0.38, event_prior))
         elif np.any(start_prior):
-            scored = np.clip((0.72 * base) + (0.12 * prior) + (0.16 * start_prior), 0.0, 1.0)
+            # Lean hard on the (trained) cv_boundary track so vowel onsets follow
+            # real acoustic boundaries instead of the duration/position prior; the
+            # HSMM ordering interpolates unsegmentable identical-vowel runs.
+            scored = _blend(0.56, 0.08, (0.36, start_prior))
         else:
-            scored = np.clip((0.86 * base) + (0.14 * prior), 0.0, 1.0)
+            scored = _blend(0.86, 0.14)
         out[state.state_id] = tuple(float(value) for value in scored)
+    return out
+
+
+def _find_ordered_nucleus_peaks(
+    times: np.ndarray,
+    scores: np.ndarray,
+    *,
+    count: int,
+    min_separation_ms: float,
+) -> list[tuple[float, float]]:
+    """Return up to ``count`` strong, well-separated nucleus peaks in time order.
+
+    Greedy by height with a minimum time separation so two sub-peaks inside one
+    vowel are not both selected. Returns an empty list unless at least ``count``
+    confident peaks are found, so callers can fall back to prior-free behaviour.
+    """
+    if times.size == 0 or scores.size != times.size or count <= 0:
+        return []
+    peak_value = float(np.max(scores))
+    if peak_value <= 0.0:
+        return []
+    threshold = max(0.22, peak_value * 0.45)
+    candidates: list[int] = []
+    for idx in range(scores.size):
+        value = float(scores[idx])
+        if value < threshold:
+            continue
+        if idx > 0 and scores[idx - 1] > value:
+            continue
+        if idx < scores.size - 1 and scores[idx + 1] > value:
+            continue
+        candidates.append(idx)
+    if len(candidates) < count:
+        return []
+    separation = max(1.0, float(min_separation_ms))
+    chosen: list[int] = []
+    # Greedy by height; ``chosen`` therefore ends up in descending-height order.
+    for idx in sorted(candidates, key=lambda i: -float(scores[i])):
+        if all(abs(float(times[idx]) - float(times[j])) >= separation for j in chosen):
+            chosen.append(idx)
+    if len(chosen) < count:
+        return []
+    strongest = chosen[:count]  # keep the ``count`` strongest separated peaks
+    strongest.sort(key=lambda i: float(times[i]))
+    return [(float(times[i]), float(scores[i])) for i in strongest]
+
+
+def _auto_vowel_nucleus_event_priors(
+    posterior: FramePosterior,
+    slots: Sequence[FilenameSlot],
+    *,
+    duration_ms: float,
+    existing_priors: Sequence[Mapping[str, object]] = (),
+) -> list[dict[str, object]]:
+    if not slots:
+        return []
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    frame_count = int(times.size)
+    if frame_count <= 0:
+        return []
+    nucleus = _first_track(
+        frame_count,
+        posterior.acoustic_scores,
+        posterior.event_scores,
+        keys=("nucleus_likelihood", "world_nucleus", "vowel_nucleus"),
+    )
+    if not np.any(nucleus):
+        return []
+    # Vowel slots already covered by a caller-supplied nucleus prior are left to
+    # that stronger evidence; only fill the rest.
+    covered: set[int] = set()
+    for event in existing_priors:
+        if str(event.get("label", "")) == "vowel_nucleus":
+            idx = _int_or_none(event.get("expected_phone_index"))
+            if idx is not None:
+                covered.add(int(idx))
+    vowel_slots = list(slots)
+    vowel_count = len(vowel_slots)
+    if vowel_count <= 0:
+        return []
+    nominal_ms = float(duration_ms) / float(vowel_count) if duration_ms > 0.0 else 0.0
+    # Separation only needs to merge sub-peaks inside a single vowel; keep it small
+    # enough that genuinely distinct (possibly short/uneven) vowels are not merged.
+    min_separation_ms = max(60.0, min(130.0, nominal_ms * 0.45))
+    peaks = _find_ordered_nucleus_peaks(
+        times, nucleus, count=vowel_count, min_separation_ms=min_separation_ms
+    )
+    if len(peaks) != vowel_count:
+        return []
+    priors: list[dict[str, object]] = []
+    for slot, (peak_ms, peak_height) in zip(vowel_slots, peaks):
+        if int(slot.vowel_phone_index) in covered:
+            continue
+        priors.append(
+            {
+                "label": "vowel_nucleus",
+                "expected_phone_index": int(slot.vowel_phone_index),
+                "selected_time_ms": float(peak_ms),
+                "score": float(max(0.0, min(1.0, peak_height))),
+                "source": "acoustic_nucleus_auto",
+            }
+        )
+    return priors
+
+
+_EVENT_SNAP_WINDOW_MS = 45.0
+_EVENT_SNAP_MIN_GAP_MS = 15.0
+_EVENT_SNAP_TRACK_KEYS = {
+    "cv_boundary": ("cv_boundary", "vowel_boundary_likelihood", "transition_likelihood"),
+    "vv_boundary": ("cv_boundary", "vowel_boundary_likelihood", "transition_likelihood"),
+    "vowel_nucleus": ("nucleus_likelihood", "world_nucleus", "vowel_nucleus"),
+    "phone_change": ("phone_change", "onset_strength", "sonorant_onset_likelihood"),
+}
+
+
+def _snap_events_to_posterior_tracks(
+    events: Sequence[Mapping[str, object]],
+    posterior: FramePosterior,
+    times: np.ndarray,
+    *,
+    window_ms: float = _EVENT_SNAP_WINDOW_MS,
+    min_confidence: float = 0.28,
+) -> tuple[dict[str, object], ...]:
+    frame_count = int(times.size)
+    if frame_count == 0 or not events:
+        return tuple(dict(event) for event in events)
+    track_cache: dict[str, np.ndarray] = {}
+
+    def _resolve_track(label: str) -> np.ndarray | None:
+        if label in track_cache:
+            return track_cache[label]
+        keys = _EVENT_SNAP_TRACK_KEYS.get(label)
+        track = (
+            _first_track(frame_count, posterior.event_scores, posterior.acoustic_scores, keys=keys)
+            if keys
+            else None
+        )
+        track_cache[label] = track if (track is not None and np.any(track)) else None
+        return track_cache[label]
+
+    ordered = sorted(
+        (dict(event) for event in events),
+        key=lambda event: float(event.get("selected_time_ms", 0.0) or 0.0),
+    )
+    prev_time = -1e9
+    for idx, event in enumerate(ordered):
+        label = str(event.get("label", ""))
+        track = _resolve_track(label)
+        cur_time = float(event.get("selected_time_ms", 0.0) or 0.0)
+        next_time = (
+            float(ordered[idx + 1].get("selected_time_ms", 0.0) or 0.0)
+            if idx + 1 < len(ordered)
+            else 1e9
+        )
+        lower = prev_time + _EVENT_SNAP_MIN_GAP_MS
+        upper = next_time - _EVENT_SNAP_MIN_GAP_MS
+        if track is not None and upper > lower:
+            lo = max(cur_time - window_ms, lower)
+            hi = min(cur_time + window_ms, upper)
+            mask = (times >= lo) & (times <= hi)
+            if np.any(mask):
+                window_idx = np.flatnonzero(mask)
+                peak_local = window_idx[int(np.argmax(track[window_idx]))]
+                if float(track[peak_local]) >= float(min_confidence):
+                    snapped = float(times[peak_local])
+                    if lower <= snapped <= upper:
+                        event["selected_time_ms"] = snapped
+                        event["frame_index"] = int(peak_local)
+                        cur_time = snapped
+        prev_time = cur_time
+    return tuple(ordered)
+
+
+def _voiced_end_ms(posterior: FramePosterior, times: np.ndarray, *, default: float) -> float:
+    frame_count = int(times.size)
+    if frame_count == 0:
+        return float(default)
+    silence = _track(posterior.class_probs, "silence", frame_count)
+    active = np.clip(1.0 - silence, 0.0, 1.0)
+    if not np.any(active > 0.5):
+        return float(default)
+    idx = np.flatnonzero(active > 0.5)
+    return float(times[int(idx[-1])])
+
+
+def _structured_vowel_onset_event_priors(
+    posterior: FramePosterior,
+    slots: Sequence[FilenameSlot],
+    *,
+    duration_ms: float,
+    existing_priors: Sequence[Mapping[str, object]] = (),
+) -> list[dict[str, object]]:
+    """Pin each vowel onset using the filename structure + the cv_boundary track.
+
+    The filename tells us which adjacent vowels are *identical and unseparated*
+    (no acoustic boundary exists, e.g. a continuous "a a") versus *distinct*
+    (a real C->V or V->V edge the trained cv_boundary head fires on). We expect
+    exactly ``1 + (#distinct boundaries)`` clean peaks; when that holds we assign
+    peaks to the distinct boundaries and evenly interpolate the identical runs.
+    This fixes VV-chain mismapping that duration priors alone smear.
+    """
+    if not slots:
+        return []
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    frame_count = int(times.size)
+    if frame_count == 0:
+        return []
+    track = _first_track(
+        frame_count, posterior.event_scores, posterior.acoustic_scores,
+        keys=("cv_boundary", "vowel_boundary_likelihood"),
+    )
+    if not np.any(track):
+        return []
+    # (#1) reinforce distinct-vowel sensitivity with a formant/spectral transition
+    # signal so a real boundary is not missed when the cv_boundary head is weak.
+    formant = _first_track(
+        frame_count, posterior.acoustic_scores,
+        keys=("world_transition", "spectral_shape_delta_likelihood", "transition_likelihood"),
+    )
+    if np.any(formant):
+        track = np.clip(np.maximum(track, 0.55 * formant), 0.0, 1.0)
+
+    interp = [False] * len(slots)
+    for k in range(1, len(slots)):
+        cur, prev = slots[k], slots[k - 1]
+        if (not cur.onset_phones) and (not prev.coda_phones) and str(cur.vowel_phone) == str(prev.vowel_phone):
+            interp[k] = True
+    distinct = sum(1 for k in range(1, len(slots)) if not interp[k])
+    expected_peaks = 1 + distinct
+    if expected_peaks < 1 or expected_peaks > len(slots):
+        return []
+    nominal = float(duration_ms) / float(max(1, len(slots))) if duration_ms > 0.0 else 0.0
+    separation = max(70.0, min(170.0, nominal * 0.5))
+    peaks = _find_ordered_nucleus_peaks(times, track, count=expected_peaks, min_separation_ms=separation)
+    if len(peaks) != expected_peaks:
+        return []
+    peak_times = [p[0] for p in peaks]
+
+    onset: list[float | None] = [None] * len(slots)
+    onset[0] = peak_times[0]
+    pi = 1
+    for k in range(1, len(slots)):
+        if interp[k]:
+            onset[k] = None
+        else:
+            onset[k] = peak_times[pi]
+            pi += 1
+    voiced_end = _voiced_end_ms(posterior, times, default=float(duration_ms))
+    k = 1
+    while k < len(slots):
+        if onset[k] is None:
+            j = k
+            while j < len(slots) and onset[j] is None:
+                j += 1
+            left = float(onset[k - 1])
+            right = float(onset[j]) if j < len(slots) and onset[j] is not None else float(voiced_end)
+            segments = j - (k - 1)
+            for idx in range(k, j):
+                frac = float(idx - (k - 1)) / float(max(1, segments))
+                onset[idx] = left + frac * (right - left)
+            k = j
+        else:
+            k += 1
+
+    covered: set[tuple[str, int]] = set()
+    for event in existing_priors:
+        label = str(event.get("label", ""))
+        if label in ("cv_boundary", "vv_boundary"):
+            idx = _int_or_none(event.get("expected_phone_index"))
+            if idx is not None:
+                covered.add((label, int(idx)))
+    out: list[dict[str, object]] = []
+    for k, slot in enumerate(slots):
+        if onset[k] is None:
+            continue
+        label = "cv_boundary" if slot.onset_phones else "vv_boundary"
+        if (label, int(slot.vowel_phone_index)) in covered:
+            continue
+        out.append({
+            "label": label,
+            "expected_phone_index": int(slot.vowel_phone_index),
+            "selected_time_ms": float(onset[k]),
+            "score": 0.9,
+            "source": "structured_onset",
+        })
     return out
 
 
@@ -214,10 +531,29 @@ def decode_filename_slots_with_hsmm(
     event_prior_items = tuple(dict(event or {}) for event in event_priors)
     times = [float(value) for value in posterior.times_ms]
     duration = _posterior_duration_ms(np.asarray(times, dtype=np.float32))
+    # Auto-pin each vowel to its acoustic nucleus peak. Phone-agnostic vowel
+    # scores + the duration prior otherwise collapse uneven/long vowels onto the
+    # nominal mode duration, placing the offset on the wrong syllable. Injected as
+    # vowel_nucleus event priors so the strong (0.30-weight) interval-prior path
+    # attracts each vowel segment to its real nucleus. Only fires when the nucleus
+    # track yields one cleanly separated peak per vowel; otherwise it is a no-op.
+    auto_onset_priors = _structured_vowel_onset_event_priors(
+        posterior, slots, duration_ms=duration, existing_priors=event_prior_items
+    )
+    if auto_onset_priors:
+        event_prior_items = (*event_prior_items, *auto_onset_priors)
+    auto_nucleus_priors = _auto_vowel_nucleus_event_priors(
+        posterior, slots, duration_ms=duration, existing_priors=event_prior_items
+    )
+    if auto_nucleus_priors:
+        event_prior_items = (*event_prior_items, *auto_nucleus_priors)
     korean_mode = _is_korean_language(language)
     coarse_enabled = korean_mode if use_coarse_to_refine is None else bool(use_coarse_to_refine)
     sonorant_hold_enabled = korean_mode if enable_sonorant_hold is None else bool(enable_sonorant_hold)
-    vowel_start_enabled = korean_mode if use_vowel_start_score is None else bool(use_vowel_start_score)
+    # Locking the vowel segment to its acoustic onset (rising CV/vowel-boundary
+    # edge) matters for every language, not just Korean — otherwise long held
+    # vowels drift the C->V boundary late. Default it on across the board.
+    vowel_start_enabled = True if use_vowel_start_score is None else bool(use_vowel_start_score)
     states = build_hsmm_states_for_slots(
         slots,
         duration_ms=duration,
@@ -237,16 +573,22 @@ def decode_filename_slots_with_hsmm(
         use_vowel_start_score=vowel_start_enabled,
     )
     decode_fn = decode_segmental_hsmm_coarse_to_refine if bool(coarse_enabled) else decode_segmental_hsmm
+    # The first state may need to skip a long lead-in (breath/silence before the
+    # first phone). A fixed small cap forces the first vowel into that silence and
+    # shifts the whole sequence early -> wrong pronunciation. Allow the leading gap
+    # up to the acoustic onset (where the recording stops being silent), bounded so
+    # it never skips real voiced content.
+    max_leading_gap = _resolve_max_leading_gap_ms(posterior, np.asarray(times, dtype=np.float32), duration, len(states))
     decode_kwargs = {
         "beam_width_per_state": beam_width_per_state,
         "timeout_ms": timeout_ms,
         "allow_leading_gap": True,
         "allow_trailing_gap": True,
         "leading_gap_penalty_per_ms": 0.00005,
-        "max_leading_gap_ms": _max_leading_gap_ms(duration, len(states)),
+        "max_leading_gap_ms": max_leading_gap,
         "trailing_gap_penalty_per_ms": 0.00002,
         "allow_internal_gaps": True,
-        "internal_gap_penalty_per_ms": 0.00006,
+        "internal_gap_penalty_per_ms": 0.0003,
         "max_internal_gap_ms": _max_internal_gap_ms(duration, len(states)),
     }
     if bool(coarse_enabled):
@@ -259,6 +601,16 @@ def decode_filename_slots_with_hsmm(
         )
     result = decode_fn(states, times, frame_scores, **decode_kwargs)
     events = hsmm_result_to_slot_events(result, slots) if result.ok else ()
+    if events:
+        # Decode-level refinement: snap each decoded event to the nearby peak of
+        # the posterior's own event track. The HSMM segmentation fixes ordering
+        # and structure, but its duration/position priors smear the exact boundary
+        # times; the acoustic event tracks localise them. Bounded window keeps the
+        # global order intact, and a confidence floor means weak/flat tracks (rule
+        # encoder) barely move while sharp tracks (trained model) snap hard.
+        events = _snap_events_to_posterior_tracks(
+            events, posterior, np.asarray(times, dtype=np.float32)
+        )
     diagnostics = build_hsmm_diagnostics(
         result,
         states,
@@ -290,6 +642,50 @@ def _max_leading_gap_ms(duration_ms: float, state_count: int) -> float:
         return 220.0
     nominal_state_ms = float(duration_ms) / float(max(1, state_count))
     return _clamp(nominal_state_ms * 0.95, 90.0, 260.0)
+
+
+def _acoustic_active_onset_ms(posterior: FramePosterior, times: np.ndarray) -> float:
+    """First time (ms) the recording stops being silent.
+
+    Uses the silence class (falling edge) with the active/voiced energy as a
+    fallback. Returns 0.0 when no clear silent lead-in is present.
+    """
+    frame_count = int(times.size)
+    if frame_count == 0:
+        return 0.0
+    silence = _track(posterior.class_probs, "silence", frame_count)
+    active = np.clip(1.0 - silence, 0.0, 1.0)
+    if not np.any(active > 0.5):
+        voicing = _first_track(
+            frame_count, posterior.acoustic_scores, keys=("voicing", "world_voicing")
+        )
+        vowel = _track(posterior.class_probs, "vowel", frame_count)
+        active = np.clip(np.maximum(voicing, vowel), 0.0, 1.0)
+        if not np.any(active > 0.5):
+            return 0.0
+    idx = int(np.argmax(active > 0.5))
+    return float(times[idx]) if idx < frame_count else 0.0
+
+
+def _resolve_max_leading_gap_ms(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    duration_ms: float,
+    state_count: int,
+) -> float:
+    base = _max_leading_gap_ms(duration_ms, state_count)
+    if state_count <= 2 or duration_ms <= 0.0:
+        return base
+    onset_ms = _acoustic_active_onset_ms(posterior, times)
+    if onset_ms <= 0.0:
+        return base
+    # Permit skipping the silent lead-in (plus a small margin) but never more than
+    # a safety ceiling, so the decoder cannot dump every state into a high-scoring
+    # tail and abandon the early voiced content.
+    # TUNED: ceiling 0.6→0.35, margin 120→60ms — tighter bounds reduce
+    # one-step syllable shift caused by excessive leading-gap allowance.
+    ceiling = max(base, 0.35 * float(duration_ms))
+    return float(min(ceiling, max(base, onset_ms + 60.0)))
 
 
 def build_hsmm_diagnostics(
@@ -497,6 +893,7 @@ def hsmm_result_to_slot_events(
     event_index = 0
     for slot in slots:
         onset_state = by_id.get(_state_id(slot, "onset"))
+        onset_hold_state = by_id.get(_state_id(slot, "onset_hold"))
         vowel_state = by_id.get(_state_id(slot, "vowel"))
         if onset_state is not None and slot.onset_phones:
             events.append(
@@ -512,15 +909,30 @@ def hsmm_result_to_slot_events(
             )
             event_index += 1
         if vowel_state is not None and slot.onset_phones:
+            # The C->V boundary is where the consonant adjacent to the vowel
+            # ends. The decoded consonant end is locked by the consonant track,
+            # whereas the vowel segment start can be pulled inward by the
+            # duration prior on long vowels. Prefer that consonant end (the hold
+            # sub-state when present, else the onset) so the offset anchor stays
+            # on the true onset rather than drifting late into the vowel.
+            cv_boundary_ms = vowel_state.start_ms
+            cv_boundary_frame = vowel_state.start_frame
+            preceding_consonant = onset_hold_state or onset_state
+            if (
+                preceding_consonant is not None
+                and preceding_consonant.end_ms <= vowel_state.start_ms
+            ):
+                cv_boundary_ms = preceding_consonant.end_ms
+                cv_boundary_frame = preceding_consonant.end_frame
             events.append(
                 _event(
                     label="cv_boundary",
-                    time_ms=vowel_state.start_ms,
+                    time_ms=cv_boundary_ms,
                     score=vowel_state.score,
                     expected_phone=slot.vowel_phone,
                     expected_phone_index=slot.vowel_phone_index,
                     slot_index=event_index,
-                    frame_index=vowel_state.start_frame,
+                    frame_index=cv_boundary_frame,
                 )
             )
             event_index += 1
@@ -637,7 +1049,7 @@ def _state_start_interval_track(
     boundary_scores: np.ndarray,
     mode_duration_ms: float,
     *,
-    top_k: int = 8,
+    top_k: int = 12,
 ) -> np.ndarray:
     if times.size == 0 or boundary_scores.size != times.size or not np.any(boundary_scores):
         return np.zeros_like(times, dtype=np.float32)
@@ -652,7 +1064,7 @@ def _state_start_interval_track(
         order = np.argsort(boundary_scores[indices])[-top_k:]
         indices = indices[order]
     duration = max(20.0, float(mode_duration_ms or 0.0))
-    sigma = max(18.0, duration * 0.36)
+    sigma = max(14.0, duration * 0.24)
     out = np.zeros_like(times, dtype=np.float32)
     for idx in indices:
         center = float(times[int(idx)]) + (0.50 * duration)
@@ -663,8 +1075,8 @@ def _state_start_interval_track(
 
 def _interval_prior_from_start(times: np.ndarray, start_ms: float, mode_duration_ms: float) -> np.ndarray:
     duration = max(20.0, float(mode_duration_ms or 0.0))
-    center = float(start_ms) + (0.50 * duration)
-    sigma = max(18.0, duration * 0.36)
+    center = float(start_ms) + (0.40 * duration)
+    sigma = max(16.0, duration * 0.28)
     return _position_prior(times, expected_ms=center, sigma_ms=sigma)
 
 

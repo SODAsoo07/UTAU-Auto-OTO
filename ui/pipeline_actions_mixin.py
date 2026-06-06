@@ -40,6 +40,7 @@ from core.mfa_runner import (
     find_mfa_executable,
     mfa_env_requires_python_downgrade,
 )
+from core.oto_file_utils import detect_oto_text_encoding, reencode_oto_file
 from core.oto_generator import generate_oto
 from core.pipeline_status import normalize_aligner_name
 from core.preflight_common import collect_runtime_preflight_issues
@@ -2871,11 +2872,29 @@ class PipelineActionsMixin:
         )
         enable_ml_correction = bool(auto_policy.get("enable_ml"))
         self._apply_advanced_tuning_envs()
+        boundary_model_path = (
+            self._apply_boundary_model_env() if hasattr(self, "_apply_boundary_model_env") else ""
+        )
+        self._append_log(
+            f"ℹ 경계 인코더: {'학습 모델 ' + os.path.basename(boundary_model_path) if boundary_model_path else '규칙 기반(world_v1)'}"
+        )
         self._append_log(
             f"[OTO-ML] auto policy: ml={'ON' if enable_ml_correction else 'OFF'}, "
             f"route={auto_policy.get('route')}, coupled={'ON' if auto_policy.get('has_coupled') else 'OFF'}, "
             f"hybrid={'ON' if auto_policy.get('hybrid_routing') else 'OFF'}"
         )
+
+        # 일본어: 베이스 OTO가 Shift-JIS(cp932)면 생성 결과도 같은 인코딩으로 보존한다.
+        preserve_out_encoding = ""
+        base_oto_for_encoding = "" if self.no_base_oto_var.get() else str(base_tpl_path or "").strip()
+        if lang == "japanese" and base_oto_for_encoding and os.path.isfile(base_oto_for_encoding):
+            try:
+                base_encoding = detect_oto_text_encoding(base_oto_for_encoding)
+            except Exception:
+                base_encoding = "utf-8"
+            if str(base_encoding or "").strip().lower() not in {"utf-8", "utf_8", "utf-8-sig", "utf_8_sig"}:
+                preserve_out_encoding = base_encoding
+                self._append_log(f"ℹ 베이스 OTO 인코딩 감지: {base_encoding} → 생성 OTO 인코딩 보존")
 
         for target in targets:
             prefix = f"[Batch {target.index + 1}/{target.total}] " if target.total > 1 else ""
@@ -3160,6 +3179,15 @@ class PipelineActionsMixin:
                         callback=_make_target_callback(0.90, 0.08),
                     )
                     self._cleanup_generated_output_artifacts(target_out_path, snapshot=cleanup_snapshot)
+                    if preserve_out_encoding:
+                        try:
+                            changed, used = reencode_oto_file(target_out_path, preserve_out_encoding)
+                            if changed:
+                                self._append_log(
+                                    f"{prefix}ℹ 생성 OTO 인코딩 보존: {os.path.basename(target_out_path)} → {used}"
+                                )
+                        except Exception as enc_exc:
+                            self._append_log(f"{prefix}⚠ OTO 인코딩 보존 실패({preserve_out_encoding}): {enc_exc}")
                     _set_target_progress(1.0)
                     self._append_log(f"{prefix}✅ 완료: {target_out_path} ({processed}/{total})")
                     ok = True

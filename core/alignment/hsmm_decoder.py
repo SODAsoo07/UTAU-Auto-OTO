@@ -17,6 +17,11 @@ class HSMMStateSpec:
     max_duration_ms: float
     mode_duration_ms: float = 0.0
     duration_sigma_ms: float = 40.0
+    # Scales the duration penalty applied when the selected segment is *longer*
+    # than ``mode_duration_ms``. Values < 1.0 make the duration prior asymmetric
+    # so that sustained segments (e.g. held vowels) are not trimmed from the
+    # front to match the nominal mode duration. 1.0 keeps the symmetric penalty.
+    over_duration_penalty_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -429,7 +434,11 @@ def _duration_score(spec: HSMMStateSpec, duration_ms: float) -> float:
         return 0.0
     sigma = max(1.0, float(spec.duration_sigma_ms or 40.0))
     z = (float(duration_ms) - mode) / sigma
-    return -0.5 * z * z
+    penalty = -0.5 * z * z
+    if float(duration_ms) > mode:
+        over_scale = max(0.0, float(getattr(spec, "over_duration_penalty_scale", 1.0)))
+        penalty *= over_scale
+    return penalty
 
 
 def _infer_frame_shift_ms(times: Sequence[float]) -> float:
