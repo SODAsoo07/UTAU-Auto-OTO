@@ -38,11 +38,41 @@ class AlignActionsMixin:
             self._set_status("WFL ready")
         else:
             self._append_log(f"⚠ WFL 미준비: {report.get('message', '')}")
+            if str(report.get("code", "")) == "ALIGN_MODEL_MISSING":
+                self._append_log("   ⬇ 'WFL 모델 받기' 버튼으로 사전훈련 모델을 자동 설치할 수 있습니다.")
             self._append_log(
                 "   환경변수 UTOA_WFL_PYTHON / UTOA_WFL_REPO / "
-                "UTOA_WFL_MODEL_DIR_<LANG> 를 설정하세요. 미준비 시 정렬은 HSMM OTO로 폴백합니다."
+                "UTOA_WFL_MODEL_DIR_<LANG> 로 직접 지정할 수도 있습니다. 미준비 시 정렬은 HSMM OTO로 폴백합니다."
             )
             self._set_status("WFL not ready (fallback: HSMM OTO)")
+
+    def _run_wfl_model_download(self):
+        """Download + install the pretrained WFL model for the current language
+        into <app-root>/models/wfl/<lang>. Runs in a worker thread."""
+        lang = self._get_language() if hasattr(self, "_get_language") else "japanese"
+        try:
+            from core.wfl_runner import download_wfl_model
+        except Exception as exc:
+            self._append_log(f"❌ WFL 모듈을 불러오지 못했습니다: {exc}")
+            return
+
+        def task():
+            self._set_running(True)
+            self._set_status(f"⏳ WFL 모델 다운로드 중... ({lang})")
+            try:
+                ok, msg = download_wfl_model(lang, callback=self._append_log)
+                if ok:
+                    self._append_log(f"✅ {msg}")
+                    self._set_status("✅ WFL 모델 설치 완료")
+                else:
+                    self._append_log(f"⚠ {msg}")
+                    self._set_status("⚪ WFL 모델 설치 미완료")
+            except Exception as e:
+                self._handle_error("WFL 모델 다운로드", e)
+            finally:
+                self._set_running(False)
+
+        self._run_in_thread(task)
 
     def _run_mfa(self):
         active_worker = getattr(self, "_active_worker_thread", None)

@@ -1655,6 +1655,7 @@ class LayoutMixin:
             ("mfa_repair_btn", current_engine == "mfa"),
             ("mfa_install_btn", current_engine == "mfa"),
             ("wfl_status_btn", current_engine == "wfl"),
+            ("wfl_model_btn", current_engine == "wfl"),
         ):
             _btn = getattr(self, _attr, None)
             if _btn is not None:
