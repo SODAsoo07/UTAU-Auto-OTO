@@ -76,35 +76,42 @@ def _env(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
 
 
+def _app_root() -> str:
+    # <root>/core/alignment/wfl_runner.py -> <root>
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _resolve_wfl_python() -> str:
+    """Python interpreter of an env with torch+transformers for WFL inference.
+    Configure with UTOA_WFL_PYTHON; otherwise the current interpreter is used."""
     override = _env("UTOA_WFL_PYTHON")
     if override and os.path.isfile(override):
         return override
-    # Known PoC env (torch + transformers + cuda). Override via UTOA_WFL_PYTHON.
-    candidates = [
-        os.path.join(os.path.expanduser("~"), "miniconda3", "envs", "soulxsinger", "python.exe"),
-        os.path.join(os.path.expanduser("~"), "miniconda3", "envs", "soulxsinger", "bin", "python"),
-    ]
-    for cand in candidates:
-        if os.path.isfile(cand):
-            return cand
     return sys.executable or ""
 
 
 def _resolve_wfl_repo() -> str:
+    """WFL-ASR checkout (contains infer.py). Configure with UTOA_WFL_REPO;
+    otherwise look for a bundled copy under the app root."""
     override = _env("UTOA_WFL_REPO")
     if override and os.path.isdir(override):
         return override
+    root = _app_root()
     candidates = [
-        os.path.join(os.path.expanduser("~"), "SODAsoo1", "Devs", "WFL_PoC", "WFL-ASR"),
+        os.path.join(root, "third_party", "WFL-ASR"),
+        os.path.join(root, "vendor", "WFL-ASR"),
+        os.path.join(root, "WFL-ASR"),
     ]
     for cand in candidates:
         if os.path.isfile(os.path.join(cand, "infer.py")):
             return cand
-    return override
+    return ""
 
 
 def _resolve_wfl_model_dir(language: str) -> str:
+    """Model dir (config.yaml, last.ckpt, phonemes.txt, ...). Configure with
+    UTOA_WFL_MODEL_DIR_<LANG> or UTOA_WFL_MODEL_DIR; otherwise look under the app
+    root at models/wfl/<language>."""
     lang = str(language or "").strip().lower()
     per_lang = _env(f"UTOA_WFL_MODEL_DIR_{lang.upper()}")
     if per_lang and os.path.isdir(per_lang):
@@ -112,12 +119,11 @@ def _resolve_wfl_model_dir(language: str) -> str:
     generic = _env("UTOA_WFL_MODEL_DIR")
     if generic and os.path.isdir(generic):
         return generic
-    poc_root = os.path.join(os.path.expanduser("~"), "SODAsoo1", "Devs", "WFL_PoC")
-    defaults = {
-        "japanese": os.path.join(poc_root, "model_jp", "japanese"),
-        "korean": os.path.join(poc_root, "model_ko", "korean"),
-    }
-    return defaults.get(lang, "")
+    if lang:
+        bundled = os.path.join(_app_root(), "models", "wfl", lang)
+        if os.path.isdir(bundled):
+            return bundled
+    return ""
 
 
 def _resolve_wfl_lang_id(language: str) -> int:
