@@ -76,6 +76,7 @@ plan/
 ml_workspace/
 ML_models/
 models_installed/
+models/wfl/
 
 # 7) Common binary/media artifacts
 *.wav

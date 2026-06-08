@@ -231,6 +231,17 @@ class TabBuildersMixin:
         )
         self.wfl_status_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
 
+        self.wfl_model_btn = ctk.CTkButton(
+            mfa_btn_row,
+            text=t("⬇ WFL 모델 받기"),
+            width=120,
+            fg_color="#FFA726",
+            hover_color="#FB8C00",
+            text_color="black",
+            command=self._run_wfl_model_download,
+        )
+        self.wfl_model_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
+
         ctk.CTkLabel(
             right_actions,
             text=t("순서대로 실행"),

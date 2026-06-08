@@ -29,13 +29,16 @@ Configuration (all optional; sensible PoC defaults):
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import wave
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
@@ -149,6 +152,169 @@ def _model_files(model_dir: str) -> Dict[str, str]:
         "ckpt": os.path.join(model_dir, "last.ckpt"),
         "phonemes": os.path.join(model_dir, "phonemes.txt"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Pretrained model download (Archivoice/WFL-ASR-model GitHub releases)
+# --------------------------------------------------------------------------- #
+_WFL_MODEL_REPO = "Archivoice/WFL-ASR-model"
+_WFL_MODEL_DEFAULT_TAG = "11_lang_models"
+# Map app language -> release asset basename (without .rar).
+_WFL_MODEL_ASSET = {
+    "japanese": "japanese",
+    "korean": "korean",
+    "english": "english",
+}
+
+
+def _wfl_models_install_root() -> str:
+    """Default bundled model location: <app-root>/models/wfl."""
+    override = _env("UTOA_WFL_MODEL_INSTALL_ROOT")
+    if override:
+        return override
+    return os.path.join(_app_root(), "models", "wfl")
+
+
+def _find_7zip() -> str:
+    override = _env("UTOA_7ZIP_PATH")
+    if override and os.path.isfile(override):
+        return override
+    for name in ("7z", "7za", "7zr"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for cand in (
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _rewrite_config_save_dir(config_path: str, model_dir: str) -> None:
+    """Point config.yaml's output.save_dir at the local model dir, so WFL's
+    infer.py finds phonemes.txt/langs.txt next to the checkpoint."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        new_dir = model_dir.replace("\\", "/")
+        patched, n = re.subn(
+            r"(?m)^(\s*save_dir\s*:).*$",
+            lambda m: f"{m.group(1)} {new_dir}",
+            text,
+        )
+        if n:
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(patched)
+    except Exception:
+        return
+
+
+def _resolve_model_asset_url(language: str, callback=None) -> Tuple[str, str]:
+    """Return (asset_download_url, asset_name) for the language, or ("","")."""
+    lang = str(language or "").strip().lower()
+    asset_base = _WFL_MODEL_ASSET.get(lang)
+    if not asset_base:
+        return "", ""
+    asset_name = f"{asset_base}.rar"
+    tag = _env("UTOA_WFL_MODEL_RELEASE_TAG") or _WFL_MODEL_DEFAULT_TAG
+
+    def _assets_from(api_url: str) -> list:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "utoa-wfl"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace")).get("assets", [])
+
+    # Preferred tag first, then scan all releases for the asset.
+    urls = [
+        f"https://api.github.com/repos/{_WFL_MODEL_REPO}/releases/tags/{tag}",
+    ]
+    for api_url in urls:
+        try:
+            for a in _assets_from(api_url):
+                if str(a.get("name", "")).lower() == asset_name:
+                    return str(a.get("browser_download_url", "")), asset_name
+        except Exception as exc:
+            _emit(callback, f"[WFL] release lookup failed ({tag}): {exc}")
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{_WFL_MODEL_REPO}/releases",
+            headers={"User-Agent": "utoa-wfl"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            releases = json.loads(resp.read().decode("utf-8", errors="replace"))
+        for rel in releases:
+            for a in rel.get("assets", []):
+                if str(a.get("name", "")).lower() == asset_name:
+                    return str(a.get("browser_download_url", "")), asset_name
+    except Exception as exc:
+        _emit(callback, f"[WFL] release listing failed: {exc}")
+    return "", asset_name
+
+
+def download_wfl_model(language: str, callback=None, force: bool = False) -> Tuple[bool, str]:
+    """Download + install the pretrained WFL model for `language` into
+    <app-root>/models/wfl/<lang> (the bundled default `_resolve_wfl_model_dir`
+    checks). Returns (ok, message). Requires 7-Zip/unrar for the .rar assets."""
+    lang = str(language or "").strip().lower()
+    if lang not in _WFL_MODEL_ASSET:
+        return False, f"WFL 사전훈련 모델이 제공되지 않는 언어입니다: {lang}"
+
+    # Already present?
+    existing = _resolve_wfl_model_dir(lang)
+    if existing and not force:
+        files = _model_files(existing)
+        if os.path.isfile(files["ckpt"]) and os.path.isfile(files["config"]):
+            return True, f"WFL 모델이 이미 설치되어 있습니다: {existing}"
+
+    seven_zip = _find_7zip()
+    if not seven_zip:
+        return False, (
+            "WFL 모델 자산(.rar) 추출에는 7-Zip이 필요합니다. 7-Zip을 설치하거나 "
+            "UTOA_7ZIP_PATH 환경변수로 경로를 지정해 주세요."
+        )
+
+    url, asset_name = _resolve_model_asset_url(lang, callback=callback)
+    if not url:
+        return False, f"릴리스에서 '{asset_name}' 자산을 찾지 못했습니다 ({_WFL_MODEL_REPO})."
+
+    install_root = _wfl_models_install_root()
+    os.makedirs(install_root, exist_ok=True)
+    target_dir = os.path.join(install_root, lang)
+
+    tmp_dir = tempfile.mkdtemp(prefix="utoa_wfl_dl_")
+    rar_path = os.path.join(tmp_dir, asset_name)
+    try:
+        _emit(callback, f"[WFL] 모델 다운로드 중: {asset_name} ...")
+        req = urllib.request.Request(url, headers={"User-Agent": "utoa-wfl"})
+        with urllib.request.urlopen(req, timeout=120) as resp, open(rar_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        size_mb = os.path.getsize(rar_path) / (1024 * 1024)
+        _emit(callback, f"[WFL] 다운로드 완료: {size_mb:.1f} MB. 압축 해제 중...")
+
+        if force and os.path.isdir(target_dir):
+            shutil.rmtree(target_dir, ignore_errors=True)
+        # Assets extract to a top-level "<lang>/" folder -> extract into root.
+        proc = subprocess.run(
+            [seven_zip, "x", rar_path, f"-o{install_root}", "-y"],
+            capture_output=True, text=False,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or b"").decode("utf-8", errors="replace")[-400:]
+            return False, f"압축 해제 실패(7-Zip code {proc.returncode}): {tail}"
+
+        files = _model_files(target_dir)
+        if not (os.path.isfile(files["ckpt"]) and os.path.isfile(files["config"]) and os.path.isfile(files["phonemes"])):
+            return False, f"압축 해제 후 모델 파일이 확인되지 않습니다: {target_dir}"
+
+        _rewrite_config_save_dir(files["config"], target_dir)
+        _emit(callback, f"[WFL] 모델 설치 완료: {target_dir}")
+        return True, f"WFL 모델 설치 완료: {target_dir}"
+    except Exception as exc:
+        return False, f"WFL 모델 다운로드 실패: {exc}"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -799,4 +965,5 @@ __all__ = [
     "check_wfl_ready",
     "run_wfl_align",
     "get_last_wfl_align_meta",
+    "download_wfl_model",
 ]
