@@ -9,6 +9,7 @@ OK = "OK"
 # A profile downgrade (e.g. accurate→fast) subtracts an additional 0.10.
 ALIGNER_QUALITY_TIER: Dict[str, float] = {
     "mfa": 1.0,
+    "wfl": 0.9,
     "sequence": 0.55,
     "hsmm_oto": 0.35,
     "none": 0.0,
@@ -82,6 +83,14 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
     if text in {"mfa", "montreal"}:
         return "mfa"
     if text in {
+        "wfl",
+        "wfl_asr",
+        "wfl-asr",
+        "wflasr",
+        "wfl asr",
+    }:
+        return "wfl"
+    if text in {
         "hsmm",
         "hsmm_oto",
         "hsmm-oto",
@@ -119,6 +128,12 @@ def normalize_aligner_name(value, default: str = "mfa") -> str:
         return "sequence"
     if "no-mfa" in text or "nomfa" in text:
         return "none"
+    if "wfl" in text:
+        return "wfl"
+    # Generic fallback for decorated MFA labels (e.g. "MFA (레거시)").
+    # Safe because the no-mfa/none forms are already resolved above.
+    if "mfa" in text and "no mfa" not in text:
+        return "mfa"
     if "hsmm" in text and "oto" in text:
         return "hsmm_oto"
     if "coarse" in text or "crnn" in text or "constrained" in text:
@@ -188,7 +203,9 @@ def classify_alignment_error(engine: str, message: str) -> str:
         return ALIGN_EXEC_MISSING
     if eng == "mfa" and "mfa executable" in lowered:
         return ALIGN_EXEC_MISSING
-    if eng == "sequence" and ("python-textgrid" in lowered or "textgrid import" in lowered):
+    if eng in {"sequence", "wfl"} and ("python-textgrid" in lowered or "textgrid import" in lowered):
+        return ALIGN_NOT_READY
+    if eng == "wfl" and ("python executable" in lowered or "wfl repo" in lowered or "wfl model" in lowered or "phonemes.txt" in lowered):
         return ALIGN_NOT_READY
     return ALIGN_RUN_FAILED
 

@@ -1343,7 +1343,7 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
-            "aligner_var": "HSMM OTO",
+            "aligner_var": "WFL",
             "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
@@ -3687,9 +3687,10 @@ class ConfigMixin:
                     "none": "HSMM OTO",
                     "sequence": "전용(시퀀스)",
                     "hsmm_oto": "HSMM OTO",
-                    "mfa": "MFA",
+                    "mfa": "MFA (레거시)",
+                    "wfl": "WFL",
                 }
-                self.aligner_var.set(aligner_label_map.get(saved_aligner, "HSMM OTO"))
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "WFL"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"

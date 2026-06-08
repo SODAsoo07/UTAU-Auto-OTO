@@ -409,7 +409,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=[HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"],
+            values=["WFL", HSMM_OTO_LABEL, "MFA (레거시)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -418,7 +418,7 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text=t("(기본은 HSMM OTO입니다. MFA는 선택한 경우에만 설치 여부를 확인합니다.)"),
+            text=t("(기본은 WFL입니다. WFL/MFA는 선택한 경우에만 환경·모델 준비 여부를 확인하며, 준비되지 않으면 자동 폴백합니다.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
@@ -1621,7 +1621,14 @@ class LayoutMixin:
             if hasattr(self, "developer_mode_enabled_var")
             else False
         )
-        options = [HSMM_OTO_LABEL, "MFA", "전용(시퀀스)"]
+        # WFL-ASR is the default/primary aligner. normalize_aligner_name("WFL")
+        # routes to the "wfl" engine; readiness (external torch env + pretrained
+        # model) is checked at run time and falls back if not configured.
+        # MFA is kept as a legacy option; the heuristic sequence aligner is moved
+        # behind developer mode now that WFL is the primary non-MFA engine.
+        options = ["WFL", HSMM_OTO_LABEL, "MFA (레거시)"]
+        if developer_enabled:
+            options = options + ["전용(시퀀스)"]
         lang = self._get_language()
         current = str(self.aligner_var.get() if hasattr(self, "aligner_var") else HSMM_OTO_LABEL).strip()
         fmt = normalize_auto_format_value(lang, self.auto_format_var.get()) if hasattr(self, "auto_format_var") else ""
@@ -1641,6 +1648,20 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
+        # Show engine-specific action buttons contextually: MFA diagnose/install
+        # only when MFA (legacy) is selected; WFL status only when WFL is selected.
+        current_engine = normalize_aligner_name(current, default="hsmm_oto")
+        for _attr, _show in (
+            ("mfa_repair_btn", current_engine == "mfa"),
+            ("mfa_install_btn", current_engine == "mfa"),
+            ("wfl_status_btn", current_engine == "wfl"),
+        ):
+            _btn = getattr(self, _attr, None)
+            if _btn is not None:
+                try:
+                    _btn.grid() if _show else _btn.grid_remove()
+                except Exception:
+                    pass
         use_hsmm_oto = current == HSMM_OTO_LABEL
         use_no_mfa = forced_no_mfa
         use_sequence = current == "전용(시퀀스)"
