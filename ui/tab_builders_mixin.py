@@ -217,6 +217,19 @@ class TabBuildersMixin:
             self.mfa_install_btn.configure(text=t("✅ 설치 완료"), state="disabled", fg_color="#388E3C")
         self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
 
+        # WFL-ASR (default engine) status/diagnostic button. Shown contextually:
+        # MFA buttons appear only when MFA is the selected aligner, this one only
+        # when WFL is selected (see _sync_aligner_ui).
+        self.wfl_status_btn = ctk.CTkButton(
+            mfa_btn_row,
+            text=t("🔍 WFL 상태 확인"),
+            width=120,
+            fg_color="#90CAF9",
+            hover_color="#64B5F6",
+            text_color="black",
+            command=self._run_wfl_status_check,
+        )
+        self.wfl_status_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
 
         ctk.CTkLabel(
             right_actions,
@@ -1574,20 +1587,6 @@ class TabBuildersMixin:
             "ja": ja_detail,
         }
 
-        aligner_frame = ctk.CTkFrame(
-            dev_container,
-            fg_color=PALETTE.panel_bg,
-            border_width=1,
-            border_color=PALETTE.panel_border,
-        )
-        aligner_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(
-            aligner_frame,
-            text=t("고급 정렬 엔진 옵션은 현재 제공하지 않습니다."),
-            text_color=PALETTE.neutral_text,
-            wraplength=740,
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=(10, 10))
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(
@@ -2844,20 +2843,6 @@ class TabBuildersMixin:
             "ja": ja_detail,
         }
 
-        aligner_frame = ctk.CTkFrame(
-            dev_container,
-            fg_color=PALETTE.panel_bg,
-            border_width=1,
-            border_color=PALETTE.panel_border,
-        )
-        aligner_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(
-            aligner_frame,
-            text=t("고급 정렬 엔진 옵션은 현재 제공하지 않습니다."),
-            text_color=PALETTE.neutral_text,
-            wraplength=740,
-            justify="left",
-        ).pack(anchor="w", padx=12, pady=(10, 10))
         dev_reset_row = ctk.CTkFrame(dev_container, fg_color="transparent")
         dev_reset_row.pack(fill="x", padx=10, pady=(8, 10))
         reset_btn = ctk.CTkButton(

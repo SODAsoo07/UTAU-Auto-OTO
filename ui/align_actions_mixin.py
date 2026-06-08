@@ -8,6 +8,42 @@ from ui.i18n import t
 
 
 class AlignActionsMixin:
+    def _run_wfl_status_check(self):
+        """Report whether the WFL-ASR engine (external torch env + pretrained
+        model) is configured/ready for the current language, and the resolved
+        paths.  Invoked from the 'WFL 상태 확인' button."""
+        try:
+            from core.wfl_runner import (
+                _resolve_wfl_model_dir,
+                _resolve_wfl_python,
+                _resolve_wfl_repo,
+                check_wfl_ready,
+            )
+        except Exception as exc:
+            self._append_log(f"❌ WFL 모듈을 불러오지 못했습니다: {exc}")
+            return
+
+        lang = self._get_language() if hasattr(self, "_get_language") else "japanese"
+        py = _resolve_wfl_python()
+        repo = _resolve_wfl_repo()
+        model = _resolve_wfl_model_dir(lang)
+        self._append_log("ℹ WFL 상태 확인")
+        self._append_log(f"   python : {py or '(미설정)'}")
+        self._append_log(f"   repo   : {repo or '(미설정)'}")
+        self._append_log(f"   model  : {model or '(미설정)'}  [{lang}]")
+        report = check_wfl_ready(language=lang, wav_folder="")
+        ready = bool(report.get("ready", False))
+        if ready:
+            self._append_log("✅ WFL 준비 완료. 정렬에 사용할 수 있습니다.")
+            self._set_status("WFL ready")
+        else:
+            self._append_log(f"⚠ WFL 미준비: {report.get('message', '')}")
+            self._append_log(
+                "   환경변수 UTOA_WFL_PYTHON / UTOA_WFL_REPO / "
+                "UTOA_WFL_MODEL_DIR_<LANG> 를 설정하세요. 미준비 시 정렬은 HSMM OTO로 폴백합니다."
+            )
+            self._set_status("WFL not ready (fallback: HSMM OTO)")
+
     def _run_mfa(self):
         active_worker = getattr(self, "_active_worker_thread", None)
         if bool(getattr(self, "is_running", False)) and active_worker is not None and active_worker.is_alive():
@@ -142,10 +178,14 @@ class AlignActionsMixin:
                             return
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
+                elif primary_engine == "wfl":
+                    self._append_log("ℹ WFL-ASR 엔진 선택: 준비되지 않으면 HSMM OTO로 자동 폴백합니다.")
                 if primary_engine == "mfa":
                     self._append_log(f"MFA profile: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("Alignment engine: Dedicated Sequence")
+                elif primary_engine == "wfl":
+                    self._append_log("Alignment engine: WFL-ASR")
                 else:
                     self._append_log("Alignment engine: none (MFA bypass)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
@@ -162,7 +202,7 @@ class AlignActionsMixin:
                     dict_path = os.path.join(target_wav_dir, dict_filename)
                     output_dir = os.path.join(target_wav_dir, "textgrids")
                     if hasattr(self, "_validate_alignment_input_files"):
-                        needs_lab_dict = primary_engine == "mfa"
+                        needs_lab_dict = primary_engine in ("mfa", "wfl")
                         if needs_lab_dict and (not self._validate_alignment_input_files(target_wav_dir, dict_path)):
                             failed_count += 1
                             continue
@@ -173,7 +213,7 @@ class AlignActionsMixin:
                         dictionary_path=dict_path,
                         output_folder=output_dir,
                         primary_aligner=primary_engine,
-                        fallback_aligner="",
+                        fallback_aligner=("hsmm_oto" if primary_engine == "wfl" else ""),
                         mfa_path=self.mfa_path or "",
                         mfa_align_profile=mfa_profile,
                         format_hint=selected_format,

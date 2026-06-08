@@ -5,6 +5,7 @@ from typing import Dict, List
 
 from core.mfa_runner import check_mfa_ready, run_mfa_align
 from core.sequence_aligner import check_sequence_aligner_ready, get_last_sequence_align_meta, run_sequence_align
+from core.wfl_runner import check_wfl_ready, get_last_wfl_align_meta, run_wfl_align
 from core.pipeline_status import (
     ALIGN_EXEC_MISSING,
     ALIGN_OUTPUT_EMPTY,
@@ -257,6 +258,72 @@ def run_alignment_with_fallback(
             _emit(callback, f"[Align] failed engine=sequence code={code} message={err}")
             continue
 
+        if engine == "wfl":
+            ready = check_wfl_ready(
+                language=lang,
+                wav_folder=wav_folder,
+                callback=callback,
+            )
+            ready["engine"] = "wfl"
+            ready["attempt_index"] = len(attempts) + 1
+            attempts.append(dict(ready))
+            if str(ready.get("code", OK)).upper() != OK:
+                _emit(
+                    callback,
+                    f"[Align] not ready engine=wfl code={ready.get('code')} message={ready.get('message', '')}",
+                )
+                last_err = str(ready.get("message", "") or "wfl aligner not ready")
+                last_code = str(ready.get("code", ALIGN_RUN_FAILED) or ALIGN_RUN_FAILED)
+                continue
+
+            run_attempt_count += 1
+            _emit(callback, "[Align] start engine=wfl attempt=1/1")
+            ok, err = run_wfl_align(
+                "",
+                wav_folder,
+                dictionary_path,
+                output_folder,
+                language=lang,
+                format_hint=format_hint,
+                callback=callback,
+            )
+            wfl_meta = get_last_wfl_align_meta()
+            wfl_confidence = float(wfl_meta.get("confidence", 1.0) or 1.0)
+            wfl_warnings = list(wfl_meta.get("warnings") or [])
+            wfl_fallback_hint = str(wfl_meta.get("fallback_hint", "") or "")
+            if ok and not has_textgrid_files(output_folder):
+                ok = False
+                err = "TextGrid output missing after alignment."
+                code = ALIGN_OUTPUT_EMPTY
+            else:
+                code = OK if ok else classify_alignment_error("wfl", err)
+
+            attempts.append(
+                make_runtime_report(
+                    "align",
+                    code,
+                    err or ("alignment complete" if ok else ""),
+                    engine="wfl",
+                    attempt_index=len(attempts) + 1,
+                    ready=True,
+                    ok=bool(ok),
+                    confidence=wfl_confidence,
+                    warnings=wfl_warnings,
+                    fallback_hint=wfl_fallback_hint,
+                )
+            )
+            if ok:
+                used_engine = "wfl"
+                used_confidence = wfl_confidence
+                used_warnings = wfl_warnings
+                used_fallback_hint = wfl_fallback_hint
+                break
+
+            last_err = str(err or "")
+            last_code = str(code or ALIGN_RUN_FAILED)
+            _emit(callback, f"[Align] failed engine=wfl code={code} message={err}")
+            continue
+
         # default: MFA
         ready = check_mfa_ready(language=lang, mfa_path=mfa_path)
         ready["engine"] = "mfa"
@@ -372,7 +439,7 @@ def run_alignment_with_fallback(
         # TICKET-001: Compute and attach a quality score so downstream stages
         # (OTO generation, UI) can calibrate based on alignment confidence.
         alignment_quality_score = compute_alignment_quality_score(used_engine, fallback_notes)
-        if used_engine != "sequence":
+        if used_engine not in {"sequence", "wfl"}:
             used_confidence = float(alignment_quality_score)
         if fallback_used and used_fallback_hint == "":
             used_fallback_hint = "mfa"

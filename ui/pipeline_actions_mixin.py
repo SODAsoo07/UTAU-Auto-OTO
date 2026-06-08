@@ -3059,11 +3059,15 @@ class PipelineActionsMixin:
                         )
                     _set_target_progress(0.36)
 
-                    primary_engine = normalize_aligner_name(aligner_engine, default="mfa")
+                    primary_engine = normalize_aligner_name(aligner_engine, default="wfl")
                     if primary_engine == "mfa":
                         if not self._ensure_mfa_ready_for_language(lang):
                             errors = ["MFA 설치/모델 준비 실패"]
                         elif not self._validate_alignment_input_files(target_wav_dir, dict_path):
+                            errors = ["정렬 입력 파일 점검 실패"]
+                    elif primary_engine == "wfl":
+                        # WFL has no MFA-readiness gate; falls back to HSMM OTO if unready.
+                        if not self._validate_alignment_input_files(target_wav_dir, dict_path):
                             errors = ["정렬 입력 파일 점검 실패"]
                     if not errors:
                         self._set_status(f"{prefix}정렬 실행 중...")
@@ -3073,7 +3077,7 @@ class PipelineActionsMixin:
                             dictionary_path=dict_path,
                             output_folder=textgrid_dir,
                             primary_aligner=primary_engine,
-                            fallback_aligner="",
+                            fallback_aligner=("hsmm_oto" if primary_engine == "wfl" else ""),
                             mfa_path=self.mfa_path or "",
                             mfa_align_profile=(
                                 self._get_mfa_align_profile_code()
@@ -3742,6 +3746,13 @@ class PipelineActionsMixin:
                     self._set_status("3/5 - 정렬 건너뛰기(no-MFA)")
                 elif primary_engine == "sequence":
                     self._set_status("3/5 - 전용 시퀀스 정렬 준비 중...")
+                elif primary_engine == "wfl":
+                    # WFL runs in its own external env; no MFA readiness gate.
+                    # Falls back to HSMM OTO when WFL is not ready/configured.
+                    self._set_status("3/5 - WFL-ASR 정렬 준비 중...")
+                    fallback_engine = "hsmm_oto"
+                    if not self._validate_alignment_input_files(wav_dir, dict_path):
+                        return
                 else:
                     self._set_status("3/5 - MFA 정렬 준비 중...")
                     if not self._ensure_mfa_ready_for_language(lang):
@@ -3759,6 +3770,8 @@ class PipelineActionsMixin:
                     self._append_log(f"ℹ MFA 정렬 프로필: {mfa_profile}")
                 elif primary_engine == "sequence":
                     self._append_log("ℹ 정렬 엔진: 전용 시퀀스 baseline")
+                elif primary_engine == "wfl":
+                    self._append_log("ℹ 정렬 엔진: WFL-ASR (미준비 시 HSMM OTO 폴백)")
                 else:
                     self._append_log("ℹ 정렬 엔진: none (MFA 비사용)")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
