@@ -1463,6 +1463,18 @@ def _hsmm_event_sequence_matches_expected(
                 hsmm_cursor = idx + 1
                 break
         if matched is None:
+            # implicit_cv boundaries are interpolated soft anchors that the expected
+            # sequence can over-produce (e.g. a VC targeting a moraic-n emits a
+            # cv_boundary at the *next* phone, which for JA moraic-n lands on the
+            # following onset consonant the HSMM never anchors). Once at least one
+            # primary anchor has matched, skipping such an unmatched interior
+            # implicit_cv keeps a structurally correct decode from falling back to the
+            # (often sparser) runtime events. Primary anchors (cv/vc/cv_head
+            # phone_change + real cv_boundary) are still required in order, and an
+            # implicit_cv that is the only/leading anchor still rejects, so a genuine
+            # one-syllable shift or a structureless decode is still caught.
+            if str(expected_key[2]).strip().lower() == "implicit_cv" and hsmm_items:
+                continue
             return False
         previous_vc_used_vowel_boundary = (
             str(expected_key[2]).strip().lower() in {"vc", "cv_head"}
