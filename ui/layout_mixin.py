@@ -20,6 +20,8 @@ from ui.i18n import t
 EN_CVVC_UI_ENABLED = False
 NO_MFA_REMAP_LABEL = "베이스 OTO 재매핑 + 보정"
 HSMM_OTO_LABEL = "HSMM OTO"
+TAB_ORDER = ("파이프라인", "고급 설정", "파라미터 조정", "로그", "상세 로그", "크레딧")
+DEVELOPER_ONLY_TABS = frozenset({"파라미터 조정", "상세 로그"})
 
 
 class LayoutMixin:
@@ -36,6 +38,7 @@ class LayoutMixin:
         self._tab_build_pending = set()
         if not hasattr(self, "auto_format_var"):
             self.auto_format_var = ctk.StringVar(value="자동 감지 (권장)")
+        self._ensure_param_vars()
 
         main_body = tk.PanedWindow(
             self,
@@ -630,7 +633,7 @@ class LayoutMixin:
         tab_header.pack(fill="x", padx=0, pady=(0, 4))
         self.dev_mode_btn = ctk.CTkButton(
             tab_header,
-            text=t("개발자 설정 OFF"),
+            text=t("고급 보기"),
             width=110,
             height=24,
             corner_radius=6,
@@ -674,8 +677,9 @@ class LayoutMixin:
             "크레딧": self._build_credits_tab,
         }
         self._built_tabs = set()
-        # Keep all tab headers visible from startup, but build content lazily.
-        for tab_name in self._lazy_tab_builders.keys():
+        for tab_name in TAB_ORDER:
+            if tab_name not in self._lazy_tab_builders or not self._tab_allowed_by_mode(tab_name):
+                continue
             try:
                 self._get_or_add_tab(tab_name)
             except Exception:
@@ -684,8 +688,8 @@ class LayoutMixin:
             self._ensure_tab_built(tab_name)
         self.tabview.set("파이프라인")
         self._on_tabview_change()
-        self._schedule_lazy_tab_prewarm()
         self._sync_developer_mode_ui()
+        self._schedule_lazy_tab_prewarm()
 
         bottom = ctk.CTkFrame(self, fg_color=PALETTE.panel_bg)
         bottom.pack(side="bottom", fill="x", padx=15, pady=(5, 15))
@@ -845,9 +849,71 @@ class LayoutMixin:
         if current:
             self._request_tab_build(current)
 
+    def _developer_mode_enabled(self) -> bool:
+        if not hasattr(self, "developer_mode_enabled_var"):
+            return False
+        try:
+            return bool(self.developer_mode_enabled_var.get())
+        except Exception:
+            return False
+
+    def _tab_allowed_by_mode(self, tab_name: str) -> bool:
+        name = str(tab_name or "").strip()
+        return name not in DEVELOPER_ONLY_TABS or self._developer_mode_enabled()
+
+    def _sync_secondary_tab_visibility(self, enabled: bool) -> None:
+        tabview = getattr(self, "tabview", None)
+        if tabview is None:
+            return
+        try:
+            visible = set(getattr(tabview, "_tab_dict", {}).keys())
+        except Exception:
+            return
+
+        if enabled:
+            for tab_name in TAB_ORDER:
+                if tab_name not in DEVELOPER_ONLY_TABS or tab_name in visible:
+                    continue
+                target_index = sum(1 for prior in TAB_ORDER[: TAB_ORDER.index(tab_name)] if prior in visible)
+                try:
+                    tabview.insert(target_index, tab_name)
+                    visible.add(tab_name)
+                except Exception:
+                    continue
+            return
+
+        try:
+            current = str(tabview.get() or "").strip()
+        except Exception:
+            current = ""
+        if current in DEVELOPER_ONLY_TABS:
+            try:
+                tabview.set("파이프라인")
+            except Exception:
+                pass
+
+        built_tabs = getattr(self, "_built_tabs", None)
+        pending = getattr(self, "_tab_build_pending", None)
+        queue = list(getattr(self, "_lazy_prewarm_queue", []) or [])
+        for tab_name in DEVELOPER_ONLY_TABS:
+            if tab_name not in visible:
+                continue
+            try:
+                tabview.delete(tab_name)
+            except Exception:
+                continue
+            if isinstance(built_tabs, set):
+                built_tabs.discard(tab_name)
+            if isinstance(pending, set):
+                pending.discard(tab_name)
+            queue = [name for name in queue if name != tab_name]
+            if tab_name == "상세 로그":
+                self.detail_log_text = None
+        self._lazy_prewarm_queue = queue
+
     def _request_tab_build(self, tab_name):
         name = str(tab_name or "").strip()
-        if not name:
+        if not name or not self._tab_allowed_by_mode(name):
             return
         if name in (getattr(self, "_built_tabs", set()) or set()):
             return
@@ -875,7 +941,7 @@ class LayoutMixin:
 
     def _ensure_tab_built(self, tab_name):
         name = str(tab_name or "").strip()
-        if not name:
+        if not name or not self._tab_allowed_by_mode(name):
             return
         built_tabs = getattr(self, "_built_tabs", None)
         if not isinstance(built_tabs, set):
@@ -916,9 +982,13 @@ class LayoutMixin:
         builders = getattr(self, "_lazy_tab_builders", None) or {}
         built_tabs = getattr(self, "_built_tabs", None) or set()
         preferred_order = ("로그", "고급 설정", "파라미터 조정", "상세 로그", "크레딧", "파이프라인")
-        queue = [name for name in preferred_order if name in builders and name not in built_tabs]
+        queue = [
+            name
+            for name in preferred_order
+            if name in builders and name not in built_tabs and self._tab_allowed_by_mode(name)
+        ]
         for name in builders.keys():
-            if name not in built_tabs and name not in queue:
+            if name not in built_tabs and name not in queue and self._tab_allowed_by_mode(name):
                 queue.append(name)
         self._lazy_prewarm_queue = queue
         if not queue:
@@ -1919,13 +1989,14 @@ class LayoutMixin:
         self._save_config()
 
     def _sync_developer_mode_ui(self):
-        enabled = bool(self.developer_mode_enabled_var.get()) if hasattr(self, "developer_mode_enabled_var") else False
+        enabled = self._developer_mode_enabled()
         if hasattr(self, "dev_mode_btn"):
             self.dev_mode_btn.configure(
-                text=t("개발자 설정 ON") if enabled else "개발자 설정 OFF",
+                text=t("기본 보기") if enabled else t("고급 보기"),
                 fg_color="#7E91AD" if enabled else "#C2CFDF",
                 text_color=PALETTE.primary_button_text if enabled else "#2A3A50",
             )
+        self._sync_secondary_tab_visibility(enabled)
         if hasattr(self, "advanced_developer_frame") and self.advanced_developer_frame is not None:
             if enabled:
                 try:

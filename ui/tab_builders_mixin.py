@@ -23,6 +23,40 @@ from ui.ui_layout_defs import (
 from ui.i18n import t
 
 
+PARAM_GROUPS = (
+    (
+        "기본 VC 파라미터",
+        (
+            ("VC_CONSONANT_RATIO", "VC 자음 구간 비율", 0.1, 1.0, 0.05),
+            ("VC_VOWEL_START", "VC 모음 시작 비율", 0.1, 1.0, 0.05),
+            ("VC_PRE_OFFSET", "VC 선행발음 오프셋 (ms)", 0, 50, 1),
+            ("VC_OVL_RATIO", "VC 오버랩 비율", 0.1, 1.0, 0.05),
+        ),
+    ),
+    (
+        "기본 CV 파라미터",
+        (
+            ("CV_PRE_RATIO", "CV 선행발음 비율", 0.1, 1.0, 0.05),
+            ("CV_OVL_RATIO", "CV 오버랩 비율", 0.1, 1.0, 0.05),
+        ),
+    ),
+    (
+        "이중모음 CV 파라미터",
+        (
+            ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV 선행발음 비율", 0.1, 1.0, 0.05),
+            ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 자음 비율", 0.1, 1.0, 0.05),
+        ),
+    ),
+    (
+        "이중모음 VC 파라미터",
+        (
+            ("DIPHTHONG_VC_VOWEL_START", "이중모음 VC 모음 시작", 0.1, 1.0, 0.05),
+            ("DIPHTHONG_VC_CONSONANT", "이중모음 VC 자음 비율", 0.1, 1.0, 0.05),
+        ),
+    ),
+)
+
+
 def _style_blue_menu(widget):
     widget.configure(
         fg_color=PALETTE.menu_bg,
@@ -44,6 +78,16 @@ def _style_primary_button(widget):
 
 
 class TabBuildersMixin:
+    def _ensure_param_vars(self) -> None:
+        existing = getattr(self, "param_vars", None)
+        if not isinstance(existing, dict):
+            existing = {}
+            self.param_vars = existing
+        for _group_name, params in PARAM_GROUPS:
+            for key, _label, _min_val, _max_val, _step in params:
+                if key not in existing:
+                    existing[key] = ctk.DoubleVar(value=DEFAULT_PARAMS.get(key, 0.5))
+
     def _get_or_add_tab(self, tab_name: str):
         try:
             return self.tabview.tab(tab_name)
@@ -373,50 +417,17 @@ class TabBuildersMixin:
         summary.pack(fill="x", padx=10, pady=(8, 8))
         self._bind_wraplength_to_container(scroll, [summary], padding=40, min_wrap=280)
 
-        self.param_vars = {}
-        param_groups = [
-            (
-                "기본 VC 파라미터",
-                [
-                    ("VC_CONSONANT_RATIO", "VC 자음 구간 비율", 0.1, 1.0, 0.05),
-                    ("VC_VOWEL_START", "VC 모음 시작 비율", 0.1, 1.0, 0.05),
-                    ("VC_PRE_OFFSET", "VC 선행발음 오프셋 (ms)", 0, 50, 1),
-                    ("VC_OVL_RATIO", "VC 오버랩 비율", 0.1, 1.0, 0.05),
-                ],
-            ),
-            (
-                "기본 CV 파라미터",
-                [
-                    ("CV_PRE_RATIO", "CV 선행발음 비율", 0.1, 1.0, 0.05),
-                    ("CV_OVL_RATIO", "CV 오버랩 비율", 0.1, 1.0, 0.05),
-                ],
-            ),
-            (
-                "이중모음 CV 파라미터",
-                [
-                    ("DIPHTHONG_CV_PRE_RATIO", "이중모음 CV 선행발음 비율", 0.1, 1.0, 0.05),
-                    ("DIPHTHONG_CV_CONSONANT_RATIO", "이중모음 CV 자음 비율", 0.1, 1.0, 0.05),
-                ],
-            ),
-            (
-                "이중모음 VC 파라미터",
-                [
-                    ("DIPHTHONG_VC_VOWEL_START", "이중모음 VC 모음 시작", 0.1, 1.0, 0.05),
-                    ("DIPHTHONG_VC_CONSONANT", "이중모음 VC 자음 비율", 0.1, 1.0, 0.05),
-                ],
-            ),
-        ]
+        self._ensure_param_vars()
 
-        for group_name, params in param_groups:
+        for group_name, params in PARAM_GROUPS:
             ctk.CTkLabel(scroll, text=group_name, font=("", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 5))
             for key, label, min_val, max_val, step in params:
                 row = ctk.CTkFrame(scroll, fg_color="transparent")
                 row.pack(fill="x", padx=15, pady=2)
-                default = DEFAULT_PARAMS.get(key, 0.5)
-                var = ctk.DoubleVar(value=default)
-                self.param_vars[key] = var
+                var = self.param_vars[key]
+                current = float(var.get())
                 ctk.CTkLabel(row, text=label, width=250, anchor="w").pack(side="left")
-                val_label = ctk.CTkLabel(row, text=f"{default:.2f}", width=50)
+                val_label = ctk.CTkLabel(row, text=f"{current:.2f}", width=50)
                 val_label.pack(side="right", padx=(5, 0))
                 slider = ctk.CTkSlider(
                     row,
