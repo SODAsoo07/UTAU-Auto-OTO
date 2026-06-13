@@ -31,6 +31,17 @@ KOREAN_VCV_BOOTSTRAP_PROFILE = {
     "vcv": (300.0, 220.0, 150.0),
     "vv": (360.0, 260.0, 145.0),
 }
+# Per-role bootstrap profiles for CVVC, derived from surveyed gold OTOs (Dabi,
+# SODA etc.). Tuple: (pre_target_ms, ovl_gap_ms, cons_gap_ms).
+# These make the offset/overlap/consonant match the conventions OTO editors expect
+# even before any per-row anchor shift, so non-mismapped rows are immediately usable.
+JAPANESE_CVVC_BOOTSTRAP_PROFILE: dict[str, tuple[float, float, float]] = {
+    "cv_head": (30.0, 30.0, 25.0),     # gold median pre=27, cons=50
+    "cv": (60.0, 35.0, 90.0),          # gold median pre=54, cons=147
+    "v": (60.0, 35.0, 90.0),
+    "vv": (60.0, 35.0, 90.0),
+    "vc": (180.0, 130.0, 50.0),        # gold median pre=200, cons=239
+}
 CVVC_CV_PRE_TARGET_MS = 150.0
 CVVC_CV_PRE_MAX_MS = 180.0
 CVVC_VC_CONTEXT_PRE_MAX_MS = 170.0
@@ -9740,6 +9751,8 @@ def _bootstrap_role_profile(config: OtoAdapterConfig, alias_type: str) -> tuple[
             return JAPANESE_VCV_BOOTSTRAP_PROFILE[role]
         if language == "korean" and role in KOREAN_VCV_BOOTSTRAP_PROFILE:
             return KOREAN_VCV_BOOTSTRAP_PROFILE[role]
+    if fmt == "cvvc" and language == "japanese" and role in JAPANESE_CVVC_BOOTSTRAP_PROFILE:
+        return JAPANESE_CVVC_BOOTSTRAP_PROFILE[role]
     return (
         float(config.pre_target_ms),
         float(config.ovl_gap_ms),
@@ -13539,12 +13552,23 @@ def _repair_cvvc_pure_vowel_sequence_segment(
         return
     if _alias_type_for_row(rows[start].alias, config.alias_type) != "cv_head":
         return
-    terminal = rows[end - 1]
-    if not _is_terminal_silence_alias(terminal.alias):
+    terminal_indices = [
+        index
+        for index in range(start + 1, end)
+        if _is_terminal_silence_alias(rows[index].alias)
+        and "japanese_cvvc_terminal_silence_vowel_end_anchor" in rows[index].applied_rules
+    ]
+    if len(terminal_indices) != 1:
         return
+    terminal_index = terminal_indices[0]
+    terminal = rows[terminal_index]
     if "japanese_cvvc_terminal_silence_vowel_end_anchor" not in terminal.applied_rules:
         return
-    middle_indices = list(range(start + 1, end - 1))
+    middle_indices = [
+        index
+        for index in range(start + 1, end)
+        if index != terminal_index
+    ]
     if len(middle_indices) < 2:
         return
     if any(not _is_cvvc_pure_vowel_sequence_middle_row(rows[index], config) for index in middle_indices):
@@ -13579,7 +13603,16 @@ def _repair_cvvc_pure_vowel_sequence_segment(
     )
     anchor_aligned = anchor_offsets is not None
     preserve_head_offset = False
-    if anchor_offsets is not None:
+    complete_target_grid = (
+        len(middle_indices) >= int(JAPANESE_CVVC_PURE_VOWEL_SEQUENCE_TERMINAL_CADENCE_MIN_MIDDLE_ROWS)
+        and _cvvc_pure_vowel_sequence_targets_cover_grid(rows, middle_indices)
+    )
+    if complete_target_grid:
+        candidate_offsets = terminal_cadence_offsets
+        terminal_alias = "target_index_terminal_cadence"
+        anchor_aligned = False
+        preserve_head_offset = True
+    elif anchor_offsets is not None:
         if _cvvc_pure_vowel_sequence_prefers_terminal_cadence(
             anchor_offsets,
             terminal_cadence_offsets,
@@ -13609,7 +13642,12 @@ def _repair_cvvc_pure_vowel_sequence_segment(
         terminal_alias = "terminal_cadence"
         preserve_head_offset = True
 
-    first_vv_offset = candidate_offsets[0]
+    candidate_offsets = _cvvc_pure_vowel_sequence_offsets_by_target(
+        rows,
+        middle_indices,
+        candidate_offsets,
+    )
+    first_vv_offset = min(candidate_offsets)
     head_offset = max(0.0, first_vv_offset - float(JAPANESE_CVVC_PURE_VOWEL_SEQUENCE_HEAD_LEAD_MS))
     if anchor_aligned:
         head_offset = _cvvc_pure_vowel_sequence_filename_hsmm_head_offset(rows[start]) or head_offset
@@ -13642,6 +13680,32 @@ def _repair_cvvc_pure_vowel_sequence_segment(
         head_offset,
         reference_alias=rows[middle_indices[0]].alias,
     )
+
+
+def _cvvc_pure_vowel_sequence_offsets_by_target(
+    rows: Sequence[AdaptedOtoRow],
+    indices: Sequence[int],
+    candidate_offsets: Sequence[float],
+) -> list[float]:
+    if not indices or len(indices) != len(candidate_offsets):
+        return list(candidate_offsets)
+    if not _cvvc_pure_vowel_sequence_targets_cover_grid(rows, indices):
+        return list(candidate_offsets)
+    targets = [_anchor_expected_phone_index(rows[index].anchor) for index in indices]
+    normalized_targets = [int(target) for target in targets if target is not None]
+    ordered_offsets = sorted(float(offset) for offset in candidate_offsets)
+    return [ordered_offsets[target - 1] for target in normalized_targets]
+
+
+def _cvvc_pure_vowel_sequence_targets_cover_grid(
+    rows: Sequence[AdaptedOtoRow],
+    indices: Sequence[int],
+) -> bool:
+    targets = [_anchor_expected_phone_index(rows[index].anchor) for index in indices]
+    if any(target is None for target in targets):
+        return False
+    normalized_targets = [int(target) for target in targets if target is not None]
+    return sorted(normalized_targets) == list(range(1, len(indices) + 1))
 
 
 def _cvvc_pure_vowel_sequence_terminal_cadence_offsets(
@@ -14113,6 +14177,15 @@ def _repair_cvvc_pure_vowel_onset_sequence_segment(
         ),
     )
 
+    if _repair_cvvc_pure_vowel_onset_target_grid(
+        rows,
+        config,
+        start,
+        end,
+        active_start=active_start,
+    ):
+        return
+
     special_transition_plan = _cvvc_pure_vowel_onset_special_transition_plan(
         rows,
         config,
@@ -14208,6 +14281,74 @@ def _repair_cvvc_pure_vowel_onset_sequence_segment(
         )
         previous_grid_offset = candidate_offset
         cursor = candidate_offset + float(JAPANESE_CVVC_PURE_VOWEL_ONSET_TRANSITION_STEP_MS)
+
+
+def _repair_cvvc_pure_vowel_onset_target_grid(
+    rows: list[AdaptedOtoRow],
+    config: OtoAdapterConfig,
+    start: int,
+    end: int,
+    *,
+    active_start: float,
+) -> bool:
+    terminal_indices = [
+        index
+        for index in range(start + 1, end)
+        if _is_terminal_silence_alias(rows[index].alias)
+        or _is_cvvc_pitch_suffixed_terminal_silence_alias(rows[index].alias)
+    ]
+    transition_indices = [
+        index
+        for index in range(start + 1, end)
+        if index not in terminal_indices and not _is_cvvc_trailing_r_row(rows[index])
+    ]
+    if (
+        len(transition_indices) < int(JAPANESE_CVVC_PURE_VOWEL_SEQUENCE_TERMINAL_CADENCE_MIN_MIDDLE_ROWS)
+        or not _cvvc_pure_vowel_sequence_targets_cover_grid(rows, transition_indices)
+    ):
+        return False
+
+    first_offset = float(JAPANESE_CVVC_PURE_VOWEL_ONSET_FIRST_OFFSET_MS)
+    head_phone = _cvvc_pure_vowel_onset_head_phone(rows[start])
+    if head_phone in JAPANESE_CVVC_PURE_VOWEL_ONSET_FIRST_OFFSET_BY_HEAD_PHONE_MS:
+        first_offset = float(JAPANESE_CVVC_PURE_VOWEL_ONSET_FIRST_OFFSET_BY_HEAD_PHONE_MS[head_phone])
+
+    target_offsets: list[float] = []
+    for index in transition_indices:
+        target_index = _anchor_expected_phone_index(rows[index].anchor)
+        if target_index is None:
+            return False
+        candidate_offset = (
+            float(active_start)
+            + first_offset
+            + (float(target_index - 1) * float(JAPANESE_CVVC_PURE_VOWEL_ONSET_TRANSITION_STEP_MS))
+        )
+        target_offsets.append(candidate_offset)
+        row = rows[index]
+        if _alias_type_for_row(row.alias, config.alias_type) == "v":
+            rows[index] = _replace_cvvc_pure_vowel_onset_v_timing(
+                row,
+                candidate_offset + float(JAPANESE_CVVC_PURE_VOWEL_ONSET_HALF_STEP_MS),
+                active_start=active_start,
+            )
+        else:
+            rows[index] = _replace_cvvc_pure_vowel_onset_transition_timing(
+                row,
+                candidate_offset,
+                active_start=active_start,
+                rule_name="cvvc_pure_vowel_onset_target_grid_repair",
+            )
+
+    if terminal_indices:
+        terminal_offset = max(target_offsets) + float(JAPANESE_CVVC_PURE_VOWEL_ONSET_TERMINAL_AFTER_PREVIOUS_MS)
+        for index in terminal_indices:
+            rows[index] = _replace_cvvc_pure_vowel_onset_terminal_timing(
+                rows[index],
+                terminal_offset,
+                active_start=active_start,
+                reference_offset=max(target_offsets),
+            )
+    return True
 
 
 def _cvvc_pure_vowel_onset_special_transition_plan(
@@ -15039,6 +15180,15 @@ def _repair_cvvc_regular_pair_onset_sequence_segment(
     if not Path(wav).name.startswith("_"):
         return
     if any(_is_terminal_silence_alias(rows[index].alias) for index in range(start, end)):
+        return
+    if any(
+        "event_source:filename_hsmm" in rows[index].warnings
+        or (
+            rows[index].anchor is not None
+            and "event_source:filename_hsmm" in rows[index].anchor.warnings
+        )
+        for index in range(start, end)
+    ):
         return
     pairs = _cvvc_regular_pair_onset_pairs(rows, config, start, end)
     if len(pairs) < 2:
@@ -18335,6 +18485,19 @@ def _repair_cvvc_initial_cv_head_targets(
             if not _phone_sequence_variants_match(follow_phones[1:], phones):
                 continue
             if (
+                (
+                    (
+                        _alias_has_separated_soft_suffix(row.alias)
+                        and not _cvvc_wav_is_pure_vowel_sequence(row.wav)
+                    )
+                    or (len(phones) == 1 and phones[0] in {"y", "w"})
+                )
+                and current_target is not None
+                and int(current_target) < int(follow_target)
+            ):
+                out[row_idx] = follow_target
+                continue
+            if (
                 current_target is not None
                 and int(current_target) < int(follow_target)
                 and _cv_head_target_matches_expected_onset(expected, phones, int(current_target))
@@ -18348,6 +18511,12 @@ def _repair_cvvc_initial_cv_head_targets(
                 continue
             out[row_idx] = follow_target
     return out
+
+
+def _cvvc_wav_is_pure_vowel_sequence(wav: str) -> bool:
+    stem = Path(str(wav or "").strip()).stem.lower().lstrip("_")
+    tokens = [token for token in stem.split("-") if token]
+    return bool(tokens) and all(token in {"a", "i", "u", "e", "o", "n"} for token in tokens)
 
 
 def _cv_head_target_matches_expected_onset(
