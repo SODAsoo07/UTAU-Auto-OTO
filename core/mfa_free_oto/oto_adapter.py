@@ -17607,11 +17607,6 @@ def _direct_anchor_shift(timing: OtoTiming, anchor_abs_ms: float) -> OtoTiming:
     )
 
 
-def _validate_timing(timing: OtoTiming, *, file_duration_ms: float) -> OtoTiming:
-    validated, _warnings = _validate_timing_with_warnings(timing, file_duration_ms=file_duration_ms)
-    return validated
-
-
 def _validate_timing_with_warnings(timing: OtoTiming, *, file_duration_ms: float) -> tuple[OtoTiming, tuple[str, ...]]:
     raw_offset = float(timing.offset)
     raw_pre = float(timing.preutterance)
@@ -18768,59 +18763,6 @@ def _can_share_alias_target(prev_role: str, role: str) -> bool:
     return False
 
 
-def _alias_target_phone_index(
-    alias: str,
-    role: str,
-    expected_phones: Sequence[str],
-    *,
-    min_target_index: int,
-    language: str = "",
-) -> int | None:
-    expected = [str(phone or "").strip().lower() for phone in expected_phones]
-    phones = _alias_phone_sequence_for_matching(alias, language=language)
-    if not expected or not phones:
-        return None
-    if role == "vc" and len(phones) >= 2:
-        left = phones[0]
-        right = phones[1:]
-        for idx in range(0, max(0, len(expected) - 1)):
-            if not _phone_matches(expected[idx], left):
-                continue
-            if not _vc_right_matches(expected, idx + 1, right, language=language):
-                continue
-            target = idx + 1
-            if target >= min_target_index:
-                return target
-        return None
-    if role in {"v", "vv"}:
-        if role == "vv" and len(phones) >= 2:
-            match = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
-            if match is not None:
-                return match + len(phones) - 1
-        target_phone = (
-            _glide_vowel_base(phones[-1]) if _is_japanese_language_name(language) else phones[-1]
-        )
-        for idx, phone in enumerate(expected):
-            if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
-                return idx
-        return None
-    if role == "cv_head" and _cv_head_phones_are_consonant_like(phones):
-        match = _find_phone_sequence_variant(expected, _alias_match_phone_variants(phones), min_target_index=min_target_index)
-        if match is not None:
-            start, _matched_phones = match
-            return start
-    match = _find_phone_sequence_variant(expected, _alias_match_phone_variants(phones), min_target_index=min_target_index)
-    if match is not None:
-        start, matched_phones = match
-        return start + len(matched_phones) - 1
-    match_phones = _alias_match_phone_variants(phones)[0]
-    target_phone = next((phone for phone in reversed(match_phones) if is_vowel_phone(phone)), match_phones[-1])
-    for idx, phone in enumerate(expected):
-        if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
-            return idx
-    return None
-
-
 def _alias_phone_sequence(alias: str) -> list[str]:
     raw = str(alias or "").strip()
     if not raw:
@@ -18831,31 +18773,6 @@ def _alias_phone_sequence(alias: str) -> list[str]:
             phones.extend(_alias_phones(token))
         return phones
     return _alias_phones(raw)
-
-
-def _find_phone_sequence(expected: Sequence[str], phones: Sequence[str], *, min_target_index: int) -> int | None:
-    if not expected or not phones or len(phones) > len(expected):
-        return None
-    for start in range(0, len(expected) - len(phones) + 1):
-        target = start + len(phones) - 1
-        if target < min_target_index:
-            continue
-        if _phone_sequence_matches(expected[start : start + len(phones)], phones):
-            return start
-    return None
-
-
-def _find_phone_sequence_variant(
-    expected: Sequence[str],
-    phone_variants: Sequence[Sequence[str]],
-    *,
-    min_target_index: int,
-) -> tuple[int, Sequence[str]] | None:
-    for phones in phone_variants:
-        start = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
-        if start is not None:
-            return start, phones
-    return None
 
 
 def _find_all_phone_sequence_variants(

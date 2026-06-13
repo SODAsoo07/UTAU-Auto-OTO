@@ -827,32 +827,8 @@ def _runtime_alias_role(
     )
 
 
-def _korean_cvvc_alias_role_override(alias: object, *, fallback: str) -> str:
-    return classify_korean_cvvc_alias_role(
-        alias,
-        language="korean",
-        format_type="cvvc",
-        fallback=fallback,
-    )
-
-
 def _korean_cvvc_plain_vowel_term(term: object) -> bool:
     return is_korean_cvvc_vowel_term(term)
-
-
-def _infer_korean_cvvc_vc_pre_style(
-    roles: Sequence[str],
-    *,
-    language: str,
-    format_type: str,
-) -> str:
-    convention = analyze_reclist_convention(
-        ["" for _ in roles],
-        roles=roles,
-        language=language,
-        format_type=format_type,
-    )
-    return convention.vc_pre_style
 
 
 def _predict_wav_rows(
