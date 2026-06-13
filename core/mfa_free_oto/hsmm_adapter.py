@@ -1192,23 +1192,7 @@ def _best_local_state_segments(
     min_frames = max(1, int(np.ceil(float(spec.min_duration_ms) / max(0.001, frame_shift_ms))))
     max_frames = max(min_frames, int(np.ceil(float(spec.max_duration_ms) / max(0.001, frame_shift_ms))))
     max_frames = min(max_frames, frame_count)
-    best = {"score": float("-inf"), "start": 0, "end": 0}
-    second = {"score": float("-inf"), "start": 0, "end": 0}
-    prefix = np.concatenate(([0.0], np.cumsum(scores.astype(np.float64))))
-    for start in range(0, max(0, frame_count - min_frames + 1)):
-        for end in range(start + min_frames, min(frame_count, start + max_frames) + 1):
-            duration_ms = float(end - start) * frame_shift_ms
-            mean_score = float((prefix[end] - prefix[start]) / float(end - start))
-            total = mean_score + _state_duration_score(spec, duration_ms)
-            same_segment = start == int(selected_start_frame) and end == int(selected_end_frame)
-            if total > best["score"]:
-                if best["score"] != float("-inf"):
-                    second = best
-                best = {"score": float(total), "start": int(start), "end": int(end)}
-                continue
-            if not same_segment and total > second["score"]:
-                second = {"score": float(total), "start": int(start), "end": int(end)}
-    if best["score"] == float("-inf"):
+    if frame_count < min_frames:
         return {
             "best_total_score": 0.0,
             "best_start_frame": int(selected_start_frame),
@@ -1217,15 +1201,66 @@ def _best_local_state_segments(
             "second_start_frame": int(selected_start_frame),
             "second_end_frame": int(selected_end_frame),
         }
-    if second["score"] == float("-inf"):
-        second = best
+
+    prefix = np.concatenate(([0.0], np.cumsum(scores.astype(np.float64))))
+    durations = np.arange(min_frames, max_frames + 1, dtype=np.int32)
+    start_count = frame_count - min_frames + 1
+    totals = np.full((start_count, int(durations.size)), float("-inf"), dtype=np.float64)
+    mode_ms = float(spec.mode_duration_ms or 0.0)
+    sigma_ms = max(1.0, float(spec.duration_sigma_ms or 40.0))
+    for duration_index, duration_frames in enumerate(durations):
+        duration = int(duration_frames)
+        valid_start_count = frame_count - duration + 1
+        means = (prefix[duration : duration + valid_start_count] - prefix[:valid_start_count]) / float(duration)
+        duration_score = 0.0
+        if mode_ms > 0.0:
+            duration_z = ((float(duration) * frame_shift_ms) - mode_ms) / sigma_ms
+            duration_score = -0.5 * duration_z * duration_z
+        totals[:valid_start_count, duration_index] = means + duration_score
+
+    flat_totals = totals.ravel()
+    best_index = int(np.argmax(flat_totals))
+    best_start, best_duration_index = divmod(best_index, int(durations.size))
+    best_end = best_start + int(durations[best_duration_index])
+    best_score = float(flat_totals[best_index])
+
+    selected_duration = int(selected_end_frame) - int(selected_start_frame)
+    selected_index = -1
+    if (
+        0 <= int(selected_start_frame) < start_count
+        and min_frames <= selected_duration <= max_frames
+        and int(selected_end_frame) <= frame_count
+    ):
+        selected_index = (
+            int(selected_start_frame) * int(durations.size)
+            + (selected_duration - min_frames)
+        )
+
+    second_index = best_index
+    second_score = float("-inf")
+    if best_index > 0:
+        second_index = int(np.argmax(flat_totals[:best_index]))
+        second_score = float(flat_totals[second_index])
+    if best_index + 1 < int(flat_totals.size):
+        trailing_totals = flat_totals[best_index + 1 :].copy()
+        if selected_index > best_index:
+            trailing_totals[selected_index - best_index - 1] = float("-inf")
+        trailing_relative_index = int(np.argmax(trailing_totals))
+        trailing_score = float(trailing_totals[trailing_relative_index])
+        if trailing_score > second_score:
+            second_index = best_index + 1 + trailing_relative_index
+            second_score = trailing_score
+    if not np.isfinite(second_score):
+        second_index = best_index
+    second_start, second_duration_index = divmod(second_index, int(durations.size))
+    second_end = second_start + int(durations[second_duration_index])
     return {
-        "best_total_score": float(best["score"]),
-        "best_start_frame": int(best["start"]),
-        "best_end_frame": int(best["end"]),
-        "second_total_score": float(second["score"]),
-        "second_start_frame": int(second["start"]),
-        "second_end_frame": int(second["end"]),
+        "best_total_score": best_score,
+        "best_start_frame": int(best_start),
+        "best_end_frame": int(best_end),
+        "second_total_score": float(flat_totals[second_index]),
+        "second_start_frame": int(second_start),
+        "second_end_frame": int(second_end),
     }
 
 

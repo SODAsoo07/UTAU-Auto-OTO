@@ -12,6 +12,7 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from core.alignment.hsmm_decoder import (
@@ -41,8 +42,10 @@ from core.mfa_free_oto.evidence_pack import (
     validate_acoustic_evidence_pack,
 )
 from core.mfa_free_oto.hsmm_adapter import (
+    _best_local_state_segments,
     _max_internal_gap_ms,
     _max_leading_gap_ms,
+    _state_duration_score,
     build_hsmm_states_for_slots,
     decode_filename_slots_with_hsmm,
 )
@@ -2054,6 +2057,50 @@ def test_segmental_hsmm_decoder_recovers_known_sequence_intervals():
         (200.0, 270.0),
         (270.0, 400.0),
     ]
+
+
+def test_hsmm_local_diagnostics_match_brute_force_segment_ranking():
+    scores = np.asarray(
+        [-1.0, 0.2, 1.4, 1.8, 1.5, 0.3, -0.4, 1.1, 1.6, 1.2, 0.1],
+        dtype=np.float32,
+    )
+    spec = HSMMStateSpec(
+        "slot0.v",
+        "vowel",
+        20.0,
+        50.0,
+        mode_duration_ms=30.0,
+        duration_sigma_ms=12.0,
+    )
+    selected = (2, 5)
+    diagnostic = _best_local_state_segments(
+        scores,
+        spec,
+        frame_shift_ms=10.0,
+        selected_start_frame=selected[0],
+        selected_end_frame=selected[1],
+    )
+    best = None
+    second = None
+    for start in range(0, len(scores) - 2 + 1):
+        for end in range(start + 2, min(len(scores), start + 5) + 1):
+            duration_ms = float(end - start) * 10.0
+            total = float(np.mean(scores[start:end])) + _state_duration_score(spec, duration_ms)
+            candidate = (total, start, end)
+            if best is None or total > best[0]:
+                if best is not None:
+                    second = best
+                best = candidate
+            elif (start, end) != selected and (second is None or total > second[0]):
+                second = candidate
+    assert best is not None
+    if second is None:
+        second = best
+
+    assert (diagnostic["best_start_frame"], diagnostic["best_end_frame"]) == (best[1], best[2])
+    assert diagnostic["best_total_score"] == pytest.approx(best[0])
+    assert (diagnostic["second_start_frame"], diagnostic["second_end_frame"]) == (second[1], second[2])
+    assert diagnostic["second_total_score"] == pytest.approx(second[0])
 
 
 def test_segmental_hsmm_decoder_honors_state_frame_windows():

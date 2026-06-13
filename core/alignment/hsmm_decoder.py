@@ -88,31 +88,37 @@ def decode_segmental_hsmm(
     }
     windows = _normalize_state_windows(state_frame_windows, frame_count)
 
-    prev: dict[int, tuple[float, list[tuple[int, int]]]]
+    prev: dict[int, float]
     if allow_leading_gap:
         leading_penalty = max(0.0, float(leading_gap_penalty_per_ms))
         max_leading_frames = frame_count - 1
         if float(max_leading_gap_ms or 0.0) > 0.0:
             max_leading_frames = min(max_leading_frames, int(math.ceil(float(max_leading_gap_ms) / frame_shift)))
         prev = {
-            start_frame: (-(leading_penalty * float(start_frame) * frame_shift), [])
+            start_frame: -(leading_penalty * float(start_frame) * frame_shift)
             for start_frame in range(max_leading_frames + 1)
         }
     else:
-        prev = {0: (0.0, [])}
+        prev = {0: 0.0}
     pruned = 0
+    layers: list[dict[int, tuple[float, int, int]]] = []
+    candidate_count = 0
     for state_index, spec in enumerate(states):
-        curr: dict[int, tuple[float, list[tuple[int, int]]]] = {}
+        curr: dict[int, tuple[float, int, int]] = {}
         min_frames = max(1, int(math.ceil(float(spec.min_duration_ms) / frame_shift)))
         max_frames = max(min_frames, int(math.ceil(float(spec.max_duration_ms) / frame_shift)))
         max_frames = min(max_frames, frame_count)
         prefix = prefix_by_state[spec.state_id]
+        duration_scores = [
+            _duration_score(spec, float(duration_frames) * frame_shift)
+            for duration_frames in range(max_frames + 1)
+        ]
         max_gap_frames = 0
         if allow_internal_gaps and state_index > 0:
             max_gap_frames = max(0, int(math.ceil(float(max_internal_gap_ms) / frame_shift)))
         gap_penalty = max(0.0, float(internal_gap_penalty_per_ms))
         window = windows.get(spec.state_id)
-        for prev_end, (prev_score, prev_path) in prev.items():
+        for prev_end, prev_score in prev.items():
             first_start = prev_end
             last_start = min(frame_count - min_frames, prev_end + max_gap_frames)
             if window is not None:
@@ -130,7 +136,8 @@ def decode_segmental_hsmm(
                 if last_end < first_end:
                     continue
                 for end in range(first_end, last_end + 1):
-                    if time.perf_counter() - start_time > timeout_s:
+                    candidate_count += 1
+                    if candidate_count & 0xFF == 0 and time.perf_counter() - start_time > timeout_s:
                         return HSMMDecodeResult(
                             ok=False,
                             reason="decoder_timeout",
@@ -138,12 +145,15 @@ def decode_segmental_hsmm(
                             pruned_endpoint_count=pruned,
                             meta={"state_index": state_index, "frame_count": frame_count},
                         )
-                    duration_ms = (end - start_frame) * frame_shift
-                    seg_score = _segment_mean(prefix, start_frame, end) + _duration_score(spec, duration_ms)
+                    duration_frames = end - start_frame
+                    seg_score = (
+                        (float(prefix[end]) - float(prefix[start_frame])) / float(duration_frames)
+                        + duration_scores[duration_frames]
+                    )
                     score = prev_score + seg_score - (gap_penalty * skipped_ms)
                     existing = curr.get(end)
                     if existing is None or score > existing[0]:
-                        curr[end] = (score, prev_path + [(start_frame, end)])
+                        curr[end] = (score, prev_end, start_frame)
         if not curr:
             return HSMMDecodeResult(
                 ok=False,
@@ -155,7 +165,8 @@ def decode_segmental_hsmm(
             sorted_items = sorted(curr.items(), key=lambda item: item[1][0], reverse=True)
             pruned += len(sorted_items) - int(beam_width_per_state)
             curr = dict(sorted_items[: int(beam_width_per_state)])
-        prev = curr
+        layers.append(curr)
+        prev = {end: value[0] for end, value in curr.items()}
 
     if not allow_trailing_gap:
         if frame_count not in prev:
@@ -165,14 +176,21 @@ def decode_segmental_hsmm(
                 pruned_endpoint_count=pruned,
                 meta={"frame_count": frame_count, "requires_full_coverage": True},
             )
-        best_end, (best_score, best_path) = frame_count, prev[frame_count]
+        best_end, best_score = frame_count, prev[frame_count]
     else:
         trailing_penalty = max(0.0, float(trailing_gap_penalty_per_ms))
-        best_end, (best_score, best_path) = max(
+        best_end, best_score = max(
             prev.items(),
-            key=lambda item: item[1][0] - (trailing_penalty * float(max(0, frame_count - item[0])) * frame_shift),
+            key=lambda item: item[1] - (trailing_penalty * float(max(0, frame_count - item[0])) * frame_shift),
         )
         best_score = best_score - (trailing_penalty * float(max(0, frame_count - best_end)) * frame_shift)
+    best_path: list[tuple[int, int]] = []
+    path_end = best_end
+    for layer in reversed(layers):
+        _score, prev_end, start_frame = layer[path_end]
+        best_path.append((start_frame, path_end))
+        path_end = prev_end
+    best_path.reverse()
     if best_end <= 0 or not best_path:
         return HSMMDecodeResult(ok=False, reason="timeline_decode_failed", pruned_endpoint_count=pruned)
 
