@@ -21,6 +21,7 @@ from .manifest_audit import infer_filename_phone_sequence
 from .oto_adapter import (
     OtoAdapterConfig,
     OtoTemplateRow,
+    _assign_alias_target_indices,
     adapt_template_row,
     anchors_from_prediction,
     assign_template_row_anchors,
@@ -725,6 +726,12 @@ def _template_group_in_filename_order(
     if not records:
         return sorted(rows, key=_template_row_semantic_sort_key)
 
+    target_hints = _template_source_target_hints(
+        wav_key,
+        rows,
+        language=language,
+        format_type=format_type,
+    )
     remaining = list(rows)
     ordered: list[OtoTemplateRow] = []
     for record in records:
@@ -733,6 +740,7 @@ def _template_group_in_filename_order(
             record,
             records,
             language=language,
+            target_hints=target_hints,
         )
         if match_index is None:
             continue
@@ -760,12 +768,43 @@ def _template_group_in_filename_order(
     return ordered
 
 
+def _template_source_target_hints(
+    wav_key: str,
+    rows: Sequence[OtoTemplateRow],
+    *,
+    language: str,
+    format_type: str,
+) -> dict[int, int]:
+    slots = build_filename_slots(wav_key, language=language, format_type=format_type)
+    expected = filename_phone_sequence_from_slots(slots)
+    if not expected:
+        return {}
+    targets = _assign_alias_target_indices(rows, expected, language=language)
+    hints: dict[int, int] = {}
+    for row, target in zip(rows, targets):
+        if target is None:
+            continue
+        phones = tuple(_template_alias_phone_sequence(row.alias, language=language))
+        target_index = int(target)
+        glide_surface = any(str(phone).strip().lower() in {"w", "y", "wa", "wi", "we", "wo", "ya", "yu", "ye", "yo"} for phone in phones)
+        standalone_wo_surface = (
+            _alias_type_for_row(row.alias, "auto") == "v"
+            and phones == ("o",)
+            and target_index > 0
+            and str(expected[target_index - 1]).strip().lower() == "w"
+        )
+        if glide_surface or standalone_wo_surface:
+            hints[id(row)] = target_index
+    return hints
+
+
 def _matching_template_row_index(
     rows: Sequence[OtoTemplateRow],
     record: RowPlanRecord,
     records: Sequence[RowPlanRecord] = (),
     *,
     language: str = "",
+    target_hints: Mapping[int, int] | None = None,
 ) -> int | None:
     candidates: list[tuple[int, tuple[object, ...], int]] = []
     for idx, row in enumerate(rows):
@@ -774,6 +813,7 @@ def _matching_template_row_index(
             record,
             records,
             language=language,
+            preferred_target=(target_hints or {}).get(id(row)),
         )
         if score <= 0:
             continue
@@ -789,6 +829,7 @@ def _template_row_record_match_score(
     records: Sequence[RowPlanRecord] = (),
     *,
     language: str = "",
+    preferred_target: int | None = None,
 ) -> int:
     alias = str(getattr(row, "alias", "") or "").strip()
     record_alias = str(getattr(record, "alias", "") or "").strip()
@@ -800,8 +841,15 @@ def _template_row_record_match_score(
     source_phones = tuple(_template_alias_phone_sequence(alias, language=language))
     record_phones = tuple(_alias_phone_sequence(record_alias))
     record_role = str(getattr(record, "role_family", "") or "").strip().lower()
+    record_targets = tuple(int(value) for value in getattr(record, "expected_phone_indices", ()) or ())
     first_slot = int(getattr(record, "left_slot_index", -1)) == 0 and int(getattr(record, "right_slot_index", -1)) == 0
     source_role = _alias_type_for_row(alias, "auto")
+    if (
+        preferred_target is not None
+        and source_role != "cv_head"
+        and int(preferred_target) not in record_targets
+    ):
+        return 0
     phones_compatible = (
         source_phones == record_phones
         or _phone_sequence_variants_match(source_phones, record_phones)
@@ -821,11 +869,28 @@ def _template_row_record_match_score(
         and record_role in {"cv", "v"}
         and phones_compatible
     )
+    standalone_glide_v_compatible = (
+        _is_japanese_language_name(language)
+        and source_role == "v"
+        and record_role == "cv"
+        and (
+            (
+                phones_compatible
+                and len(source_phones) >= 2
+                and str(source_phones[0]).strip().lower() in {"w", "y"}
+            )
+            or (
+                source_phones == ("o",)
+                and record_phones == ("wo",)
+            )
+        )
+    )
     if not source_phones or not (
         phones_compatible
         or yoon_vc_compatible
         or cv_head_initial_compatible
         or cv_head_exact_compatible
+        or standalone_glide_v_compatible
     ):
         return 0
 
@@ -837,15 +902,23 @@ def _template_row_record_match_score(
     ):
         return 0
     if first_slot and source_role == "cv_head" and record_role in {"cv", "v"}:
-        return 1100
-    if cv_head_exact_compatible:
-        return 975 if alias == record_alias else 925
-    if source_role == record_role:
+        score = 1100
+    elif cv_head_exact_compatible:
+        score = 975 if alias == record_alias else 925
+    elif standalone_glide_v_compatible:
+        score = 850
+    elif source_role == record_role:
         if yoon_vc_compatible:
-            return 880
-        return 1000 if alias == record_alias else 900
+            score = 880
+        else:
+            score = 1000 if alias == record_alias else 900
+    else:
+        return 0
 
-    return 0
+    if preferred_target is not None:
+        if int(preferred_target) in record_targets:
+            score += 250
+    return score
 
 
 def _template_alias_phone_sequence(alias: str, *, language: str) -> tuple[str, ...]:
@@ -1357,8 +1430,6 @@ def _hsmm_runtime_replacement_rejection_reason(
 ) -> str:
     if not _is_japanese_cvvc_workflow(language=language, format_type=format_type):
         return ""
-    if _template_group_has_soft_alias_suffix(template_rows):
-        return "soft_alias_suffix_runtime_preferred"
     if not _ja_cvvc_hsmm_runtime_gap_guard_enabled():
         return ""
     first_vc: object | None = None
@@ -1382,14 +1453,6 @@ def _hsmm_runtime_replacement_rejection_reason(
     if gap > float(JA_CVVC_HSMM_RUNTIME_ALIGNED_FIRST_GAP_MS):
         return f"runtime_first_vc_cv_gap_aligned:{gap:.1f}ms"
     return ""
-
-
-def _template_group_has_soft_alias_suffix(template_rows: Iterable[object]) -> bool:
-    for row in template_rows:
-        alias = str(getattr(row, "alias", "") or "").strip().lower()
-        if alias.endswith("_s"):
-            return True
-    return False
 
 
 def _ja_cvvc_hsmm_runtime_gap_guard_enabled() -> bool:
