@@ -18630,12 +18630,23 @@ def _alias_target_candidates(
     if role == "vc" and len(phones) >= 2:
         left = phones[0]
         right = phones[1:]
+        korean = _is_korean_language_name(language)
         for idx in range(0, max(0, len(expected) - 1)):
             if not _phone_matches(expected[idx], left):
                 continue
-            if not _vc_right_matches(expected, idx + 1, right, language=language):
+            if _vc_right_matches(expected, idx + 1, right, language=language):
+                out.append(AliasTargetCandidate(idx + 1, 4.0, "vc_right_consonant"))
                 continue
-            out.append(AliasTargetCandidate(idx + 1, 4.0, "vc_right_consonant"))
+            # Korean cross-syllable VC ("a b" over [a, coda, b]): the next onset is
+            # separated from the vowel by a coda consonant. Skip a single coda so the
+            # row targets the onset instead of losing its index (-> None -> drift).
+            if (
+                korean
+                and idx + 2 < len(expected)
+                and not is_vowel_phone(expected[idx + 1], language)
+                and _vc_right_matches(expected, idx + 2, right, language=language)
+            ):
+                out.append(AliasTargetCandidate(idx + 2, 3.6, "vc_right_after_coda"))
         return out
     if role in {"v", "vv"}:
         if role == "vv" and len(phones) >= 2:
@@ -18643,7 +18654,11 @@ def _alias_target_candidates(
                 out.append(AliasTargetCandidate(start + len(phones) - 1, 3.2, "vv_exact_sequence"))
             if out:
                 return out
-        target_phone = phones[-1]
+        # Japanese splits glide vowels (ya->y,a) in the row plan, so resolve to the
+        # base vowel; Korean keeps "wa"/"ya" whole, so match the token verbatim.
+        target_phone = (
+            _glide_vowel_base(phones[-1]) if _is_japanese_language_name(language) else phones[-1]
+        )
         for idx, phone in enumerate(expected):
             if _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 out.append(AliasTargetCandidate(idx, 2.3 if role == "vv" else 1.8, role))
@@ -18718,7 +18733,11 @@ def _alias_target_transition_score(
     if prev is None or cur is None:
         return -0.25
     if cur < prev:
-        if prev_role == "vc" and role in {"cv", "vcv"}:
+        # A VC row may legitimately point one mora back relative to the CV that
+        # follows it, but only by an adjacent step. An unbounded backtrack lets a
+        # later repeated mora (e.g. the 6th "na") collapse onto an earlier
+        # identical mora's index -> the whole row block jumps syllables back.
+        if prev_role == "vc" and role in {"cv", "vcv"} and (prev - cur) <= 2:
             return -0.20 - (0.006 * float(prev - cur))
         return -1e9
     if cur == prev:
@@ -18738,6 +18757,13 @@ def _can_share_alias_target(prev_role: str, role: str) -> bool:
     if prev_role in {"v", "vv"} and role in {"vv", "v"}:
         return True
     if prev_role == "vc" and role == "vc":
+        return True
+    # A standalone moraic-n vowel row ("n", role v) shares the moraic-n phone with
+    # the preceding VC that ends on it (e.g. "n n" -> "n"). Safe to allow generally:
+    # the share only fires when both candidate indices coincide, which for a v-row
+    # vowel vs a vc-row consonant can only happen on moraic n (the sole phone that is
+    # both vowel-like and a VC right-consonant).
+    if prev_role == "vc" and role == "v":
         return True
     return False
 
@@ -18771,7 +18797,9 @@ def _alias_target_phone_index(
             match = _find_phone_sequence(expected, phones, min_target_index=min_target_index)
             if match is not None:
                 return match + len(phones) - 1
-        target_phone = phones[-1]
+        target_phone = (
+            _glide_vowel_base(phones[-1]) if _is_japanese_language_name(language) else phones[-1]
+        )
         for idx, phone in enumerate(expected):
             if idx >= min_target_index and _phone_matches(phone, target_phone) and is_vowel_phone(phone):
                 return idx
@@ -18967,6 +18995,10 @@ def _alias_match_phone_variants(phones: Sequence[str]) -> tuple[tuple[str, ...],
     add_seed(_drop_implicit_y_after_palatal_onset(base))
     add_seed(_drop_implicit_y_after_palatal_onset(collapsed))
     add_seed(_expand_optional_w_vowel_phones(base))
+    # Inverse of _collapse_y_vowel_phones: split glide vowels the alias parser
+    # left fused ("ya"->"y","a") so [C,"ya"] matches a row-planned [C,"y","a"].
+    add_seed(_split_glide_vowel_phones(base))
+    add_seed(_split_glide_vowel_phones(collapsed))
     add_seed(base)
     for variant in list(seeds):
         add_seed(_expand_compound_consonant_phones(variant))
@@ -19009,6 +19041,40 @@ def _expand_compound_consonant_phones(phones: Sequence[str]) -> tuple[str, ...]:
         elif normalized:
             expanded.append(normalized)
     return tuple(expanded) if changed else tuple(str(phone or "").strip().lower() for phone in phones if str(phone or "").strip())
+
+
+# Glide vowels written as a single token in aliases ("ya", "wa", ...) but split
+# into glide + base vowel by the filename row planner (row_plan._split_onset_phones
+# yields [..,"y","a"], _split_syllable_token yields onset "y" + vowel "a"). The
+# alias matcher must expand them the same way or the CV/V row never resolves its
+# target phone index -> the row loses its index constraint and grabs the nearest
+# event in time (timing dispersion) or an earlier mora's event (one-syllable shift).
+_GLIDE_VOWEL_SPLITS: dict[str, tuple[str, str]] = {
+    "ya": ("y", "a"), "yu": ("y", "u"), "ye": ("y", "e"), "yo": ("y", "o"),
+    "yae": ("y", "ae"), "yeo": ("y", "eo"),
+    "wa": ("w", "a"), "wi": ("w", "i"), "we": ("w", "e"), "wo": ("w", "o"),
+    "wae": ("w", "ae"), "weo": ("w", "eo"),
+}
+
+
+def _split_glide_vowel_phones(phones: Sequence[str]) -> tuple[str, ...]:
+    """Expand glide-vowel tokens (ya->y,a wa->w,a ...) to match the row planner."""
+    out: list[str] = []
+    for phone in phones:
+        norm = str(phone or "").strip().lower()
+        split = _GLIDE_VOWEL_SPLITS.get(norm)
+        if split:
+            out.extend(split)
+        else:
+            out.append(norm)
+    return tuple(out)
+
+
+def _glide_vowel_base(phone: str) -> str:
+    """Base vowel of a glide-vowel token (ya->a wa->a), else the phone itself."""
+    norm = str(phone or "").strip().lower()
+    split = _GLIDE_VOWEL_SPLITS.get(norm)
+    return split[-1] if split else norm
 
 
 def _collapse_y_vowel_phones(phones: Sequence[str]) -> tuple[str, ...]:
