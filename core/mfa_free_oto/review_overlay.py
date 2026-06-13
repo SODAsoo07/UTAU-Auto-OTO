@@ -36,6 +36,10 @@ EVENT_COLORS = {
     "vowel_nucleus_lab_midpoint": "#84cc16",
     "vowel_nucleus_acoustic": "#15803d",
 }
+HSMM_STATE_COLORS = {
+    "consonant": "#f97316",
+    "vowel": "#2563eb",
+}
 
 
 def render_review_html(
@@ -44,20 +48,36 @@ def render_review_html(
     posterior: FramePosterior | None = None,
     decoded_events: Sequence[DecodedEvent | dict] | None = None,
     generated_oto_rows: Sequence[dict] | None = None,
+    hsmm_states: Sequence[dict] | None = None,
     width: int = 1280,
 ) -> str:
     wav_path = str(row["wav_path"])
     samples, sample_rate = read_wav_mono(wav_path, target_sample_rate=16000)
     duration_ms = max(1.0, 1000.0 * float(samples.shape[0]) / float(sample_rate))
     spec_times, spec = spectrogram_image(samples, sample_rate, bins=48)
-    waveform_svg = _render_waveform(samples, duration_ms, width=width, height=120)
-    spectrogram_svg = _render_spectrogram(spec_times, spec, duration_ms, width=width, height=180)
+    selected_hsmm_states = list(hsmm_states or [])
+    waveform_svg = _render_waveform(
+        samples,
+        duration_ms,
+        width=width,
+        height=120,
+        hsmm_states=selected_hsmm_states,
+    )
+    spectrogram_svg = _render_spectrogram(
+        spec_times,
+        spec,
+        duration_ms,
+        width=width,
+        height=180,
+        hsmm_states=selected_hsmm_states,
+    )
     labels_svg = _render_frame_labels(row.get("frame_labels") or [], duration_ms, width=width, height=56)
     events_svg = _render_events(row.get("events") or [], duration_ms, width=width, height=72)
     auxiliary_events_svg = _render_events(row.get("auxiliary_events") or [], duration_ms, width=width, height=72)
     posterior_svg = _render_posterior(posterior, duration_ms, width=width, height=160) if posterior else ""
     decoded_svg = _render_decoded_events(decoded_events or [], duration_ms, width=width, height=64)
     generated_oto_svg = _render_generated_oto_rows(generated_oto_rows or [], duration_ms, width=width, height=92)
+    hsmm_states_svg = _render_hsmm_states(selected_hsmm_states, duration_ms, width=width, height=96)
     row_json = html.escape(json.dumps(_compact_row(row), ensure_ascii=False, indent=2))
     title = html.escape(str(row.get("row_id") or row.get("wav_name") or wav_path))
     return f"""<!doctype html>
@@ -92,6 +112,8 @@ pre {{ background: #111827; color: #e5e7eb; padding: 12px; overflow: auto; font-
 <h2>Auxiliary landmark events</h2>
 {auxiliary_events_svg}
 {posterior_svg}
+<h2>HSMM selected state spans</h2>
+{hsmm_states_svg}
 <h2>Assigned OTO anchors</h2>
 {decoded_svg}
 <h2>Generated OTO params</h2>
@@ -111,6 +133,7 @@ def write_review_html(
     posterior: FramePosterior | None = None,
     decoded_events: Sequence[DecodedEvent | dict] | None = None,
     generated_oto_rows: Sequence[dict] | None = None,
+    hsmm_states: Sequence[dict] | None = None,
     width: int = 1280,
 ) -> None:
     out = Path(path)
@@ -121,6 +144,7 @@ def write_review_html(
             posterior=posterior,
             decoded_events=decoded_events,
             generated_oto_rows=generated_oto_rows,
+            hsmm_states=hsmm_states,
             width=width,
         ),
         encoding="utf-8",
@@ -138,7 +162,14 @@ def posterior_from_json(data: dict, wav_path: str) -> FramePosterior:
     )
 
 
-def _render_waveform(samples: np.ndarray, duration_ms: float, *, width: int, height: int) -> str:
+def _render_waveform(
+    samples: np.ndarray,
+    duration_ms: float,
+    *,
+    width: int,
+    height: int,
+    hsmm_states: Sequence[dict] = (),
+) -> str:
     bins = max(1, min(width, 900))
     edges = np.linspace(0, samples.shape[0], bins + 1, dtype=np.int64)
     points: list[str] = []
@@ -151,10 +182,19 @@ def _render_waveform(samples: np.ndarray, duration_ms: float, *, width: int, hei
         y_bottom = center + amp * center
         points.append(f'<line x1="{x:.2f}" y1="{y_top:.2f}" x2="{x:.2f}" y2="{y_bottom:.2f}" stroke="#111827" stroke-width="1"/>')
     ticks = _time_ticks(duration_ms, width, height)
-    return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(points)}{ticks}</svg>'
+    boundaries = _render_hsmm_boundary_lines(hsmm_states, duration_ms, width=width, height=height)
+    return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(points)}{ticks}{boundaries}</svg>'
 
 
-def _render_spectrogram(times_ms: np.ndarray, spec: np.ndarray, duration_ms: float, *, width: int, height: int) -> str:
+def _render_spectrogram(
+    times_ms: np.ndarray,
+    spec: np.ndarray,
+    duration_ms: float,
+    *,
+    width: int,
+    height: int,
+    hsmm_states: Sequence[dict] = (),
+) -> str:
     if spec.size == 0:
         return f'<svg viewBox="0 0 {width} {height}"></svg>'
     frames, bins = spec.shape
@@ -170,7 +210,8 @@ def _render_spectrogram(times_ms: np.ndarray, spec: np.ndarray, duration_ms: flo
             y = height - (b_idx + 1) * cell_h
             rects.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{cell_w + 0.5:.2f}" height="{cell_h + 0.5:.2f}" fill="{color}"/>')
     ticks = _time_ticks(duration_ms, width, height)
-    return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(rects)}{ticks}</svg>'
+    boundaries = _render_hsmm_boundary_lines(hsmm_states, duration_ms, width=width, height=height)
+    return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(rects)}{ticks}{boundaries}</svg>'
 
 
 def _render_frame_labels(labels: Sequence[dict], duration_ms: float, *, width: int, height: int) -> str:
@@ -281,6 +322,75 @@ def _render_generated_oto_rows(rows: Sequence[dict], duration_ms: float, *, widt
     return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(items)}{_time_ticks(duration_ms, width, height)}</svg>'
 
 
+def _render_hsmm_states(states: Sequence[dict], duration_ms: float, *, width: int, height: int) -> str:
+    items: list[str] = []
+    for state_index, state in enumerate(states):
+        start_ms = float(state.get("start_ms", 0.0) or 0.0)
+        end_ms = float(state.get("end_ms", start_ms) or start_ms)
+        if end_ms <= start_ms:
+            continue
+        state_id = str(state.get("state_id", "") or "")
+        state_type = str(state.get("state_type", "") or "")
+        color = HSMM_STATE_COLORS.get(state_type, "#64748b")
+        x = start_ms / duration_ms * width
+        end_x = end_ms / duration_ms * width
+        rect_width = max(1.0, end_x - x)
+        label = html.escape(f"{state_id} [{start_ms:.0f}-{end_ms:.0f}ms]")
+        label_y = 17.0 + float(state_index % 4) * 18.0
+        items.append(
+            f'<rect x="{x:.2f}" y="0" width="{rect_width:.2f}" height="{height}" '
+            f'fill="{color}" opacity="0.30"><title>{label}</title></rect>'
+        )
+        items.append(
+            f'<line x1="{x:.2f}" y1="0" x2="{x:.2f}" y2="{height}" '
+            f'stroke="{color}" stroke-width="2"/>'
+        )
+        items.append(
+            f'<line x1="{end_x:.2f}" y1="0" x2="{end_x:.2f}" y2="{height}" '
+            f'stroke="{color}" stroke-width="1"/>'
+        )
+        items.append(
+            f'<text x="{x + 3:.2f}" y="{label_y:.2f}" font-size="11" fill="#111827">{label}</text>'
+        )
+    return f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(items)}{_time_ticks(duration_ms, width, height)}</svg>'
+
+
+def _render_hsmm_boundary_lines(
+    states: Sequence[dict],
+    duration_ms: float,
+    *,
+    width: int,
+    height: int,
+) -> str:
+    if not states:
+        return ""
+    items: list[str] = []
+    boundaries: list[tuple[float, str]] = []
+    for state in states:
+        state_type = str(state.get("state_type", "") or "")
+        boundaries.append((float(state.get("start_ms", 0.0) or 0.0), state_type))
+    last_state = states[-1]
+    boundaries.append(
+        (
+            float(last_state.get("end_ms", last_state.get("start_ms", 0.0)) or 0.0),
+            str(last_state.get("state_type", "") or ""),
+        )
+    )
+    seen: set[float] = set()
+    for time_ms, state_type in boundaries:
+        rounded_time = round(time_ms, 6)
+        if rounded_time in seen:
+            continue
+        seen.add(rounded_time)
+        x = time_ms / duration_ms * width
+        color = HSMM_STATE_COLORS.get(state_type, "#64748b")
+        items.append(
+            f'<line data-hsmm-boundary="{time_ms:.3f}" x1="{x:.2f}" y1="0" '
+            f'x2="{x:.2f}" y2="{height}" stroke="{color}" stroke-width="1.5" opacity="0.85"/>'
+        )
+    return "".join(items)
+
+
 def _time_ticks(duration_ms: float, width: int, height: int) -> str:
     ticks: list[str] = []
     step = 100.0 if duration_ms <= 1200.0 else 500.0
@@ -295,7 +405,13 @@ def _time_ticks(duration_ms: float, width: int, height: int) -> str:
 
 def _legend_html() -> str:
     items = []
-    for label, color in {**FRAME_COLORS, **EVENT_COLORS}.items():
+    legend_colors = {
+        **FRAME_COLORS,
+        **EVENT_COLORS,
+        "hsmm_consonant_span": HSMM_STATE_COLORS["consonant"],
+        "hsmm_vowel_span": HSMM_STATE_COLORS["vowel"],
+    }
+    for label, color in legend_colors.items():
         items.append(f'<span><span class="swatch" style="background:{color}"></span>{html.escape(label)}</span>')
     return "".join(items)
 

@@ -54,3 +54,17 @@ specific issues.
 - Integration workflow draft: `plan/pencil_integration_workflow.md`
 - Design asset folder: `design/`
 - Shared UI token module: `ui/theme_tokens.py`
+
+## WFL Release Runtime
+
+Release builds include a standalone CPU WFL runtime under
+`UTAU_Auto_OTO/wfl_runtime`. Prepare or refresh it before building with:
+
+```powershell
+.\.venv310\Scripts\python.exe scripts\build\prepare_wfl_runtime.py
+```
+
+The script uses the sibling `WFL_PoC` checkout by default. Override the source
+with `--poc-root` or `UTOA_WFL_POC_ROOT`. Standard `build.py` runs validate the
+bundle and stop if the WFL Python, encoder, or Korean/Japanese models are
+incomplete.

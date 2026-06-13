@@ -86,10 +86,18 @@ def _app_root() -> str:
 
 def _resolve_wfl_python() -> str:
     """Python interpreter of an env with torch+transformers for WFL inference.
-    Configure with UTOA_WFL_PYTHON; otherwise the current interpreter is used."""
+    Configure with UTOA_WFL_PYTHON; otherwise prefer the bundled runtime."""
     override = _env("UTOA_WFL_PYTHON")
     if override and os.path.isfile(override):
         return override
+    root = _app_root()
+    bundled_candidates = [
+        os.path.join(root, "wfl_runtime", "python", "python.exe"),
+        os.path.join(root, "wfl_runtime", "python.exe"),
+    ]
+    for candidate in bundled_candidates:
+        if os.path.isfile(candidate):
+            return candidate
     return sys.executable or ""
 
 
@@ -101,6 +109,7 @@ def _resolve_wfl_repo() -> str:
         return override
     root = _app_root()
     candidates = [
+        os.path.join(root, "wfl_runtime", "WFL-ASR"),
         os.path.join(root, "third_party", "WFL-ASR"),
         os.path.join(root, "vendor", "WFL-ASR"),
         os.path.join(root, "WFL-ASR"),
@@ -123,9 +132,14 @@ def _resolve_wfl_model_dir(language: str) -> str:
     if generic and os.path.isdir(generic):
         return generic
     if lang:
-        bundled = os.path.join(_app_root(), "models", "wfl", lang)
-        if os.path.isdir(bundled):
-            return bundled
+        root = _app_root()
+        bundled_candidates = [
+            os.path.join(root, "wfl_runtime", "models", lang),
+            os.path.join(root, "models", "wfl", lang),
+        ]
+        for bundled in bundled_candidates:
+            if os.path.isdir(bundled):
+                return bundled
     return ""
 
 
@@ -366,6 +380,31 @@ def _ensure_encoder(repo: str, callback=None) -> bool:
         except Exception as exc:
             _emit(callback, f"[WFL] encoder seed failed ({exc}); will attempt online download")
     return os.path.isdir(enc) and bool(os.listdir(enc))
+
+
+def _check_wfl_python_runtime(python_exe: str) -> Tuple[bool, str]:
+    """Verify the external interpreter can import the inference dependencies."""
+    if not python_exe or not os.path.isfile(python_exe):
+        return False, "python executable missing"
+    cmd = [
+        python_exe,
+        "-c",
+        "import torch, torchaudio, transformers, yaml, click, soundfile, numpy",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=False,
+            timeout=45,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, ""
+    detail = (proc.stderr or proc.stdout or b"").decode("utf-8", errors="replace")[-500:]
+    return False, detail.strip() or f"exit code {proc.returncode}"
 
 
 def _import_textgrid_module():
@@ -755,6 +794,13 @@ def check_wfl_ready(
             "WFL python executable not found (set UTOA_WFL_PYTHON).",
             engine="wfl", language=lang, ready=False,
         )
+    python_ok, python_error = _check_wfl_python_runtime(python_exe)
+    if not python_ok:
+        return make_runtime_report(
+            "align", ALIGN_NOT_READY,
+            f"WFL Python dependencies are unavailable: {python_error}",
+            engine="wfl", language=lang, ready=False,
+        )
 
     repo = _resolve_wfl_repo()
     if not repo or not os.path.isfile(os.path.join(repo, "infer.py")):
@@ -884,6 +930,7 @@ def run_wfl_align(
             return False, "No WAV had a usable transcript/dictionary phone sequence (vocab mismatch?)."
 
         _ensure_infer_compat(repo, callback=callback)
+        _rewrite_config_save_dir(files["config"], model_dir)
         if not _ensure_encoder(repo, callback=callback):
             _emit(callback, "[WFL] Whisper encoder not bundled; first run will download it (needs internet once).")
         cmd = [

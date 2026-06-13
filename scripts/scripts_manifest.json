@@ -63,6 +63,12 @@
                         "note":  "Called by CI workflows."
                     },
                     {
+                        "path":  "scripts/build/prepare_wfl_runtime.py",
+                        "status":  "active",
+                        "owner":  "release",
+                        "note":  "Builds the portable WFL Python, source, encoder, and Korean/Japanese model bundle."
+                    },
+                    {
                         "path":  "tests/scripts/training/sequence/build_sequence_residual_dataset.py",
                         "status":  "manual",
                         "owner":  "ml",
@@ -343,6 +349,12 @@
                         "status":  "active",
                         "owner":  "ml",
                         "note":  "Render a phoneme-boundary prediction JSON into a debug PNG."
+                    },
+                    {
+                        "path":  "scripts/dev/visualize_hsmm_timeline.py",
+                        "status":  "active",
+                        "owner":  "pipeline",
+                        "note":  "Render HSMM state spans, selected boundary events, and generated OTO parameters from timeline.jsonl into HTML."
                     }
                 ]
 }

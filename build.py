@@ -270,6 +270,36 @@ def _assert_build_python_version(expected=EXPECTED_BUILD_PYTHON):
         )
 
 
+def _ensure_wfl_runtime_bundle() -> str:
+    runtime_root = os.path.join(BUILD_ASSET_DIR, "wfl_runtime")
+    required = [
+        os.path.join(runtime_root, "python", "python.exe"),
+        os.path.join(runtime_root, "WFL-ASR", "infer.py"),
+        os.path.join(runtime_root, "WFL-ASR", "model.py"),
+        os.path.join(runtime_root, "WFL-ASR", "utils.py"),
+        os.path.join(runtime_root, "WFL-ASR", "encoder", "model.safetensors"),
+    ]
+    for language in ("japanese", "korean"):
+        required.extend(
+            [
+                os.path.join(runtime_root, "models", language, "config.yaml"),
+                os.path.join(runtime_root, "models", language, "last.ckpt"),
+                os.path.join(runtime_root, "models", language, "phonemes.txt"),
+            ]
+        )
+    if not all(os.path.isfile(path) for path in required):
+        prepare_script = os.path.join(APP_DIR, "scripts", "build", "prepare_wfl_runtime.py")
+        if not os.path.isfile(prepare_script):
+            raise FileNotFoundError(f"WFL bundle preparation script not found: {prepare_script}")
+        print("[INFO] Preparing bundled WFL runtime...")
+        subprocess.run([sys.executable, prepare_script], cwd=APP_DIR, check=True)
+    missing = [path for path in required if not os.path.isfile(path)]
+    if missing:
+        lines = "\n".join(f"  - {path}" for path in missing)
+        raise RuntimeError(f"WFL runtime bundle is incomplete:\n{lines}")
+    return runtime_root
+
+
 def _normalize_channel(channel: str) -> str:
     normalized = (channel or "").strip().lower()
     return CHANNEL_ALIASES.get(normalized, normalized)
@@ -1007,7 +1037,9 @@ def _is_forbidden_script_payload(parts: list[str], filename: str) -> bool:
 
 def _is_allowed_release_model_file(parts: list[str]) -> bool:
     joined = "/".join(parts).strip().lower()
-    return joined in RELEASE_ALLOWED_MODEL_FILE_PATHS
+    if joined in RELEASE_ALLOWED_MODEL_FILE_PATHS:
+        return True
+    return "/wfl_runtime/models/" in f"/{joined}/"
 
 
 def _is_forbidden_release_file(rel_path: str) -> bool:
@@ -1150,6 +1182,27 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         if len(removed_forbidden) > 40:
             print(f"      ... and {len(removed_forbidden) - 40} more")
     _validate_release_payload_no_training_data(release_dir)
+
+    wfl_source = _ensure_wfl_runtime_bundle()
+    wfl_parent = release_dir if onefile else os.path.join(release_dir, app_name)
+    wfl_target = os.path.join(wfl_parent, "wfl_runtime")
+    if os.path.isdir(wfl_target):
+        _safe_rmtree(wfl_target)
+    shutil.copytree(wfl_source, wfl_target)
+    required_wfl_release_files = [
+        os.path.join(wfl_target, "python", "python.exe"),
+        os.path.join(wfl_target, "WFL-ASR", "infer.py"),
+        os.path.join(wfl_target, "WFL-ASR", "encoder", "model.safetensors"),
+        os.path.join(wfl_target, "models", "japanese", "last.ckpt"),
+        os.path.join(wfl_target, "models", "korean", "last.ckpt"),
+    ]
+    missing_wfl_release_files = [
+        path for path in required_wfl_release_files if not os.path.isfile(path)
+    ]
+    if missing_wfl_release_files:
+        lines = "\n".join(f"  - {path}" for path in missing_wfl_release_files)
+        raise RuntimeError(f"Packaged WFL runtime is incomplete:\n{lines}")
+    print(f"   -> copied WFL runtime: {wfl_target}")
 
     if os.name == "nt":
         release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
@@ -1325,6 +1378,8 @@ def main():
         print("[INFO] bundle-mode=online: skipping bundled runtime assets (downloaded at runtime).")
     else:
         _ensure_micromamba_exe()
+    wfl_runtime_root = _ensure_wfl_runtime_bundle()
+    print(f"[INFO] wfl_runtime={wfl_runtime_root}")
     ffmpeg_bin = ""
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:
