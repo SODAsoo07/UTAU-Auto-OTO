@@ -227,45 +227,12 @@ class TabBuildersMixin:
             text_color=PALETTE.header_accent,
         ).pack(anchor="w", pady=(0, 4))
 
-        mfa_btn_row = ctk.CTkFrame(left_actions, fg_color="transparent")
-        mfa_btn_row.pack(anchor="w")
-        mfa_btn_row.grid_columnconfigure(0, weight=1)
-        mfa_btn_row.grid_columnconfigure(1, weight=1)
+        aligner_btn_row = ctk.CTkFrame(left_actions, fg_color="transparent")
+        aligner_btn_row.pack(anchor="w")
+        aligner_btn_row.grid_columnconfigure(0, weight=1)
 
-        self.mfa_repair_btn = ctk.CTkButton(
-            mfa_btn_row,
-            text=t("🔍 MFA 진단/복구"),
-            width=108,
-            fg_color="#B0BEC5",
-            hover_color="#90A4AE",
-            text_color="black",
-            command=self._run_mfa_diagnose_repair,
-        )
-        self.mfa_repair_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
-
-        self.mfa_install_btn = ctk.CTkButton(
-            mfa_btn_row,
-            text=t("⬇ MFA 원클릭 설치"),
-            width=108,
-            fg_color="#FFA726",
-            hover_color="#FB8C00",
-            text_color="black",
-            command=self._run_mfa_setup,
-        )
-        mfa_ready = bool(getattr(self, "_mfa_ui_ready", False))
-        if getattr(self, "_mfa_install_in_progress", False):
-            self.mfa_install_btn.configure(text=t("🔧 설치 중..."), state="disabled", fg_color="#B0BEC5")
-        elif getattr(self, "_mfa_path_probe_pending", False):
-            self.mfa_install_btn.configure(text=t("확인 중..."), state="disabled", fg_color="#B0BEC5")
-        elif mfa_ready:
-            self.mfa_install_btn.configure(text=t("✅ 설치 완료"), state="disabled", fg_color="#388E3C")
-        self.mfa_install_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
-
-        # WFL-ASR (default engine) status/diagnostic button. Shown contextually:
-        # MFA buttons appear only when MFA is the selected aligner, this one only
-        # when WFL is selected (see _sync_aligner_ui).
         self.wfl_status_btn = ctk.CTkButton(
-            mfa_btn_row,
+            aligner_btn_row,
             text=t("🔍 WFL 상태 확인"),
             width=120,
             fg_color="#90CAF9",
@@ -276,7 +243,7 @@ class TabBuildersMixin:
         self.wfl_status_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
 
         self.wfl_model_btn = ctk.CTkButton(
-            mfa_btn_row,
+            aligner_btn_row,
             text=t("⬇ WFL 모델 받기"),
             width=120,
             fg_color="#FFA726",

@@ -8,7 +8,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Callable, Dict, List, Optional
 
-from core.mfa_runner import find_mfa_executable, run_mfa_align
 from core.oto_ml_prepare_discovery import (
     _discover_work_items,
     _has_textgrid_files,
@@ -134,72 +133,10 @@ def _write_prepare_checkpoint(
     return _atomic_write_json(path, payload)
 
 
-def _should_retry_mfa_with_fallback(err: str) -> bool:
-    text = str(err or "").lower()
-    if not text:
-        return False
-    if "missing korean tokenizer dependencies" in text:
-        return False
-    if "missing japanese tokenizer dependencies" in text:
-        return False
-    if "mfa executable not found" in text:
-        return False
-    return (
-        "code: 3221225477" in text
-        or "code: -1073741819" in text
-        or "access violation" in text
-    )
 
 
-def _preferred_mfa_profiles_for_prepare(language: str) -> list[str]:
-    raw = str(os.environ.get("UTOA_ML_PREPARE_MFA_PROFILE", "")).strip().lower()
-    valid = ["default", "accurate", "fast"]
-    primary = raw if raw in valid else ("default" if str(language or "").strip().lower() == "korean" else "accurate")
-
-    # Retry policy: one retry at most (total max 2 attempts).
-    fallback = "fast"
-    if primary == "fast":
-        fallback = "default"
-    elif primary == "accurate":
-        fallback = "default"
-    if fallback == primary:
-        return [primary]
-    return [primary, fallback]
-
-
-def _run_mfa_align_with_fallbacks(
-    *,
-    mfa_path: str,
-    item: PreparedAutoPair,
-    logs: List[str],
-) -> tuple[bool, str, str]:
-    profiles = _preferred_mfa_profiles_for_prepare(item.language)
-    last_err = ""
-
-    for idx, profile in enumerate(profiles):
-        if idx > 0 and not _should_retry_mfa_with_fallback(last_err):
-            break
-        logs.append(f"[MFA] Align attempt profile={profile}")
-        ok, err = run_mfa_align(
-            mfa_path=mfa_path,
-            wav_folder=item.work_dir,
-            dict_path=item.dict_path,
-            output_folder=item.tg_dir,
-            language=item.language,
-            callback=logs.append,
-            align_profile=profile,
-        )
-        if ok:
-            return True, "", profile
-        last_err = err
-        logs.append(f"[MFA] Align attempt failed profile={profile}: {err}")
-
-    return False, last_err, ""
-
-
-def _prepare_one_item(item: PreparedAutoPair, mfa_path: str) -> tuple[PreparedAutoPair, List[str]]:
+def _prepare_one_item(item: PreparedAutoPair, mfa_path: str = "") -> tuple[PreparedAutoPair, List[str]]:
     logs: List[str] = []
-    item.mfa_path = mfa_path
     item.tg_dir = item.work_dir
     item.auto_oto = os.path.join(item.work_dir, "oto_auto_ml.ini")
     item.dict_path = os.path.join(item.work_dir, "dictionary_auto.txt")
@@ -214,33 +151,9 @@ def _prepare_one_item(item: PreparedAutoPair, mfa_path: str) -> tuple[PreparedAu
             item.reason = f"auto_oto_failed:{exc}"
         return item, logs
 
-    if not mfa_path:
-        item.status = "skip"
-        item.reason = "missing_mfa"
-        return item, logs
-
-    try:
-        _prepare_lab_and_dict(item, logs)
-        item.tg_dir = item.work_dir
-        os.makedirs(item.tg_dir, exist_ok=True)
-        ok, err, used_profile = _run_mfa_align_with_fallbacks(
-            mfa_path=mfa_path,
-            item=item,
-            logs=logs,
-        )
-        if not ok:
-            item.status = "skip"
-            item.reason = f"align_failed:{err}"
-            return item, logs
-        _generate_auto_oto(item, logs)
-        item.status = "prepared"
-        if used_profile:
-            item.reason = f"align_profile:{used_profile}"
-        return item, logs
-    except Exception as exc:
-        item.status = "skip"
-        item.reason = f"exception:{exc}"
-        return item, logs
+    item.status = "skip"
+    item.reason = "no_textgrid"
+    return item, logs
 
 
 def prepare_staged_auto_pairs(
@@ -261,7 +174,7 @@ def prepare_staged_auto_pairs(
     )
     if workers and workers > 1:
         os.environ.setdefault("UTOA_MFA_ROOT_DIR_MODE", "per_process")
-    mfa_path = find_mfa_executable() or ""
+    mfa_path = ""
     results: List[PreparedAutoPair] = []
     logs_by_item: Dict[str, List[str]] = {}
     resume_skipped = 0

@@ -1,4 +1,4 @@
-﻿"""
+"""
 UTAU Auto OTO - 한국어/일본어 UTAU 음원 자동 OTO 생성기
 윈도우 독립 실행형 GUI 프로그램 (CustomTkinter 기반)
 """
@@ -82,7 +82,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "customtkinter"])
     import customtkinter as ctk
 
-from core.mfa_runner import find_mfa_executable
 from ui.app_mixins import AppRuntimeMixin, ConfigMixin, FileDialogMixin
 from ui.align_actions_mixin import AlignActionsMixin
 from ui.oto_actions_mixin import OtoActionsMixin
@@ -495,7 +494,7 @@ class App(
 
         try:
             self._build_ui()
-            self._start_async_mfa_path_probe()
+            self.mfa_path = ""
             if hasattr(self, "_install_adaptive_ui_scaling"):
                 self._install_adaptive_ui_scaling()
             if hasattr(self, "_install_global_exception_hooks"):
@@ -578,41 +577,6 @@ class App(
         except Exception:
             logger.exception("초기 CUDA 런타임 점검 예약 중 예외가 발생했습니다.")
 
-    def _start_async_mfa_path_probe(self):
-        if bool(getattr(self, "_mfa_path_probe_started", False)):
-            return
-        self._mfa_path_probe_started = True
-
-        def _worker():
-            resolved = ""
-            try:
-                resolved = find_mfa_executable() or ""
-            except Exception:
-                resolved = ""
-
-            def _apply():
-                self.mfa_path = resolved
-                self._mfa_path_probe_pending = False
-                try:
-                    self._update_mfa_status(bool(self.mfa_path))
-                except Exception:
-                    pass
-                try:
-                    self._sync_aligner_ui()
-                except Exception:
-                    pass
-                if self.mfa_path:
-                    logger.info(f"MFA 경로: {self.mfa_path}")
-                else:
-                    logger.warning("MFA를 찾을 수 없습니다.")
-
-            try:
-                self.after(0, _apply)
-            except Exception:
-                pass
-
-        thread = threading.Thread(target=_worker, name="mfa-path-probe", daemon=True)
-        thread.start()
 
 
 def _write_startup_crash_log(exc):
