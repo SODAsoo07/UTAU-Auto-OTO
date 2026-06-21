@@ -80,7 +80,8 @@ def _env(name: str) -> str:
 
 
 def _app_root() -> str:
-    # <root>/core/alignment/wfl_runner.py -> <root>
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -94,10 +95,14 @@ def _resolve_wfl_python() -> str:
     bundled_candidates = [
         os.path.join(root, "wfl_runtime", "python", "python.exe"),
         os.path.join(root, "wfl_runtime", "python.exe"),
+        os.path.join(root, "wfl_runtime", "python", "python"),
+        os.path.join(root, "wfl_runtime", "python3"),
     ]
     for candidate in bundled_candidates:
         if os.path.isfile(candidate):
             return candidate
+    if getattr(sys, "frozen", False):
+        return ""
     return sys.executable or ""
 
 
@@ -845,10 +850,11 @@ def check_wfl_ready(
             engine="wfl", language=lang, ready=False,
         )
 
-    _emit(callback, f"[WFL] ready: model={model_dir} wav_files={len(wav_files)}")
+    _emit(callback, f"[WFL] ready: model={model_dir} wav_files={len(wav_files)} frozen={getattr(sys, 'frozen', False)}")
     return make_runtime_report(
         "align", OK, "WFL alignment ready",
         engine="wfl", language=lang, ready=True, wav_count=int(len(wav_files)),
+        app_root=_app_root(), frozen=bool(getattr(sys, "frozen", False)),
     )
 
 

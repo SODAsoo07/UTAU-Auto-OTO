@@ -1343,7 +1343,7 @@ class AppRuntimeMixin:
     def _reset_developer_settings_defaults(self) -> None:
         defaults = {
             "developer_mode_enabled_var": False,
-            "aligner_var": "WFL",
+            "aligner_var": "HSMM OTO",
             "no_mfa_oto_mode_var": "베이스 OTO 재매핑 + 보정",
             "oto_crnn_model_path_var": "",
             "oto_crnn_engine_var": "boundary_decoder",
@@ -1353,7 +1353,7 @@ class AppRuntimeMixin:
             "oto_crnn_device_var": "auto",
             "oto_crnn_special_aliases_var": "",
             "enable_ml_correction_var": True,
-            "disable_lightgbm_correction_var": False,
+            "disable_lightgbm_correction_var": True,
             "ml_route_var": "자동(자동 라우팅)",
             "ml_selector_mode_var": "+셀렉터",
             "ml_coupled_enable_var": True,
@@ -2372,6 +2372,21 @@ class AppRuntimeMixin:
             self._ui_log_flush_pending = True
             self._after_safe(self._flush_ui_log_buffer, delay_ms=120)
 
+    def _insert_status_to_log(self, msg):
+        line = str(msg or "").rstrip()
+        if not line:
+            return
+        buf = getattr(self, "_ui_log_buffer", None)
+        if buf is None:
+            buf = []
+            self._ui_log_buffer = buf
+        buf.append(line)
+        if getattr(self, "log_text", None) is None:
+            return
+        if not getattr(self, "_ui_log_flush_pending", False):
+            self._ui_log_flush_pending = True
+            self._after_safe(self._flush_ui_log_buffer, delay_ms=120)
+
     def _append_log(self, msg, log_to_file=True):
         raw_msg = self._mask_sensitive_text(str(msg or ""))
         self._append_detail_log(raw_msg)
@@ -2650,6 +2665,9 @@ class AppRuntimeMixin:
     def _set_status(self, msg):
         msg = self._normalize_ui_message(str(msg))
         color = self._status_color_for_message(msg)
+
+        if self.is_running and msg.strip():
+            self._insert_status_to_log(msg)
 
         def _do():
             self.status_label.configure(text=msg, text_color=color)
@@ -3386,7 +3404,7 @@ class ConfigMixin:
             ),
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
-            "disable_lightgbm_correction": self.disable_lightgbm_correction_var.get() if hasattr(self, "disable_lightgbm_correction_var") else False,
+            "disable_lightgbm_correction": self.disable_lightgbm_correction_var.get() if hasattr(self, "disable_lightgbm_correction_var") else True,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "+셀렉터",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
@@ -3609,7 +3627,7 @@ class ConfigMixin:
             if "use_boundary_model" in config and hasattr(self, "use_boundary_model_var"):
                 self.use_boundary_model_var.set(bool(config.get("use_boundary_model", False)))
             if hasattr(self, "disable_lightgbm_correction_var"):
-                self.disable_lightgbm_correction_var.set(bool(config.get("disable_lightgbm_correction", False)))
+                self.disable_lightgbm_correction_var.set(bool(config.get("disable_lightgbm_correction", True)))
             if hasattr(self, "cvn_correction_enable_var"):
                 self.cvn_correction_enable_var.set(False)
             if hasattr(self, "cvn_low_conf_only_var"):
@@ -3690,7 +3708,7 @@ class ConfigMixin:
                     "mfa": "MFA (레거시)",
                     "wfl": "WFL",
                 }
-                self.aligner_var.set(aligner_label_map.get(saved_aligner, "WFL"))
+                self.aligner_var.set(aligner_label_map.get(saved_aligner, "HSMM OTO"))
             if "developer_mode_enabled" in config and hasattr(self, "developer_mode_enabled_var"):
                 allow_persist_dev = str(os.environ.get("UTOA_ALLOW_PERSISTENT_DEVELOPER_MODE", "")).strip().lower() in {
                     "1", "true", "yes", "on"

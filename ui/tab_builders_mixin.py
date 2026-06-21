@@ -1638,7 +1638,7 @@ class TabBuildersMixin:
         self._advanced_setting_vars_ready = True
         defaults = {
             "enable_ml_correction_var": ("bool", True),
-            "disable_lightgbm_correction_var": ("bool", False),
+            "disable_lightgbm_correction_var": ("bool", True),
             "vc_correction_enable_var": ("bool", True),
             "kr_continuity_enable_var": ("bool", True),
             "cvn_correction_enable_var": ("bool", True),

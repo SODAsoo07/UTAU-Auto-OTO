@@ -744,7 +744,10 @@ def _template_group_in_filename_order(
         )
         if match_index is None:
             continue
-        ordered.append(remaining.pop(match_index))
+        matched = remaining.pop(match_index)
+        if record.expected_phone_indices and matched.expected_phone_indices is None:
+            matched = replace(matched, expected_phone_indices=record.expected_phone_indices)
+        ordered.append(matched)
     # CV_head aliases like "- w", "- ka" (consonant-led head) represent the file's
     # first phonetic onset. If one ended up in remaining (no row_plan match) it
     # would be appended at the end, causing anchor assignment to place it near the
