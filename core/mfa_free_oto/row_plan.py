@@ -354,6 +354,7 @@ def row_plan_to_template_rows(records: Sequence[RowPlanRecord]) -> list[OtoTempl
             alias=record.alias,
             timing=zero,
             raw_line=f"{record.wav}={record.alias},0,0,0,0,0",
+            expected_phone_indices=record.expected_phone_indices or None,
         )
         for record in records
     ]

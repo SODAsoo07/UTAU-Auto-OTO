@@ -40,7 +40,7 @@ JAPANESE_CVVC_BOOTSTRAP_PROFILE: dict[str, tuple[float, float, float]] = {
     "cv": (60.0, 35.0, 90.0),          # gold median pre=54, cons=147
     "v": (60.0, 35.0, 90.0),
     "vv": (60.0, 35.0, 90.0),
-    "vc": (180.0, 130.0, 50.0),        # gold median pre=200, cons=239
+    "vc": (200.0, 150.0, 30.0),        # gold median pre=200, cons=230
 }
 CVVC_CV_PRE_TARGET_MS = 150.0
 CVVC_CV_PRE_MAX_MS = 180.0
@@ -56,6 +56,9 @@ JAPANESE_CVVC_CV_PROFILE_SAFE_PRIOR_RULES = frozenset(
         "cvvc_following_cv_block_cutoff_cap",
         "cvvc_cv_next_transition_cutoff_cap",
         "cvvc_cv_sequence_next_cv_cutoff_cap",
+        "cvvc_headed_cv_vowel_nucleus_repair",
+        "cvvc_headed_cv_previous_vowel_order_guard_repair",
+        "cvvc_headed_cv_vowel_nucleus_order_guard_repair",
     }
 )
 JAPANESE_CVVC_HEADED_CV_VOWEL_NUCLEUS_LEAD_MS = 480.0
@@ -112,6 +115,8 @@ SONORANT_ONSET_REFINE_RIGHT_WINDOW_MS = 35.0
 VOWEL_BOUNDARY_REFINE_WINDOW_MS = 90.0
 VOWEL_BOUNDARY_NUCLEUS_REFINE_WINDOW_MS = 220.0
 VOWEL_BOUNDARY_NUCLEUS_REFINE_RIGHT_WINDOW_MS = 45.0
+JAPANESE_CVVC_CV_NUCLEUS_REFINE_WINDOW_MS = 480.0
+JAPANESE_CVVC_CV_NUCLEUS_REFINE_RIGHT_WINDOW_MS = 30.0
 JAPANESE_CVVC_VC_SEQUENCE_PRE_MS = 110.0
 JAPANESE_CVVC_VC_SEQUENCE_OVERLAP_MS = 100.0
 JAPANESE_CVVC_VC_SEQUENCE_CONSONANT_MS = 120.0
@@ -1172,7 +1177,7 @@ KOREAN_CVC_PITCH_SUFFIX_GRID_SUBTYPE_PROFILE_BY_KEY: Mapping[str, tuple[float, f
     "n9_p8_release_r": (0.774518, 188.8, -218.2, 96.9, 47.6),
 }
 JAPANESE_CVVC_HSMM_ANCHOR_LEAD_MS = {
-    "cv": 50.0,
+    "cv": 0.0,
     "vc": 45.0,
     "vcv": 100.0,
     "vv": 40.0,
@@ -1198,6 +1203,7 @@ class OtoTemplateRow:
     timing: OtoTiming
     raw_line: str = ""
     source_row_index: int = -1
+    expected_phone_indices: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1744,7 +1750,7 @@ def assign_template_row_anchors(
     out: list[OtoAnchor | None] = []
     last_time = -float("inf")
     last_target_phone_index: int | None = None
-    alias_targets = _assign_alias_target_indices(template_rows, expected_phones or (), language=language)
+    alias_targets = _alias_targets_from_template_rows_or_dp(template_rows, expected_phones or (), language=language)
     row_roles = [_alias_type_for_row(row.alias, "auto") for row in template_rows]
     decoded_count = sum(1 for item in candidates if "slot_decoded_event" in item.warnings)
     for row_idx, row in enumerate(template_rows):
@@ -1926,7 +1932,7 @@ def assign_template_row_anchors(
         expected_phones or (),
         language=language,
     )
-    return _refine_anchor_sequence_locally(posterior, out)
+    return _refine_anchor_sequence_locally(posterior, out, language=language)
 
 
 def _is_likely_leading_sonorant_noise_anchor(
@@ -2511,7 +2517,7 @@ def expected_slots_for_template_rows(
     expected = [str(phone or "").strip().lower() for phone in expected_phones]
     if not template_rows or not expected:
         return []
-    targets = _assign_alias_target_indices(template_rows, expected, language=language)
+    targets = _alias_targets_from_template_rows_or_dp(template_rows, expected, language=language)
     out: list[ExpectedSlot] = []
     seen: set[tuple[int, str]] = set()
     roles = [_alias_type_for_row(row.alias, "auto") for row in template_rows]
@@ -2617,7 +2623,7 @@ def _prepend_korean_leading_context_slots(
     if not expected:
         return list(row_slots)
     roles = [_alias_type_for_row(row.alias, "auto") for row in template_rows]
-    targets = _assign_alias_target_indices(template_rows, expected, language=language)
+    targets = _alias_targets_from_template_rows_or_dp(template_rows, expected, language=language)
     first_start: int | None = None
     for row, role, target in zip(template_rows, roles, targets):
         if target is None:
@@ -2655,7 +2661,7 @@ def _prepend_japanese_cvvc_leading_context_slots(
     if not expected:
         return list(row_slots)
     roles = [_alias_type_for_row(row.alias, "auto") for row in template_rows]
-    targets = _assign_alias_target_indices(template_rows, expected, language=language)
+    targets = _alias_targets_from_template_rows_or_dp(template_rows, expected, language=language)
     first_start: int | None = None
     for row, role, target in zip(template_rows, roles, targets):
         if target is None:
@@ -10065,8 +10071,15 @@ def _cvvc_vc_context_pre_ms(
     anchor: OtoAnchor,
     anchor_abs_ms: float,
 ) -> tuple[float, tuple[str, ...]]:
-    base_cap = max(12.0, float(config.vc_pre_max_ms))
-    base = min(max(12.0, float(config.pre_target_ms) * 0.75), base_cap, max(0.0, float(anchor_abs_ms)))
+    profile_pre = 0.0
+    if _is_japanese_cvvc_config(config):
+        profile_pre = float(JAPANESE_CVVC_BOOTSTRAP_PROFILE["vc"][0])
+    base_cap = max(12.0, float(config.vc_pre_max_ms), profile_pre)
+    base = min(
+        max(12.0, float(config.pre_target_ms) * 0.75, profile_pre),
+        base_cap,
+        max(0.0, float(anchor_abs_ms)),
+    )
     if not _is_cvvc_format(config):
         return base, ()
     previous_end = anchor.previous_vowel_end_abs_ms
@@ -10262,6 +10275,24 @@ def _repair_cvvc_cv_rejected_next_vowel_rows(
     return [_repair_cvvc_cv_rejected_next_vowel_row(row, config) for row in rows]
 
 
+def _cvvc_has_direct_filename_hsmm_anchor(
+    row: AdaptedOtoRow,
+    *,
+    event_labels: Sequence[str] = (),
+) -> bool:
+    anchor = row.anchor
+    if anchor is None or not np.isfinite(float(anchor.anchor_abs_ms)):
+        return False
+    warnings = {str(item) for item in (*row.warnings, *anchor.warnings)}
+    if "event_source:filename_hsmm" not in warnings:
+        return False
+    if any(item.startswith("synthetic_anchor:") for item in warnings):
+        return False
+    allowed = {str(item).strip().lower() for item in event_labels if str(item).strip()}
+    source_label = str(anchor.source_event_label or "").strip().lower()
+    return not allowed or source_label in allowed
+
+
 def _repair_cvvc_cv_rejected_next_vowel_row(
     row: AdaptedOtoRow,
     config: OtoAdapterConfig,
@@ -10352,6 +10383,8 @@ def _repair_cvvc_vc_next_vowel_local_row(
     if row.anchor is None:
         return row
     if row.applied_rules:
+        return row
+    if _cvvc_has_direct_filename_hsmm_anchor(row, event_labels=("phone_change",)):
         return row
     warnings = set(row.warnings)
     warnings.update(row.anchor.warnings)
@@ -11214,7 +11247,7 @@ def _repair_cvvc_cv_role_profile_rows(
 
 
 def _repair_cvvc_cv_role_profile_row(row: AdaptedOtoRow, config: OtoAdapterConfig) -> AdaptedOtoRow:
-    if _alias_type_for_row(row.alias, config.alias_type) != "cv":
+    if _adaptation_alias_type(row.alias, config.alias_type, row.anchor) != "cv":
         return row
     if _is_nonphonetic_special_alias(row.alias) or _is_terminal_silence_alias(row.alias):
         return row
@@ -11504,6 +11537,8 @@ def _repair_cvvc_headed_regular_vc_from_next_cv_row(
         return row
     if "special_alias_source_timing_preserve" in row.applied_rules:
         return row
+    if _cvvc_has_direct_filename_hsmm_anchor(row, event_labels=("phone_change",)):
+        return row
 
     current_offset = float(row.timing.offset)
     current_pre_abs = current_offset + float(row.timing.preutterance)
@@ -11687,6 +11722,8 @@ def _repair_cvvc_internal_vc_slot_bound_row(
     ):
         return row
     if "special_alias_source_timing_preserve" in row.applied_rules:
+        return row
+    if _cvvc_has_direct_filename_hsmm_anchor(row, event_labels=("phone_change",)):
         return row
 
     current_offset = float(row.timing.offset)
@@ -13019,6 +13056,8 @@ def _repair_cvvc_headed_cv_vowel_nucleus_order_guard_row(
     if _alias_type_for_row(row.alias, config.alias_type) != "cv":
         return row
     if "cvvc_headed_cv_vowel_nucleus_repair" not in row.applied_rules:
+        return row
+    if "cvvc_headed_regular_vc_from_next_cv_repair" in previous.applied_rules:
         return row
     current_offset = float(row.timing.offset)
     previous_pre_abs = float(previous.timing.offset) + float(previous.timing.preutterance)
@@ -15961,6 +16000,15 @@ def _repair_cvvc_headless_pitch_suffix_block_segment(
         return
     if not any(len(_alias_phone_sequence(rows[index].alias)) > 1 for index in cv_indices):
         return
+    direct_hsmm_cv_count = sum(
+        _cvvc_has_direct_filename_hsmm_anchor(
+            rows[index],
+            event_labels=("cv_boundary",),
+        )
+        for index in cv_indices
+    )
+    if direct_hsmm_cv_count >= max(2, (len(cv_indices) + 1) // 2):
+        return
     if any(
         _alias_type_for_row(rows[index].alias, config.alias_type) not in {"cv_head", "vc"}
         for index in range(start, first_cv)
@@ -18293,6 +18341,20 @@ def _anchor_warnings_with_target(anchor: OtoAnchor, role: str, target_phone_inde
     return warnings
 
 
+def _alias_targets_from_template_rows_or_dp(
+    rows: Sequence[OtoTemplateRow],
+    expected_phones: Sequence[str],
+    *,
+    language: str = "",
+) -> list[int | None]:
+    if not rows:
+        return []
+    pre_assigned = [row.expected_phone_indices for row in rows]
+    if all(indices is not None and len(indices) > 0 for indices in pre_assigned):
+        return [int(indices[-1]) for indices in pre_assigned]  # type: ignore[index]
+    return _assign_alias_target_indices(rows, expected_phones, language=language)
+
+
 def _assign_alias_target_indices(
     rows: Sequence[OtoTemplateRow],
     expected_phones: Sequence[str],
@@ -19271,6 +19333,7 @@ def _refine_anchor_sequence_locally(
     posterior: FramePosterior,
     anchors: Sequence[OtoAnchor | None],
     *,
+    language: str = "",
     window_ms: float = 25.0,
     attention_delta_ms: float = 12.0,
     low_margin_threshold: float = 0.04,
@@ -19287,7 +19350,15 @@ def _refine_anchor_sequence_locally(
         if anchor is None:
             continue
         anchor_is_sonorant = _anchor_phone_is_sonorant_like(anchor)
-        anchor_window = _local_refine_window_for_anchor(anchor, default_window_ms=max_window)
+        retarget_cv_boundary = _japanese_cv_nucleus_anchor_requires_boundary_refine(
+            anchor,
+            language=language,
+        )
+        anchor_window = _local_refine_window_for_anchor(
+            anchor,
+            default_window_ms=max_window,
+            language=language,
+        )
         scores = _local_refine_scores(posterior, anchor.role, times, phone=anchor.expected_phone)
         if scores.shape[0] != times.shape[0] or not np.any(scores):
             continue
@@ -19297,7 +19368,11 @@ def _refine_anchor_sequence_locally(
         lower = float(prev_anchor.anchor_abs_ms) + float(min_order_gap_ms) if prev_anchor is not None else -float("inf")
         upper = float(next_anchor.anchor_abs_ms) - float(min_order_gap_ms) if next_anchor is not None else float("inf")
         left_window = source_time - anchor_window
-        right_window = source_time + _local_refine_right_window_for_anchor(anchor, anchor_window)
+        right_window = source_time + _local_refine_right_window_for_anchor(
+            anchor,
+            anchor_window,
+            language=language,
+        )
         unrestricted = np.where((times >= left_window) & (times <= right_window))[0]
         if unrestricted.size == 0:
             continue
@@ -19312,11 +19387,12 @@ def _refine_anchor_sequence_locally(
                 unrestricted_time > upper + 1e-6
                 and _anchors_share_refine_target(anchor, next_anchor)
             )
-            if blocked_by_shared_target:
+            if blocked_by_shared_target and not retarget_cv_boundary:
                 continue
-            warnings.append("local_refine_rejected_slot_boundary")
-            refined[idx] = replace(anchor, warnings=tuple(dict.fromkeys(warnings)))
-            continue
+            if not retarget_cv_boundary:
+                warnings.append("local_refine_rejected_slot_boundary")
+                refined[idx] = replace(anchor, warnings=tuple(dict.fromkeys(warnings)))
+                continue
         allowed = np.where(
             (times >= left_window)
             & (times <= right_window)
@@ -19333,6 +19409,15 @@ def _refine_anchor_sequence_locally(
         refined_time = float(times[best_idx])
         delta = refined_time - source_time
         if abs(delta) <= 1e-6:
+            if retarget_cv_boundary:
+                warnings.append(
+                    f"cv_boundary_from_nucleus_refine:{source_time:.1f}->{refined_time:.1f}"
+                )
+                refined[idx] = replace(
+                    anchor,
+                    source_event_label="cv_boundary",
+                    warnings=tuple(dict.fromkeys(warnings)),
+                )
             continue
         span = estimate_vowel_span(posterior, refined_time)
         nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
@@ -19352,6 +19437,10 @@ def _refine_anchor_sequence_locally(
             warnings.append(f"sonorant_onset_refine_window:{anchor_window:.1f}")
         if _anchor_role_is_vowel_boundary_like(anchor):
             warnings.append("vowel_boundary_local_refine")
+        if retarget_cv_boundary:
+            warnings.append(
+                f"cv_boundary_from_nucleus_refine:{source_time:.1f}->{refined_time:.1f}"
+            )
         warnings.extend(nucleus_warnings)
         refined[idx] = replace(
             anchor,
@@ -19366,6 +19455,7 @@ def _refine_anchor_sequence_locally(
             vowel_nucleus_abs_ms=nucleus_time if nucleus_time is not None else anchor.vowel_nucleus_abs_ms,
             boundary_confidence=_anchor_boundary_confidence(posterior, refined_time, role=anchor.role),
             nucleus_confidence=max(float(anchor.nucleus_confidence or 0.0), float(nucleus_conf)),
+            source_event_label="cv_boundary" if retarget_cv_boundary else anchor.source_event_label,
             warnings=tuple(dict.fromkeys(warnings)),
         )
     return refined
@@ -19389,7 +19479,30 @@ def _anchor_role_is_vowel_boundary_like(anchor: OtoAnchor) -> bool:
     return str(anchor.role or "").strip().lower() in {"vcv", "vv"}
 
 
-def _local_refine_window_for_anchor(anchor: OtoAnchor, *, default_window_ms: float) -> float:
+def _japanese_cv_nucleus_anchor_requires_boundary_refine(
+    anchor: OtoAnchor,
+    *,
+    language: str,
+) -> bool:
+    return (
+        str(language or "").strip().lower() == "japanese"
+        and str(anchor.role or "").strip().lower() == "cv"
+        and str(anchor.source_event_label or "").strip().lower() == "vowel_nucleus"
+        and "event_source:filename_hsmm" in set(anchor.warnings)
+    )
+
+
+def _local_refine_window_for_anchor(
+    anchor: OtoAnchor,
+    *,
+    default_window_ms: float,
+    language: str = "",
+) -> float:
+    if _japanese_cv_nucleus_anchor_requires_boundary_refine(anchor, language=language):
+        return max(
+            float(default_window_ms),
+            float(JAPANESE_CVVC_CV_NUCLEUS_REFINE_WINDOW_MS),
+        )
     if _anchor_phone_is_sonorant_like(anchor):
         return max(float(default_window_ms), float(SONORANT_ONSET_REFINE_WINDOW_MS))
     if _anchor_role_is_vowel_boundary_like(anchor):
@@ -19399,7 +19512,17 @@ def _local_refine_window_for_anchor(anchor: OtoAnchor, *, default_window_ms: flo
     return float(default_window_ms)
 
 
-def _local_refine_right_window_for_anchor(anchor: OtoAnchor, anchor_window_ms: float) -> float:
+def _local_refine_right_window_for_anchor(
+    anchor: OtoAnchor,
+    anchor_window_ms: float,
+    *,
+    language: str = "",
+) -> float:
+    if _japanese_cv_nucleus_anchor_requires_boundary_refine(anchor, language=language):
+        return min(
+            float(anchor_window_ms),
+            float(JAPANESE_CVVC_CV_NUCLEUS_REFINE_RIGHT_WINDOW_MS),
+        )
     if _anchor_phone_is_sonorant_like(anchor):
         return min(float(anchor_window_ms), float(SONORANT_ONSET_REFINE_RIGHT_WINDOW_MS))
     if (

@@ -412,7 +412,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=["WFL", HSMM_OTO_LABEL, "MFA (레거시)"],
+            values=[HSMM_OTO_LABEL, "WFL", "MFA (레거시)"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -1696,7 +1696,7 @@ class LayoutMixin:
         # model) is checked at run time and falls back if not configured.
         # MFA is kept as a legacy option; the heuristic sequence aligner is moved
         # behind developer mode now that WFL is the primary non-MFA engine.
-        options = ["WFL", HSMM_OTO_LABEL, "MFA (레거시)"]
+        options = [HSMM_OTO_LABEL, "WFL", "MFA (레거시)"]
         if developer_enabled:
             options = options + ["전용(시퀀스)"]
         lang = self._get_language()

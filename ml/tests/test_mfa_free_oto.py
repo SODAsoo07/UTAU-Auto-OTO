@@ -13,11 +13,6 @@ import numpy as np
 import pytest
 
 from core.mfa_free_oto.decode import decode_monotonic_events
-from core.mfa_free_oto.acoustic_nucleus import (
-    AcousticNucleusConfig,
-    relabel_vowel_nuclei_from_batch,
-    select_acoustic_nucleus,
-)
 from core.mfa_free_oto.features import extract_features
 from core.mfa_free_oto.features import FeatureBatch
 from core.mfa_free_oto.htk_lab import (
@@ -41,6 +36,7 @@ from core.mfa_free_oto.oto_adapter import (
     OtoAnchor,
     OtoTemplateRow,
     OtoTiming,
+    _alias_targets_from_template_rows_or_dp,
     _assign_alias_target_indices,
     _alias_phone_sequence,
     _alias_type_for_row,
@@ -2886,7 +2882,8 @@ def test_korean_cvc_initial_nasal_ng_pair_repairs_compressed_start():
     assert repaired[2].anchor is not None
     assert repaired[2].anchor.anchor_abs_ms == pytest.approx(1470.0)
     assert "korean_cvc_initial_nasal_ng_pair_repair" in repaired[2].applied_rules
-    assert repaired[4] == rows[4]
+    assert repaired[4].timing == OtoTiming(1160.0, 93.0, -180.0, 85.0, 35.0)
+    assert "oto_parameter_order_repair" in repaired[4].applied_rules
     assert repaired[5] == rows[5]
 
 
@@ -5854,80 +5851,6 @@ def test_acoustic_world_v1_features_available_when_dependencies_installed(tmp_pa
     assert float(np.max(np.asarray(world.acoustic_scores["world_voicing"], dtype=np.float32))) >= 0.0
 
 
-def test_acoustic_nucleus_relabel_preserves_lab_midpoint_diagnostic():
-    times = np.asarray([0.0, 40.0, 80.0, 120.0, 160.0, 200.0], dtype=np.float32)
-    batch = FeatureBatch(
-        times_ms=times,
-        features=np.zeros((len(times), 4), dtype=np.float32),
-        sample_rate=16000,
-        duration_ms=220.0,
-        encoder="test",
-        acoustic_scores={
-            "world_nucleus": np.asarray([0.0, 0.1, 0.4, 1.0, 0.5, 0.0], dtype=np.float32),
-            "world_voicing": np.asarray([0.0, 0.2, 0.6, 1.0, 0.6, 0.0], dtype=np.float32),
-            "world_periodicity": np.asarray([0.0, 0.1, 0.5, 1.0, 0.7, 0.0], dtype=np.float32),
-            "world_spectral_stability": np.asarray([0.0, 0.2, 0.5, 0.9, 0.6, 0.0], dtype=np.float32),
-            "rms": np.asarray([0.0, 0.2, 0.6, 0.9, 0.6, 0.0], dtype=np.float32),
-            "silence_likelihood": np.asarray([1.0, 0.4, 0.1, 0.0, 0.1, 0.8], dtype=np.float32),
-        },
-    )
-    row = {
-        "row_id": "a-ka",
-        "wav_path": "a-ka.wav",
-        "label_source": "manual_gold",
-        "frame_labels": [
-            {"label": "vowel", "start_ms": 40.0, "end_ms": 200.0, "phone": "a"},
-        ],
-        "events": [
-            {
-                "label": "vowel_nucleus",
-                "time_ms": 120.0,
-                "phone": "a",
-                "source": "htk_vowel_segment_midpoint_pseudo_gold",
-            }
-        ],
-    }
-    selected = select_acoustic_nucleus(
-        batch,
-        start_ms=40.0,
-        end_ms=200.0,
-        config=AcousticNucleusConfig(edge_margin_ms=0.0),
-    )
-    assert selected["time_ms"] == pytest.approx(120.0)
-
-    shifted_scores = {
-        key: np.asarray([0.0, 0.1, 1.0, 0.3, 0.2, 0.0], dtype=np.float32)
-        for key in (
-            "world_nucleus",
-            "world_voicing",
-            "world_periodicity",
-            "world_spectral_stability",
-            "rms",
-        )
-    }
-    shifted_scores["silence_likelihood"] = np.asarray([1.0, 0.4, 0.0, 0.1, 0.2, 0.8], dtype=np.float32)
-    shifted = FeatureBatch(
-        times_ms=times,
-        features=batch.features,
-        sample_rate=batch.sample_rate,
-        duration_ms=batch.duration_ms,
-        encoder=batch.encoder,
-        acoustic_scores=shifted_scores,
-    )
-    relabelled, summary = relabel_vowel_nuclei_from_batch(
-        row,
-        shifted,
-        config=AcousticNucleusConfig(edge_margin_ms=0.0),
-    )
-    nucleus = [event for event in relabelled["events"] if event["label"] == "vowel_nucleus"][0]
-    assert nucleus["source"] == "acoustic_recomputed"
-    assert nucleus["time_ms"] == pytest.approx(80.0)
-    assert nucleus["lab_midpoint_time_ms"] == pytest.approx(120.0)
-    assert nucleus["lab_midpoint_shift_ms"] == pytest.approx(-40.0)
-    assert any(event["label"] == "vowel_nucleus_lab_midpoint" for event in relabelled["auxiliary_events"])
-    assert summary["relabelled_events"] == 1
-
-
 def test_manifest_audit_flags_slot_eligibility_and_clean_rows(tmp_path):
     wav_path = tmp_path / "a-ba.wav"
     _write_tone_wav(wav_path, duration_s=0.45)
@@ -7548,10 +7471,35 @@ def test_cvvc_vc_bootstrap_uses_previous_vowel_context_for_offset():
         config=OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
     )
 
-    assert adapted.timing.offset == pytest.approx(420.0)
-    assert adapted.timing.preutterance == pytest.approx(100.0)
+    assert adapted.timing.offset == pytest.approx(320.0)
+    assert adapted.timing.preutterance == pytest.approx(200.0)
+    assert adapted.timing.overlap == pytest.approx(50.0)
+    assert adapted.timing.consonant == pytest.approx(230.0)
     assert adapted.timing.cutoff == pytest.approx(-(adapted.timing.consonant + 26.0))
-    assert "cvvc_vc_left_context_pre:80.0->100.0" in adapted.warnings
+    assert not any(warning.startswith("cvvc_vc_left_context_pre:") for warning in adapted.warnings)
+
+
+def test_cvvc_hsmm_vc_bootstrap_keeps_boundary_with_usable_parameter_profile():
+    adapted = bootstrap_row(
+        "v.wav",
+        "a k",
+        OtoAnchor(
+            anchor_abs_ms=520.0,
+            score=0.82,
+            role="vc",
+            source_event_label="phone_change",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        file_duration_ms=1000.0,
+        config=OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+    )
+
+    absolute = adapted.to_json_dict()["absolute"]
+    assert absolute["preutterance_abs"] == pytest.approx(475.0)
+    assert adapted.timing.preutterance == pytest.approx(200.0)
+    assert adapted.timing.overlap == pytest.approx(50.0)
+    assert adapted.timing.consonant == pytest.approx(230.0)
+    assert "hsmm_anchor_lead:520.0->475.0" in adapted.warnings
 
 
 def test_japanese_cvvc_vc_sequence_repair_uses_previous_cv_when_context_was_capped():
@@ -8167,6 +8115,63 @@ def test_assign_template_row_anchors_preserves_source_event_label_after_role_rew
     assert anchors[0].role == "vcv"
     assert anchors[0].source_event_label == "cv_boundary"
     assert "event_source:filename_hsmm" in anchors[0].warnings
+
+
+def test_japanese_cv_nucleus_slot_refines_to_acoustic_cv_boundary():
+    posterior = FramePosterior(
+        wav_path="case.wav",
+        times_ms=[0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0],
+        class_probs={
+            "silence": [0.0] * 7,
+            "consonant": [0.1, 0.2, 0.7, 0.3, 0.1, 0.0, 0.0],
+            "vowel": [0.0, 0.1, 0.2, 0.8, 0.9, 0.9, 0.8],
+            "other": [0.0] * 7,
+        },
+        event_scores={
+            "cv_boundary": [0.0, 0.1, 0.3, 0.95, 0.4, 0.1, 0.0],
+            "vowel_nucleus": [0.0, 0.0, 0.1, 0.3, 0.6, 0.95, 0.4],
+            "phone_change": [0.0, 0.1, 0.4, 0.5, 0.2, 0.1, 0.0],
+        },
+        acoustic_scores={
+            "transition_likelihood": [0.0, 0.1, 0.4, 0.9, 0.3, 0.1, 0.0],
+            "nucleus_likelihood": [0.0, 0.0, 0.1, 0.3, 0.6, 0.95, 0.4],
+            "vowel_boundary_likelihood": [0.0, 0.1, 0.3, 0.9, 0.4, 0.1, 0.0],
+            "voicing": [0.0, 0.1, 0.2, 0.8, 0.9, 0.9, 0.8],
+        },
+    )
+    rows = [
+        OtoTemplateRow(
+            wav="case.wav",
+            alias="ka",
+            timing=OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        (
+            {
+                "label": "vowel_nucleus",
+                "selected_time_ms": 500.0,
+                "score": 0.95,
+                "expected_phone": "a",
+                "expected_phone_index": 1,
+                "slot_index": 0,
+                "source": "filename_hsmm",
+            },
+        ),
+        rows,
+        expected_phones=("k", "a"),
+        language="japanese",
+    )
+
+    assert anchors[0] is not None
+    assert anchors[0].anchor_abs_ms == pytest.approx(300.0)
+    assert anchors[0].source_event_label == "cv_boundary"
+    assert any(
+        warning == "cv_boundary_from_nucleus_refine:500.0->300.0"
+        for warning in anchors[0].warnings
+    )
 
 
 def test_japanese_vcv_hsmm_lead_uses_source_event_label():
@@ -10436,6 +10441,77 @@ def test_japanese_cvvc_headed_cv_vowel_nucleus_gets_extra_lead_without_profile_c
     assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired.applied_rules
 
 
+def test_japanese_cvvc_headed_cv_vowel_nucleus_normalizes_oversized_bootstrap_profile():
+    head = AdaptedOtoRow(
+        wav="_gya-gi-gyu.wav",
+        alias="- gya",
+        timing=OtoTiming(offset=460.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    late_cv = AdaptedOtoRow(
+        wav="_gya-gi-gyu.wav",
+        alias="gye",
+        timing=OtoTiming(offset=2360.0, consonant=240.0, cutoff=-530.0, preutterance=150.0, overlap=115.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2560.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    _head, repaired = repair_cvvc_row_sequence(
+        [head, late_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing.offset + repaired.timing.preutterance == pytest.approx(2030.0)
+    assert repaired.timing.preutterance == pytest.approx(70.0)
+    assert repaired.timing.overlap == pytest.approx(25.0)
+    assert repaired.timing.consonant == pytest.approx(150.0)
+    assert repaired.timing.cutoff == pytest.approx(-360.0)
+    assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired.applied_rules
+    assert "cvvc_cv_role_profile_repair" in repaired.applied_rules
+
+
+def test_japanese_cvvc_cv_role_profile_prefers_anchor_role_over_vowel_surface_alias():
+    row = AdaptedOtoRow(
+        wav="wa-wi-we-wo.wav",
+        alias="a",
+        timing=OtoTiming(offset=2360.0, consonant=240.0, cutoff=-530.0, preutterance=150.0, overlap=115.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2560.0,
+            score=0.6,
+            role="cv",
+            source_event_label="vowel_nucleus",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+
+    (repaired,) = repair_cvvc_row_sequence(
+        [row],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert repaired.timing == OtoTiming(
+        offset=2440.0,
+        consonant=150.0,
+        cutoff=-360.0,
+        preutterance=70.0,
+        overlap=25.0,
+    )
+    assert "cvvc_cv_role_profile_repair" in repaired.applied_rules
+
+
 def test_japanese_cvvc_headed_cv_vowel_nucleus_stays_after_previous_cv_pre():
     head = AdaptedOtoRow(
         wav="_ka-ki-ku-ke.wav",
@@ -10484,7 +10560,8 @@ def test_japanese_cvvc_headed_cv_vowel_nucleus_stays_after_previous_cv_pre():
 
     previous_pre_abs = kept_previous.timing.offset + kept_previous.timing.preutterance
     assert repaired_cv.timing.offset == pytest.approx(previous_pre_abs + 65.0)
-    assert repaired_vc.timing.offset == pytest.approx(repaired_cv.timing.offset - 160.0)
+    assert repaired_vc.timing.offset == pytest.approx(1920.0)
+    assert repaired_vc.timing.offset < repaired_cv.timing.offset
     assert repaired_vc.timing.offset + repaired_vc.timing.preutterance >= previous_pre_abs + 40.0
     assert "cvvc_headed_cv_vowel_nucleus_repair" in repaired_cv.applied_rules
     assert "cvvc_headed_cv_previous_vowel_order_guard_repair" in repaired_cv.applied_rules
@@ -10598,6 +10675,49 @@ def test_japanese_cvvc_headed_regular_vc_backfills_from_next_cv():
     assert repaired_vc.timing.preutterance == pytest.approx(135.0)
     assert repaired_vc.timing.overlap == pytest.approx(50.0)
     assert "cvvc_headed_regular_vc_from_next_cv_repair" in repaired_vc.applied_rules
+
+
+def test_japanese_cvvc_headed_regular_vc_preserves_direct_hsmm_anchor():
+    head = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="- ma",
+        timing=OtoTiming(offset=380.0, consonant=160.0, cutoff=-170.0, preutterance=120.0, overlap=85.0),
+        source_timing=None,
+        anchor=None,
+        mode="bootstrap",
+    )
+    direct_vc = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="i m",
+        timing=OtoTiming(offset=1815.0, consonant=230.0, cutoff=-256.0, preutterance=200.0, overlap=50.0),
+        source_timing=None,
+        anchor=OtoAnchor(
+            anchor_abs_ms=2060.0,
+            score=0.7,
+            role="vc",
+            source_event_label="phone_change",
+            warnings=("event_source:filename_hsmm",),
+        ),
+        mode="bootstrap",
+    )
+    next_cv = AdaptedOtoRow(
+        wav="_ma-mi-mu.wav",
+        alias="mu",
+        timing=OtoTiming(offset=1690.0, consonant=150.0, cutoff=-360.0, preutterance=70.0, overlap=25.0),
+        source_timing=None,
+        anchor=OtoAnchor(anchor_abs_ms=1760.0, score=0.7, role="cv", source_event_label="cv_boundary"),
+        mode="bootstrap",
+    )
+
+    _head, kept_vc, _next_cv = repair_cvvc_row_sequence(
+        [head, direct_vc, next_cv],
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=3200.0,
+    )
+
+    assert kept_vc.timing == direct_vc.timing
+    assert "cvvc_headed_regular_vc_from_next_cv_repair" not in kept_vc.applied_rules
+    assert "cvvc_internal_vc_slot_bound_repair" not in kept_vc.applied_rules
 
 
 def test_japanese_cvvc_headed_regular_vc_respects_previous_cv_safe_window():
@@ -12799,6 +12919,43 @@ def test_japanese_cvvc_headless_pitch_suffix_cv_block_regrids_large_internal_gap
     assert all("cvvc_headless_pitch_suffix_cv_grid_repair" in row.applied_rules for row in repaired)
 
 
+def test_japanese_cvvc_headless_pitch_suffix_keeps_direct_hsmm_cv_block():
+    offsets = [946.824, 1430.0, 2420.0, 3000.0, 4380.0]
+    aliases = ["\u304d_S", "\u304f_S", "\u3051_S", "\u3053_S", "\u304b_S"]
+    rows = [
+        AdaptedOtoRow(
+            wav="_ka-ki-ku-ke-ko-ka-N-ka.wav",
+            alias=alias,
+            timing=OtoTiming(
+                offset=offset,
+                consonant=150.0,
+                cutoff=-360.0,
+                preutterance=70.0,
+                overlap=25.0,
+            ),
+            source_timing=None,
+            anchor=OtoAnchor(
+                anchor_abs_ms=offset + 70.0,
+                score=0.7,
+                role="cv",
+                source_event_label="cv_boundary",
+                warnings=("event_source:filename_hsmm",),
+            ),
+            mode="bootstrap",
+        )
+        for alias, offset in zip(aliases, offsets)
+    ]
+
+    repaired = repair_cvvc_row_sequence(
+        rows,
+        OtoAdapterConfig(language="japanese", format_type="CVVC", alias_type="auto"),
+        file_duration_ms=6200.0,
+    )
+
+    assert [row.timing.offset for row in repaired] == pytest.approx(offsets)
+    assert all("cvvc_headless_pitch_suffix_cv_grid_repair" not in row.applied_rules for row in repaired)
+
+
 def test_japanese_cvvc_headless_pitch_suffix_cv_block_keeps_aligned_first_cv_on_tail_gap():
     rows = [
         AdaptedOtoRow(
@@ -13707,7 +13864,7 @@ def test_japanese_cvvc_initial_v_regular_pair_onset_sequence_repairs_headless_v_
         file_duration_ms=5000.0,
     )
 
-    assert [row.timing.offset for row in repaired] == pytest.approx([1560.0, 1710.0, 2050.0, 2210.0, 2550.0])
+    assert [row.timing.offset for row in repaired] == pytest.approx([1560.0, 1890.0, 2050.0, 2210.0, 2550.0])
     assert "cvvc_pure_vowel_onset_v_repair" in repaired[0].applied_rules
     assert all("cvvc_regular_pair_onset_repair" in row.applied_rules for row in repaired[1:])
     assert repaired[0].timing.preutterance == pytest.approx(0.0)
@@ -14612,7 +14769,7 @@ def test_cvvc_cv_bootstrap_keeps_leading_consonant_in_offset():
     assert "cvvc_cv_left_context_pre:120.0->150.0" in adapted.warnings
 
 
-def test_cvvc_hsmm_anchor_lead_pulls_cv_offset_left():
+def test_cvvc_hsmm_cv_boundary_keeps_detected_preutterance_position():
     adapted = bootstrap_row(
         "ka.wav",
         "ka",
@@ -14628,8 +14785,9 @@ def test_cvvc_hsmm_anchor_lead_pulls_cv_offset_left():
     )
 
     assert adapted.timing.preutterance == pytest.approx(150.0)
-    assert adapted.timing.offset == pytest.approx(100.0)
-    assert "hsmm_anchor_lead:300.0->250.0" in adapted.warnings
+    assert adapted.timing.offset == pytest.approx(150.0)
+    assert adapted.timing.offset + adapted.timing.preutterance == pytest.approx(300.0)
+    assert not any(warning.startswith("hsmm_anchor_lead:") for warning in adapted.warnings)
 
 
 def test_cvvc_hsmm_anchor_lead_skips_terminal_silence_alias():
@@ -16898,7 +17056,7 @@ def test_mfa_free_preview_template_preserve_applies_cvvc_profile_repair(tmp_path
 
     assert predict_oto_preview.main() == 0
     assert out_oto.read_text(encoding="utf-8").strip() == (
-        "ki_ku.wav=ki,180.000,150.000,-360.000,70.000,25.000"
+        "ki_ku.wav=ki,180.000,150.000,-350.000,70.000,25.000"
     )
     payload = json.loads(out_json.read_text(encoding="utf-8"))
     row = payload["rows"][0]["generated_oto_rows"][0]
@@ -18049,864 +18207,6 @@ def test_manual_oto_family_anchor_prior_prefers_transition_side():
     assert earlier > much_later
 
 
-def test_manual_anchor_preview_quality_keeps_local_gate_advisory():
-    from core.mfa_free_oto.manual_anchor_runtime import _classify_preview_row_quality
-
-    quality = _classify_preview_row_quality(
-        {"alias": "ka", "alias_role": "cv", "duration_ms": 500.0},
-        absolute={
-            "offset_abs": 60.0,
-            "overlap_abs": 90.0,
-            "preutterance_abs": 130.0,
-            "consonant_abs": 260.0,
-            "cutoff_abs": 430.0,
-        },
-        warnings=["preutterance:local_gate_low:0.123"],
-        local_gate_warnings=["preutterance:local_gate_low:0.123"],
-        sources={"preutterance": "cv_landmark_vowel_onset"},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "confidence": 0.8, "warnings": []},
-        duration_ms=500.0,
-    )
-    assert quality["status"] == "safe"
-    assert quality["reasons"] == []
-    assert "preutterance:local_gate_low:0.123" in quality["advisory"]
-    assert quality["local_gate_policy"] == "advisory"
-
-
-def test_manual_anchor_preview_quality_rejects_korean_cvvc_cv_by_default():
-    from core.mfa_free_oto.manual_anchor_runtime import _classify_preview_row_quality
-
-    quality = _classify_preview_row_quality(
-        {"alias": "ka", "alias_role": "cv", "language": "korean", "format_type": "cvvc", "duration_ms": 500.0},
-        absolute={
-            "offset_abs": 60.0,
-            "overlap_abs": 90.0,
-            "preutterance_abs": 130.0,
-            "consonant_abs": 260.0,
-            "cutoff_abs": 430.0,
-        },
-        warnings=[],
-        local_gate_warnings=[],
-        sources={"preutterance": "cv_landmark_vowel_onset"},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "confidence": 0.99, "warnings": []},
-        duration_ms=500.0,
-    )
-    assert quality["status"] == "needs_review"
-    assert "korean_cvvc_cv_requires_review" in quality["reasons"]
-
-
-def test_manual_anchor_preview_quality_rejects_japanese_vcv_until_verified():
-    from core.mfa_free_oto.manual_anchor_runtime import _classify_preview_row_quality
-
-    quality = _classify_preview_row_quality(
-        {"alias": "a ka", "alias_role": "vcv", "language": "japanese", "format_type": "vcv", "duration_ms": 700.0},
-        absolute={
-            "offset_abs": 100.0,
-            "overlap_abs": 180.0,
-            "preutterance_abs": 210.0,
-            "consonant_abs": 320.0,
-            "cutoff_abs": 520.0,
-        },
-        warnings=[],
-        local_gate_warnings=[],
-        sources={"preutterance": "cv_landmark_vowel_onset"},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "confidence": 0.99, "warnings": []},
-        duration_ms=700.0,
-    )
-
-    assert quality["status"] == "needs_review"
-    assert "japanese_vcv_requires_review" in quality["reasons"]
-
-
-def test_korean_cvvc_cv_timing_class_separates_initial_vowel_and_consonant():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _korean_cvvc_cv_cutoff_tail_gap_ms,
-        _korean_cvvc_cv_landmark_preutterance_ms,
-        _korean_cvvc_cv_relative_gaps,
-        _korean_cvvc_cv_timing_class,
-    )
-
-    base = {"alias_role": "cv", "language": "korean", "format_type": "cvvc", "wav_name": "_x.wav"}
-    initial_vowel = {**base, "alias": "- a"}
-    initial_consonant = {**base, "alias": "- h"}
-    apostrophe = {**base, "alias": "'a"}
-    vf = {**base, "alias": "*L", "wav_name": "_L(vf).wav"}
-
-    assert _korean_cvvc_cv_timing_class(initial_vowel) == "initial_vowel"
-    assert _korean_cvvc_cv_landmark_preutterance_ms(
-        initial_vowel,
-        {"vowel_onset_ms": 200.0},
-        fallback_ms=180.0,
-    ) == pytest.approx(200.0)
-    assert _korean_cvvc_cv_relative_gaps(initial_vowel) == {"offset_gap": 42.0, "overlap_gap": 21.0, "fixed_gap": 184.0}
-    assert _korean_cvvc_cv_cutoff_tail_gap_ms(initial_vowel) == pytest.approx(390.0)
-
-    assert _korean_cvvc_cv_timing_class(initial_consonant) == "initial_consonant"
-    assert _korean_cvvc_cv_landmark_preutterance_ms(
-        initial_consonant,
-        {"vowel_onset_ms": 200.0},
-        fallback_ms=180.0,
-    ) == pytest.approx(138.0)
-    assert _korean_cvvc_cv_relative_gaps(initial_consonant) == {"offset_gap": 36.0, "overlap_gap": 18.0, "fixed_gap": 18.0}
-    assert _korean_cvvc_cv_cutoff_tail_gap_ms(initial_consonant) == pytest.approx(95.0)
-
-    assert _korean_cvvc_cv_timing_class(apostrophe) == "apostrophe"
-    assert _korean_cvvc_cv_relative_gaps(apostrophe) == {"offset_gap": 77.0, "overlap_gap": 38.0, "fixed_gap": 59.0}
-    assert _korean_cvvc_cv_cutoff_tail_gap_ms(apostrophe) == pytest.approx(190.0)
-
-    assert _korean_cvvc_cv_timing_class(vf) == "vf"
-    assert _korean_cvvc_cv_relative_gaps(vf) == {"offset_gap": 153.0, "overlap_gap": 76.0, "fixed_gap": 370.0}
-    assert _korean_cvvc_cv_cutoff_tail_gap_ms(vf) == pytest.approx(1530.0)
-
-
-def test_manual_anchor_korean_cvvc_filename_tokens_split_underscore_tail_sets():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _filename_slot_tokens_for_row,
-        _korean_cvvc_row_syllable_index,
-    )
-
-    base = {
-        "language": "korean",
-        "format_type": "cvvc",
-        "wav_name": "_euN_euM_euNG_euL.wav",
-        "slot_index": 0,
-        "slot_count": 8,
-        "source_order": 0,
-    }
-
-    tokens = _filename_slot_tokens_for_row({**base, "alias": "L R", "alias_role": "vc"})
-
-    assert tokens == ["eun", "eum", "eung", "eul"]
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "L R", "alias_role": "vc"},
-        tokens,
-        len(tokens),
-    ) == 3
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "NG R", "alias_role": "vc"},
-        tokens,
-        len(tokens),
-    ) == 2
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "L -", "alias_role": "v"},
-        tokens,
-        len(tokens),
-    ) == 3
-
-
-def test_manual_anchor_korean_cvvc_tail_marker_h_alias_maps_to_matching_coda_slot():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _filename_slot_tokens_for_row,
-        _korean_cvvc_row_syllable_index,
-    )
-
-    row = {
-        "language": "korean",
-        "format_type": "cvvc",
-        "wav_name": "_aH_iH_uH_eH.wav",
-        "slot_index": 0,
-        "slot_count": 8,
-        "source_order": 0,
-        "alias": "e H",
-        "alias_role": "vc",
-    }
-    tokens = _filename_slot_tokens_for_row(row)
-
-    assert tokens == ["ah", "ih", "uh", "eh"]
-    assert _korean_cvvc_row_syllable_index(row, tokens, len(tokens)) == 3
-
-
-def test_manual_anchor_korean_cvvc_raw_uppercase_coda_profiles_are_case_sensitive():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _default_utau_cutoff_tail_gap_ms,
-        _korean_cvvc_relative_gaps,
-        _korean_cvvc_transition_profile,
-    )
-
-    base = {"alias_role": "vc", "language": "korean", "format_type": "cvvc", "wav_name": "_x.wav"}
-
-    nasal = _korean_cvvc_transition_profile({**base, "alias": "a M"})
-    assert nasal is not None
-    assert nasal["raw_right"] == "M"
-    assert nasal["pre_ratio"] == pytest.approx(0.75)
-    assert _korean_cvvc_relative_gaps({**base, "alias": "a M"}) == {
-        "offset_gap": 70.0,
-        "overlap_gap": 35.0,
-        "fixed_gap": 63.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms({**base, "alias": "a M"}) == pytest.approx(221.0)
-
-    stop = _korean_cvvc_transition_profile({**base, "alias": "a P"})
-    assert stop is not None
-    assert stop["raw_right"] == "P"
-    assert stop["pre_ratio"] == pytest.approx(0.85)
-    assert _korean_cvvc_relative_gaps({**base, "alias": "a P"})["fixed_gap"] == pytest.approx(31.0)
-    assert _default_utau_cutoff_tail_gap_ms({**base, "alias": "a P"}) == pytest.approx(224.0)
-
-    assert _korean_cvvc_transition_profile({**base, "alias": "a m"}) is None
-    assert _korean_cvvc_transition_profile({**base, "alias": "a p"}) is None
-
-
-def test_manual_anchor_breath_silence_guard_overrides_late_island_cv_predictions():
-    from core.mfa_free_oto.manual_anchor_runtime import _apply_manual_anchor_timing_guards
-
-    predictions = {
-        "offset": 2000.0,
-        "overlap": 2025.0,
-        "preutterance": 2050.0,
-        "fixed_end": 2910.0,
-        "cutoff": 2914.0,
-    }
-
-    warnings, _ = _apply_manual_anchor_timing_guards(
-        {"alias": "br3", "alias_role": "cv", "language": "korean", "format_type": "cvvc"},
-        predictions,
-        island_context={},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "vowel_onset_ms": 2050.0, "confidence": 0.99},
-        duration_ms=3799.3650793650795,
-        overlap_context={},
-    )
-
-    assert "mfa_style_breath_silence_guard" in warnings
-    assert predictions["preutterance"] == pytest.approx(760.0)
-    assert predictions["offset"] == pytest.approx(710.0)
-    assert predictions["overlap"] == pytest.approx(735.0)
-    assert predictions["fixed_end"] == pytest.approx(3799.3650793650795 * 0.54)
-    assert predictions["cutoff"] == pytest.approx(2914.0)
-
-
-def test_manual_anchor_korean_cvvc_v_profiles_split_vf_tail_and_coda_endings():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _default_island_preutterance_ms,
-        _default_utau_cutoff_tail_gap_ms,
-        _korean_cvvc_relative_gaps,
-    )
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    island = VowelIsland(1000.0, 1300.0, 1800.0, 0.9, 980.0, 1820.0, 100, 130, 180)
-    base = {"alias_role": "v", "language": "korean", "format_type": "cvvc", "duration_ms": 3000.0}
-
-    vf_tail = {**base, "alias": "a *", "wav_name": "_a(vf).wav"}
-    assert _default_island_preutterance_ms(vf_tail, island) == pytest.approx(2220.0)
-    assert _korean_cvvc_relative_gaps(vf_tail) == {
-        "offset_gap": 118.0,
-        "overlap_gap": 59.0,
-        "fixed_gap": 326.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms(vf_tail) == pytest.approx(610.0)
-
-    vf_u_tail = {**base, "alias": "u *", "wav_name": "_u(vf).wav"}
-    assert _default_island_preutterance_ms(vf_u_tail, island) == pytest.approx(1800.0)
-    assert _korean_cvvc_relative_gaps(vf_u_tail) == {
-        "offset_gap": 118.0,
-        "overlap_gap": 59.0,
-        "fixed_gap": 326.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms(vf_u_tail) == pytest.approx(610.0)
-
-    vf_head = {**base, "alias": "*a", "wav_name": "_a(vf).wav"}
-    assert _korean_cvvc_relative_gaps(vf_head) == {"offset_gap": 167.0, "overlap_gap": 84.0, "fixed_gap": 409.0}
-    assert _default_utau_cutoff_tail_gap_ms(vf_head) == pytest.approx(1045.0)
-
-    nasal_tail = {**base, "alias": "NG -", "wav_name": "_euN_euM_euNG_euL.wav"}
-    assert _default_island_preutterance_ms(nasal_tail, island) == pytest.approx(1800.0)
-    assert _korean_cvvc_relative_gaps(nasal_tail) == {
-        "offset_gap": 50.0,
-        "overlap_gap": 25.0,
-        "fixed_gap": 12.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms(nasal_tail) == pytest.approx(70.0)
-
-    liquid_tail = {**base, "alias": "L -", "wav_name": "_euN_euM_euNG_euL.wav"}
-    assert _korean_cvvc_relative_gaps(liquid_tail) == {
-        "offset_gap": 80.0,
-        "overlap_gap": 40.0,
-        "fixed_gap": 360.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms(liquid_tail) == pytest.approx(500.0)
-
-
-def test_manual_anchor_korean_cvvc_closing_apostrophe_v_uses_previous_vowel_slot():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _default_island_preutterance_ms,
-        _default_utau_cutoff_tail_gap_ms,
-        _filename_slot_tokens_for_row,
-        _korean_cvvc_relative_gaps,
-        _korean_cvvc_row_syllable_index,
-        _korean_cvvc_v_alias_is_tail,
-    )
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    base = {
-        "language": "korean",
-        "format_type": "cvvc",
-        "wav_name": "_eu'a'i'o'e'u'eo'eu(cl).wav",
-        "slot_count": 14,
-        "alias_role": "v",
-    }
-    tokens = _filename_slot_tokens_for_row({**base, "alias": "a '", "source_order": 2, "slot_index": 2})
-
-    assert tokens == ["eu", "a", "i", "o", "e", "u", "eo", "eu"]
-    assert _korean_cvvc_v_alias_is_tail({**base, "alias": "a '", "source_order": 2, "slot_index": 2}) is True
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "eu '", "source_order": 0, "slot_index": 0},
-        tokens,
-        len(tokens),
-    ) == 0
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "a '", "source_order": 2, "slot_index": 2},
-        tokens,
-        len(tokens),
-    ) == 1
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "i '", "source_order": 4, "slot_index": 4},
-        tokens,
-        len(tokens),
-    ) == 2
-    assert _korean_cvvc_row_syllable_index(
-        {**base, "alias": "eo '", "source_order": 12, "slot_index": 12},
-        tokens,
-        len(tokens),
-    ) == 6
-
-    island = VowelIsland(1520.0, 1610.0, 1750.0, 0.9, 1480.0, 1790.0, 152, 161, 175)
-    row = {**base, "alias": "a '", "source_order": 2, "slot_index": 2, "duration_ms": 5526.35}
-    assert _default_island_preutterance_ms(row, island) == pytest.approx(1750.0)
-    assert _korean_cvvc_relative_gaps(row) == {
-        "offset_gap": 77.0,
-        "overlap_gap": 38.0,
-        "fixed_gap": 110.0,
-    }
-    assert _default_utau_cutoff_tail_gap_ms(row) == pytest.approx(220.0)
-
-
-def test_manual_anchor_korean_cvvc_vv_profiles_correct_tail_biased_valleys():
-    from core.mfa_free_oto.manual_anchor_runtime import _korean_cvvc_transition_preutterance_ms
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    base = {"alias_role": "vv", "language": "korean", "format_type": "cvvc"}
-
-    i_eo = _korean_cvvc_transition_preutterance_ms(
-        {**base, "alias": "i eo"},
-        VowelIsland(3170.0, 3660.0, 3880.0, 0.9, 3170.0, 3880.0, 317, 366, 388),
-        {"confidence": 0.69, "transition_valley_ms": 2940.0, "right_vowel_onset_ms": 3170.0},
-        fallback_ms=3170.0,
-    )
-    assert i_eo is not None
-    assert i_eo[0] == pytest.approx(3464.0)
-    assert i_eo[1] == "korean_cvvc_vv_profile_right_eo"
-
-    e_eo = _korean_cvvc_transition_preutterance_ms(
-        {**base, "alias": "e eo"},
-        VowelIsland(3810.0, 4010.0, 4310.0, 0.9, 3810.0, 4310.0, 381, 401, 431),
-        {"confidence": 0.62, "transition_valley_ms": 3890.0, "right_vowel_onset_ms": 3810.0},
-        fallback_ms=3810.0,
-    )
-    assert e_eo is not None
-    assert e_eo[0] == pytest.approx(3890.0)
-    assert e_eo[1] == "korean_cvvc_vv_profile_right_eo_valley"
-
-    u_e = _korean_cvvc_transition_preutterance_ms(
-        {**base, "alias": "u e"},
-        VowelIsland(1790.0, 2010.0, 2480.0, 0.9, 1790.0, 2480.0, 179, 201, 248),
-        {"confidence": 0.44, "transition_valley_ms": 1780.0, "right_vowel_onset_ms": 1790.0},
-        fallback_ms=1790.0,
-    )
-    assert u_e is not None
-    assert u_e[0] == pytest.approx(1974.8)
-    assert u_e[1] == "korean_cvvc_vv_profile_u_e"
-
-    a_a = _korean_cvvc_transition_preutterance_ms(
-        {**base, "alias": "a a"},
-        VowelIsland(1320.0, 1470.0, 2020.0, 0.9, 1320.0, 2020.0, 132, 147, 202),
-        {"confidence": 0.63, "transition_valley_ms": 1300.0, "right_vowel_onset_ms": 1320.0},
-        fallback_ms=1320.0,
-    )
-    assert a_a is not None
-    assert a_a[0] == pytest.approx(1656.0)
-    assert a_a[1] == "korean_cvvc_vv_profile_open_repeat"
-
-    a_i = _korean_cvvc_transition_preutterance_ms(
-        {**base, "alias": "a i"},
-        VowelIsland(2030.0, 2140.0, 2400.0, 0.9, 2030.0, 2400.0, 203, 214, 240),
-        {"confidence": 0.67, "transition_valley_ms": 1730.0, "right_vowel_onset_ms": 2030.0},
-        fallback_ms=2030.0,
-    )
-    assert a_i is None
-
-
-def test_manual_anchor_mfa_style_adaptive_overlap_uses_consonant_class():
-    from core.mfa_free_oto.manual_anchor_runtime import _manual_anchor_adaptive_overlap_gap
-
-    base = {"alias_role": "cv", "language": "korean", "format_type": "cvvc"}
-    hard_gap = _manual_anchor_adaptive_overlap_gap({**base, "alias": "ga"}, 100.0)
-    sonorant_gap = _manual_anchor_adaptive_overlap_gap({**base, "alias": "ma"}, 100.0)
-    tense_gap = _manual_anchor_adaptive_overlap_gap({**base, "alias": "kka"}, 100.0)
-
-    assert sonorant_gap < hard_gap
-    assert tense_gap > hard_gap
-
-
-def test_manual_anchor_mfa_style_order_validation_normalizes_bad_predictions():
-    from core.mfa_free_oto.manual_anchor_runtime import _manual_anchor_validate_prediction_order
-
-    predictions = {
-        "offset": 90.0,
-        "overlap": 30.0,
-        "preutterance": 80.0,
-        "fixed_end": 82.0,
-        "cutoff": 81.0,
-    }
-    warnings = _manual_anchor_validate_prediction_order(
-        {"alias": "- h", "alias_role": "cv", "language": "korean", "format_type": "cvvc"},
-        predictions,
-        duration_ms=120.0,
-    )
-
-    assert warnings == ["mfa_style_order_validation:overlap,preutterance,fixed_end,cutoff"]
-    assert predictions["offset"] <= predictions["overlap"] <= predictions["preutterance"]
-    assert predictions["preutterance"] < predictions["fixed_end"] < predictions["cutoff"]
-    assert predictions["cutoff"] <= 120.0
-
-
-def test_manual_anchor_mfa_style_vc_cutoff_guard_uses_next_island():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _apply_manual_anchor_timing_guards,
-        _manual_anchor_island_context,
-    )
-    from core.mfa_free_oto.vowel_island import SlotIslandAssignment, VowelIsland
-
-    islands = (
-        VowelIsland(100.0, 150.0, 220.0, 0.9, 90.0, 230.0, 10, 15, 22),
-        VowelIsland(260.0, 310.0, 380.0, 0.9, 250.0, 390.0, 26, 31, 38),
-    )
-    context = _manual_anchor_island_context(
-        SlotIslandAssignment(slot_index=0, island_index=0, score=1.0, margin=0.5),
-        islands,
-    )
-    predictions = {"offset": 110.0, "overlap": 145.0, "preutterance": 180.0, "fixed_end": 196.0, "cutoff": 180.0}
-
-    warnings, _ = _apply_manual_anchor_timing_guards(
-        {"alias": "a g", "alias_role": "vc", "language": "korean", "format_type": "cvvc"},
-        predictions,
-        island_context=context,
-        acoustic_landmarks=None,
-        duration_ms=500.0,
-        overlap_context={},
-    )
-
-    assert "mfa_style_vc_cutoff_guard" in warnings
-    assert predictions["cutoff"] == pytest.approx(264.0)
-
-
-def test_manual_anchor_mfa_style_vv_cutoff_guard_uses_current_vowel_end():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _apply_manual_anchor_timing_guards,
-        _manual_anchor_island_context,
-    )
-    from core.mfa_free_oto.vowel_island import SlotIslandAssignment, VowelIsland
-
-    islands = (
-        VowelIsland(100.0, 150.0, 220.0, 0.9, 90.0, 230.0, 10, 15, 22),
-        VowelIsland(260.0, 310.0, 380.0, 0.9, 250.0, 390.0, 26, 31, 38),
-    )
-    context = _manual_anchor_island_context(
-        SlotIslandAssignment(slot_index=0, island_index=0, score=1.0, margin=0.5),
-        islands,
-    )
-    predictions = {"offset": 120.0, "overlap": 160.0, "preutterance": 200.0, "fixed_end": 216.0, "cutoff": 220.0}
-
-    warnings, _ = _apply_manual_anchor_timing_guards(
-        {"alias": "a i", "alias_role": "vv", "language": "korean", "format_type": "cvvc"},
-        predictions,
-        island_context=context,
-        acoustic_landmarks=None,
-        duration_ms=500.0,
-        overlap_context={},
-    )
-
-    assert "mfa_style_vv_cutoff_guard" in warnings
-    assert predictions["cutoff"] == pytest.approx(234.0)
-
-
-def test_manual_anchor_mfa_style_cv_boundary_guard_clamps_outlier_preutterance():
-    from core.mfa_free_oto.manual_anchor_runtime import _manual_anchor_cv_boundary_guard
-
-    predictions = {"offset": 260.0, "overlap": 280.0, "preutterance": 300.0, "fixed_end": 320.0, "cutoff": 480.0}
-    warning = _manual_anchor_cv_boundary_guard(
-        {"alias": "- h", "alias_role": "cv", "language": "korean", "format_type": "cvvc"},
-        predictions,
-        acoustic_landmarks={"vowel_onset_ms": 200.0, "confidence": 0.8},
-        duration_ms=500.0,
-    )
-
-    assert warning == "mfa_style_cv_boundary_guard"
-    assert predictions["preutterance"] == pytest.approx(226.0)
-    assert predictions["offset"] <= predictions["preutterance"] - 8.0
-
-
-def test_manual_anchor_japanese_vcv_uses_current_vowel_start_as_island_preutterance():
-    from core.mfa_free_oto.manual_anchor_runtime import _default_island_preutterance_ms
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    island = VowelIsland(320.0, 390.0, 540.0, 0.9, 300.0, 560.0, 32, 39, 54)
-    row = {"alias": "a ka", "alias_role": "vcv", "language": "japanese", "format_type": "vcv"}
-
-    assert _default_island_preutterance_ms(row, island) == pytest.approx(320.0)
-
-
-def test_manual_anchor_japanese_vcv_kana_filename_uses_filename_slot_count():
-    from core.mfa_free_oto.manual_anchor_runtime import _row_vowel_island_slot_index, _vowel_island_slot_count
-
-    base = {
-        "wav_name": "\u3042\u3042\u3044\u3042\u3046\u3048\u3042.wav",
-        "language": "japanese",
-        "format_type": "vcv",
-        "slot_count": 3,
-    }
-    rows = [
-        {**base, "alias": "- a", "alias_role": "cv", "slot_index": 0},
-        {**base, "alias": "a i", "alias_role": "vcv", "slot_index": 1},
-        {**base, "alias": "a u", "alias_role": "vcv", "slot_index": 2},
-    ]
-
-    assert _vowel_island_slot_count(rows) == 7
-    assert _row_vowel_island_slot_index(rows[2], 7) == 4
-
-
-def test_manual_anchor_japanese_vcv_romaji_filename_uses_previous_vowel_for_duplicate_targets():
-    from core.mfa_free_oto.manual_anchor_runtime import _row_vowel_island_slot_index, _vowel_island_slot_count
-    from core.model_context.filename import filename_syllable_order_tokens
-
-    base = {
-        "wav_name": "tututitotatoti.wav",
-        "language": "japanese",
-        "format_type": "vcv",
-        "slot_count": 4,
-        "filename_tokens": filename_syllable_order_tokens("tututitotatoti.wav", language="japanese"),
-    }
-    rows = [
-        {**base, "alias": "u ti", "alias_role": "vcv", "slot_index": 0},
-        {**base, "alias": "o ta", "alias_role": "vcv", "slot_index": 1},
-        {**base, "alias": "a to", "alias_role": "vcv", "slot_index": 2},
-        {**base, "alias": "o ti", "alias_role": "vcv", "slot_index": 3},
-    ]
-
-    assert base["filename_tokens"] == ["tu", "tu", "ti", "to", "ta", "to", "ti"]
-    assert _vowel_island_slot_count(rows) == 7
-    assert _row_vowel_island_slot_index(rows[0], 7) == 2
-    assert _row_vowel_island_slot_index(rows[3], 7) == 6
-
-
-def test_manual_anchor_japanese_vcv_landmark_preutterance_refines_from_vowel_onset():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _cv_landmark_row,
-        _landmark_preutterance_ms,
-    )
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    island = VowelIsland(320.0, 390.0, 540.0, 0.9, 300.0, 560.0, 32, 39, 54)
-    row = {"alias": "a ka", "alias_role": "vcv", "language": "japanese", "format_type": "vcv"}
-
-    assert _cv_landmark_row(row) is True
-    assert _landmark_preutterance_ms(
-        row,
-        {"source": "acoustic_cv_landmark_v1", "vowel_onset_ms": 322.0, "confidence": 0.72},
-        island,
-        fallback_ms=540.0,
-    ) == pytest.approx(322.0)
-
-
-def test_manual_anchor_japanese_vv_landmark_blends_transition_and_right_onset():
-    from core.mfa_free_oto.manual_anchor_runtime import _landmark_preutterance_ms
-    from core.mfa_free_oto.vowel_island import VowelIsland
-
-    island = VowelIsland(1280.0, 1420.0, 1540.0, 0.9, 1200.0, 1560.0, 128, 142, 154)
-    row = {"alias": "i u", "alias_role": "vv", "language": "japanese", "format_type": "vcv"}
-
-    assert _landmark_preutterance_ms(
-        row,
-        {
-            "source": "acoustic_vv_landmark_v1",
-            "transition_valley_ms": 1200.0,
-            "right_vowel_onset_ms": 1280.0,
-            "confidence": 0.58,
-        },
-        island,
-        fallback_ms=1500.0,
-    ) == pytest.approx(1340.0)
-
-
-def test_manual_anchor_japanese_vv_predict_row_prefers_landmark_over_slot_exact(monkeypatch):
-    import numpy as np
-
-    from core.mfa_free_oto import manual_anchor_runtime as runtime
-    from core.mfa_free_oto.manual_oto_candidates import ManualOtoCandidateTracks
-    from core.mfa_free_oto.vowel_island import SlotIslandAssignment, VowelIsland, VowelIslandDecode
-
-    row = {
-        "wav_name": "iu.wav",
-        "alias": "i u",
-        "alias_role": "vv",
-        "language": "japanese",
-        "format_type": "vcv",
-        "duration_ms": 2200.0,
-        "slot_index": 1,
-        "slot_count": 2,
-    }
-    tracks = ManualOtoCandidateTracks(
-        times_ms=np.asarray([0.0, 1340.0, 1500.0, 2200.0], dtype=np.float32),
-        candidate_indices={},
-        anchor_scores={},
-        tracks={},
-        duration_ms=2200.0,
-        encoder="test",
-    )
-    current = VowelIsland(1280.0, 1420.0, 1540.0, 0.9, 1200.0, 1560.0, 128, 142, 154)
-    decode = VowelIslandDecode(
-        islands=(
-            VowelIsland(520.0, 700.0, 940.0, 0.9, 480.0, 960.0, 52, 70, 94),
-            current,
-        ),
-        assignments=(
-            SlotIslandAssignment(slot_index=0, island_index=0, score=1.0, margin=0.5),
-            SlotIslandAssignment(slot_index=1, island_index=1, score=1.0, margin=0.5),
-        ),
-        score=1.0,
-        margin=0.5,
-    )
-    scorer = runtime.ManualAnchorScorer(
-        path="",
-        anchors=("preutterance",),
-        encoder="test",
-        models={},
-        failure_gate_models={},
-        local_failure_models={},
-        relative_anchor_priors={},
-        island_anchor_priors={},
-    )
-    monkeypatch.setattr(
-        runtime,
-        "_role_acoustic_landmarks",
-        lambda *args, **kwargs: {
-            "source": "acoustic_vv_landmark_v1",
-            "preutterance_source": "japanese_vv_landmark_blend",
-            "transition_valley_ms": 1200.0,
-            "right_vowel_onset_ms": 1280.0,
-            "confidence": 0.58,
-            "warnings": [],
-        },
-    )
-
-    result = runtime._predict_row(
-        row,
-        tracks,
-        scorer,
-        anchors=("preutterance",),
-        constrained={(id(row), "preutterance"): {"pred_ms": 1500.0, "slot_pos_norm": 0.75}},
-        filename_slot={},
-        joint={},
-        island_decode=decode,
-        slot_count=2,
-    )
-
-    assert result["record"]["predictions_abs_ms"]["preutterance"] == pytest.approx(1340.0)
-    assert result["record"]["sources"]["preutterance"] == "japanese_vv_landmark_blend"
-
-
-def test_manual_anchor_posterior_preserves_timebase_metadata():
-    import numpy as np
-
-    from core.mfa_free_oto.manual_anchor_runtime import _posterior_from_tracks
-    from core.mfa_free_oto.manual_oto_candidates import ManualOtoCandidateTracks
-
-    tracks = ManualOtoCandidateTracks(
-        times_ms=np.asarray([0.0, 10.0, 20.0], dtype=np.float32),
-        candidate_indices={},
-        anchor_scores={},
-        tracks={},
-        duration_ms=30.0,
-        encoder="acoustic",
-        timebase_metadata={
-            "source_sample_rate": 44100,
-            "analysis_sample_rate": 16000,
-            "window_size_ms": 25.0,
-            "frame_shift_ms": 10.0,
-            "resample_method": "linear",
-        },
-    )
-
-    posterior = _posterior_from_tracks("sample.wav", tracks)
-
-    assert posterior.metadata["source"] == "manual_oto_anchor_runtime"
-    assert posterior.metadata["source_sample_rate"] == 44100
-    assert posterior.metadata["analysis_sample_rate"] == 16000
-    assert posterior.metadata["resample_method"] == "linear"
-
-
-def test_manual_anchor_japanese_adaptive_overlap_uses_vcv_onset_class():
-    from core.mfa_free_oto.manual_anchor_runtime import _manual_anchor_adaptive_overlap_gap
-
-    base = {"alias_role": "vcv", "language": "japanese", "format_type": "vcv"}
-    hard_gap = _manual_anchor_adaptive_overlap_gap({**base, "alias": "a ka"}, 120.0)
-    sonorant_gap = _manual_anchor_adaptive_overlap_gap({**base, "alias": "a ma"}, 120.0)
-
-    assert hard_gap > sonorant_gap
-    assert hard_gap < 20.0
-
-
-def test_manual_anchor_japanese_vcv_boundary_guard_clamps_outlier_preutterance():
-    from core.mfa_free_oto.manual_anchor_runtime import _manual_anchor_cv_boundary_guard
-
-    predictions = {"offset": 470.0, "overlap": 500.0, "preutterance": 520.0, "fixed_end": 590.0, "cutoff": 760.0}
-    warning = _manual_anchor_cv_boundary_guard(
-        {"alias": "a ka", "alias_role": "vcv", "language": "japanese", "format_type": "vcv"},
-        predictions,
-        acoustic_landmarks={"vowel_onset_ms": 320.0, "confidence": 0.8},
-        duration_ms=900.0,
-    )
-
-    assert warning == "mfa_style_ja_cv_boundary_guard"
-    assert predictions["preutterance"] == pytest.approx(370.0)
-    assert predictions["offset"] <= predictions["preutterance"] - 18.0
-
-
-def test_manual_anchor_japanese_vc_cutoff_guard_only_raises_too_early_cutoff():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _apply_manual_anchor_timing_guards,
-        _manual_anchor_island_context,
-    )
-    from core.mfa_free_oto.vowel_island import SlotIslandAssignment, VowelIsland
-
-    islands = (
-        VowelIsland(120.0, 180.0, 260.0, 0.9, 100.0, 280.0, 12, 18, 26),
-        VowelIsland(310.0, 370.0, 460.0, 0.9, 290.0, 480.0, 31, 37, 46),
-    )
-    context = _manual_anchor_island_context(
-        SlotIslandAssignment(slot_index=0, island_index=0, score=1.0, margin=0.5),
-        islands,
-    )
-    predictions = {"offset": 180.0, "overlap": 220.0, "preutterance": 250.0, "fixed_end": 270.0, "cutoff": 280.0}
-
-    warnings, _ = _apply_manual_anchor_timing_guards(
-        {"alias": "a k", "alias_role": "vc", "language": "japanese", "format_type": "cvvc"},
-        predictions,
-        island_context=context,
-        acoustic_landmarks=None,
-        duration_ms=700.0,
-        overlap_context={},
-    )
-
-    assert "mfa_style_vc_cutoff_guard" in warnings
-    assert predictions["cutoff"] == pytest.approx(308.0)
-
-
-def test_manual_anchor_preview_quality_rejects_structural_warnings():
-    from core.mfa_free_oto.manual_anchor_runtime import _classify_preview_row_quality
-
-    quality = _classify_preview_row_quality(
-        {"alias": "ka", "alias_role": "cv", "duration_ms": 500.0},
-        absolute={
-            "offset_abs": 60.0,
-            "overlap_abs": 90.0,
-            "preutterance_abs": 130.0,
-            "consonant_abs": 260.0,
-            "cutoff_abs": 430.0,
-        },
-        warnings=["island_count_mismatch", "preutterance_slot_shift:+1"],
-        local_gate_warnings=[],
-        sources={"preutterance": "cv_landmark_vowel_onset"},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "confidence": 0.8, "warnings": []},
-        duration_ms=500.0,
-    )
-    assert quality["status"] == "needs_review"
-    assert "island_count_mismatch" in quality["reasons"]
-    assert "preutterance_slot_shift" in quality["reasons"]
-
-
-def test_manual_anchor_preview_sidecar_paths_keep_oto_ini_stem(tmp_path):
-    from core.mfa_free_oto.manual_anchor_runtime import _preview_sidecar_paths
-
-    paths = _preview_sidecar_paths(tmp_path / "preview.oto.ini")
-    assert paths["safe_oto"].name == "preview.oto.safe.ini"
-    assert paths["needs_review_oto"].name == "preview.oto.needs_review.ini"
-    assert paths["needs_review_csv"].name == "preview.oto.needs_review.csv"
-
-
-def test_manual_anchor_preview_sidecars_split_safe_and_review_rows(tmp_path):
-    from core.mfa_free_oto.manual_anchor_runtime import _write_preview_quality_sidecars
-
-    out = _write_preview_quality_sidecars(
-        tmp_path / "preview.oto.ini",
-        [
-            {
-                "wav": "a.wav",
-                "generated_oto_rows": [
-                    {
-                        "wav": "a.wav",
-                        "alias": "ka",
-                        "alias_role": "cv",
-                        "line": "a.wav=ka,0,100,-100,50,25",
-                        "warnings": ["preutterance:local_gate_low:0.500"],
-                        "sources": {"preutterance": "cv_landmark_vowel_onset"},
-                        "quality": {"status": "safe", "reasons": [], "advisory": ["preutterance:local_gate_low:0.500"]},
-                    },
-                    {
-                        "wav": "a.wav",
-                        "alias": "a k",
-                        "alias_role": "vc",
-                        "line": "a.wav=a k,100,80,-80,45,20",
-                        "warnings": ["island_count_mismatch"],
-                        "sources": {"preutterance": "korean_cvvc_vowel_island"},
-                        "quality": {"status": "needs_review", "reasons": ["island_count_mismatch"], "advisory": []},
-                    },
-                ],
-            }
-        ],
-    )
-    assert (tmp_path / "preview.oto.safe.ini").read_text(encoding="utf-8").strip() == "a.wav=ka,0,100,-100,50,25"
-    assert (tmp_path / "preview.oto.needs_review.ini").read_text(encoding="utf-8").strip() == "a.wav=a k,100,80,-80,45,20"
-    review_csv = (tmp_path / "preview.oto.needs_review.csv").read_text(encoding="utf-8")
-    assert "island_count_mismatch" in review_csv
-    assert out["summary"]["status_counts"] == {"safe": 1, "needs_review": 1}
-
-
-def test_manual_anchor_preview_repaired_island_count_is_advisory():
-    from core.mfa_free_oto.manual_anchor_runtime import (
-        _classify_preview_row_quality,
-        _mark_island_count_repaired,
-    )
-    from core.mfa_free_oto.vowel_island import SlotIslandAssignment, VowelIslandDecode
-
-    repaired = _mark_island_count_repaired(
-        VowelIslandDecode(
-            islands=(),
-            assignments=(SlotIslandAssignment(slot_index=0, island_index=0, score=1.0, margin=0.5),),
-            score=1.0,
-            margin=0.5,
-        )
-    )
-    assert "island_count_repaired" in repaired.warnings
-    assert "island_count_mismatch" not in repaired.warnings
-    quality = _classify_preview_row_quality(
-        {"alias": "ka", "alias_role": "cv", "duration_ms": 500.0},
-        absolute={
-            "offset_abs": 60.0,
-            "overlap_abs": 90.0,
-            "preutterance_abs": 130.0,
-            "consonant_abs": 260.0,
-            "cutoff_abs": 430.0,
-        },
-        warnings=list(repaired.warnings),
-        local_gate_warnings=[],
-        sources={"preutterance": "cv_landmark_vowel_onset"},
-        acoustic_landmarks={"source": "acoustic_cv_landmark_v1", "confidence": 0.8, "warnings": []},
-        duration_ms=500.0,
-    )
-    assert quality["status"] == "safe"
-    assert quality["advisory"] == ["island_count_repaired"]
-
-
 def test_read_text_with_fallback_prefers_cp932_over_latin1_when_japanese_oto_has_one_bad_byte(tmp_path):
     from core.generation.common.oto_file_utils import read_text_with_fallback
 
@@ -18949,6 +18249,43 @@ def _labelled_row(source: str) -> dict:
             {"label": "phone_change", "time_ms": 100.0, "phone": "a"},
         ],
     }
+
+
+def test_pre_assigned_phone_indices_bypass_dp():
+    """When OtoTemplateRow carries expected_phone_indices from RowPlanRecord,
+    _alias_targets_from_template_rows_or_dp must use them directly instead of
+    re-deriving via the DP alias parser."""
+    rows_with_indices = [
+        OtoTemplateRow("ka'ki'ku.wav", "ka", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(0, 1)),
+        OtoTemplateRow("ka'ki'ku.wav", "a ki", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(1, 2)),
+        OtoTemplateRow("ka'ki'ku.wav", "ki", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(2, 3)),
+        OtoTemplateRow("ka'ki'ku.wav", "i ku", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(3, 4)),
+        OtoTemplateRow("ka'ki'ku.wav", "ku", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(4, 5)),
+    ]
+    phones = ["k", "a", "k", "i", "k", "u"]
+    targets = _alias_targets_from_template_rows_or_dp(rows_with_indices, phones)
+    assert targets == [1, 2, 3, 4, 5]
+
+    rows_without = [
+        OtoTemplateRow("ka'ki'ku.wav", "ka", OtoTiming(0, 0, 0, 0, 0)),
+        OtoTemplateRow("ka'ki'ku.wav", "a ki", OtoTiming(0, 0, 0, 0, 0)),
+        OtoTemplateRow("ka'ki'ku.wav", "ki", OtoTiming(0, 0, 0, 0, 0)),
+        OtoTemplateRow("ka'ki'ku.wav", "i ku", OtoTiming(0, 0, 0, 0, 0)),
+        OtoTemplateRow("ka'ki'ku.wav", "ku", OtoTiming(0, 0, 0, 0, 0)),
+    ]
+    dp_targets = _alias_targets_from_template_rows_or_dp(rows_without, phones)
+    assert dp_targets == _assign_alias_target_indices(rows_without, phones)
+
+
+def test_pre_assigned_indices_partial_falls_back_to_dp():
+    """If only some rows have indices, fall back to DP for all."""
+    rows = [
+        OtoTemplateRow("test.wav", "ka", OtoTiming(0, 0, 0, 0, 0), expected_phone_indices=(0, 1)),
+        OtoTemplateRow("test.wav", "a i", OtoTiming(0, 0, 0, 0, 0)),
+    ]
+    phones = ["k", "a", "i"]
+    targets = _alias_targets_from_template_rows_or_dp(rows, phones)
+    assert targets == _assign_alias_target_indices(rows, phones)
 
 
 def _write_tone_wav(path, *, sample_rate: int = 16000, duration_s: float = 0.25) -> None:

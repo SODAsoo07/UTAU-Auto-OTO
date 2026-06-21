@@ -46,6 +46,10 @@ class _ParamHarness(TabBuildersMixin):
     pass
 
 
+class _AdvancedSettingsHarness(TabBuildersMixin, LayoutMixin):
+    pass
+
+
 def test_basic_view_hides_developer_tabs_and_clears_destroyed_widget_refs():
     app = _LayoutHarness()
     app.developer_mode_enabled_var = _FakeVar(False)
@@ -86,3 +90,19 @@ def test_param_vars_exist_without_building_parameter_tab(monkeypatch):
     app.param_vars["VC_PRE_OFFSET"].set(17)
     app._ensure_param_vars()
     assert app.param_vars["VC_PRE_OFFSET"].get() == 17
+
+
+def test_hsmm_lightgbm_postprocess_defaults_disabled(monkeypatch):
+    monkeypatch.setattr(tab_builders_mixin.ctk, "BooleanVar", lambda value: _FakeVar(value))
+    monkeypatch.setattr(tab_builders_mixin.ctk, "StringVar", lambda value: _FakeVar(value))
+    app = _AdvancedSettingsHarness()
+
+    app._ensure_advanced_setting_vars()
+
+    assert app.disable_lightgbm_correction_var.get() is True
+    assert app._should_apply_hsmm_lightgbm(enable_ml_correction=True) is False
+
+    app.disable_lightgbm_correction_var.set(False)
+    app._ensure_advanced_setting_vars()
+    assert app.disable_lightgbm_correction_var.get() is False
+    assert app._should_apply_hsmm_lightgbm(enable_ml_correction=True) is True
