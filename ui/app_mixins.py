@@ -19,7 +19,7 @@ import customtkinter as ctk
 from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
 from core.oto_validator import validate_oto_timing
-from core.runtime_paths import resolve_setup_mfa_script_path
+from core.runtime_paths import resolve_setup_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
 from ui.i18n import t
 
@@ -2421,8 +2421,9 @@ class AppRuntimeMixin:
             and ("필수" in text or "required" in lowered)
         )
 
-    def _resolve_setup_mfa_script_path(self):
-        return resolve_setup_mfa_script_path(
+    def _resolve_setup_script_path(self, script_name="setup_mfa.bat"):
+        return resolve_setup_script_path(
+            script_name,
             app_dir=str(getattr(self, "app_dir", "") or ""),
             app_data_dir=str(getattr(self, "app_data_dir", "") or ""),
             writable_data_dir=str(getattr(self, "writable_data_dir", "") or ""),
@@ -2434,7 +2435,7 @@ class AppRuntimeMixin:
         lang = str(language or "korean").strip().lower()
         if lang not in {"korean", "japanese"}:
             lang = "korean"
-        script_path = self._resolve_setup_mfa_script_path()
+        script_path = self._resolve_setup_script_path("setup_mfa.bat")
         if script_path:
             command = f'cmd /c ""{script_path}" --recovery --non-interactive --language {lang}"'
             return (

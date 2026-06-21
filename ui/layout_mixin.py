@@ -1236,7 +1236,7 @@ class LayoutMixin:
             self.lang_notice_label.configure(
                 text=(
                     "현재 언어: 영어(프리뷰)\n"
-                    "Lab/사전/MFA를 건너뛰고, 선택한 EN CVVC 리스트의 base OTO를 조합해 생성합니다.\n"
+                    "선택한 EN CVVC 리스트의 base OTO를 조합해 생성합니다.\n"
                     "list-only(vv/cc/alt) 섹션은 옵션으로 합성 생성할 수 있습니다."
                 ),
                 fg_color=LANGUAGE_NOTICE_THEME["english"]["fg_color"],
@@ -1756,10 +1756,6 @@ class LayoutMixin:
             except Exception:
                 pass
         no_mfa_mode_desc = NO_MFA_REMAP_LABEL
-        if hasattr(self, "mfa_align_profile_menu"):
-            self.mfa_align_profile_menu.configure(
-                state="disabled" if (use_no_mfa or use_sequence or use_coarse_crnn or use_hsmm_oto) else "normal"
-            )
         show_no_mfa_mode_row = use_no_mfa and not (
             lang == "english" or is_kr_template_only
         )
@@ -1906,22 +1902,22 @@ class LayoutMixin:
             if use_no_mfa:
                 if lang == "english":
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (영어 Preview)"))
-                    self.align_step_desc_label.configure(text=t("영어 CVVC Preview 모드는 Lab/사전/MFA 없이 base OTO 목록으로 생성합니다."))
+                    self.align_step_desc_label.configure(text=t("영어 CVVC Preview 모드는 base OTO 목록으로 바로 생성합니다."))
                 elif lang == "korean" and fmt == "cmpx":
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (CMPX Preview)"))
-                    self.align_step_desc_label.configure(text=t("한국어 CMPX Preview 모드는 Lab/사전/MFA 없이 base OTO를 WAV에 재매핑해 생성합니다."))
+                    self.align_step_desc_label.configure(text=t("한국어 CMPX Preview 모드는 base OTO를 WAV에 재매핑해 생성합니다."))
                 elif is_c_plus_v_mode:
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (한국어 C+V)"))
                     self.align_step_desc_label.configure(text=t("한국어 C+V 모드는 템플릿 OTO를 WAV에 재매핑하는 방식으로 생성합니다."))
                 else:
-                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (No-MFA)"))
+                    self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀"))
                     self.align_step_desc_label.configure(
-                        text=t("MFA 정렬 없이 진행합니다. 베이스 OTO를 WAV에 재매핑하고 저신뢰 라인은 음향 후보 점수로 보정합니다.")
+                        text=t("베이스 OTO를 WAV에 재매핑하고 저신뢰 라인은 음향 후보 점수로 보정합니다.")
                     )
             else:
                 if use_sequence:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬 (전용 시퀀스)"))
-                    self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다. 실패 시 MFA fallback을 사용합니다."))
+                    self.align_step_desc_label.configure(text=t("frame-hop 시퀀스 라벨 기반으로 TextGrid를 생성합니다."))
                 elif use_hsmm_oto:
                     self.align_step_title_label.configure(text=t("2. 정렬 단계 건너뜀 (HSMM OTO)"))
                     self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 파일명 슬롯 기반 HSMM 디코더로 oto.ini를 생성합니다."))
@@ -2395,4 +2391,3 @@ class LayoutMixin:
             return {key: var.get() for key, var in self.param_vars.items()}
         return None
 
-    # ── MFA 설치 (GUI 내장) ──
