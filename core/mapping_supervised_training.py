@@ -1,8 +1,8 @@
-"""Compatibility wrapper: moved to `core.oto_ml.oto_ml_collection_build`."""
+"""Compatibility wrapper: moved to `core.generation.common.mapping_supervised_training`."""
 
 from importlib import import_module as _import_module
 
-_impl = _import_module("core.oto_ml.oto_ml_collection_build")
+_impl = _import_module("core.generation.common.mapping_supervised_training")
 for _name, _value in _impl.__dict__.items():
     if _name.startswith("__"):
         continue

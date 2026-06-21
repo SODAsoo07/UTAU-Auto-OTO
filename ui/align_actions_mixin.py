@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.format_type_utils import normalize_auto_format_value
