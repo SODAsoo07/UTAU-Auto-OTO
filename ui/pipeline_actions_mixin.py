@@ -550,10 +550,6 @@ class PipelineActionsMixin:
                 )
                 return
 
-            app_dir = getattr(self, "app_dir", "") or os.getcwd()
-            setup_script_path = os.path.join(app_dir, "setup_mfa.bat")
-            setup_cmd = "setup_mfa.bat --with-ml --with-cuda"
-            setup_cmd_line = setup_cmd if os.path.isfile(setup_script_path) else "(setup_mfa.bat 파일을 찾지 못함)"
             title = "CUDA 런타임 자동 설치"
             message = (
                 "NVIDIA GPU가 감지되었지만 현재 Python 런타임에서 CUDA를 사용할 수 없습니다.\n\n"
@@ -562,8 +558,7 @@ class PipelineActionsMixin:
                 f"- torch 버전: {torch_ver or '(미설치 또는 import 실패)'}\n"
                 f"- torch CUDA 빌드: {torch_cuda_ver or '(없음)'}\n\n"
                 "지금 네트워크로 CUDA용 PyTorch를 자동 설치할까요?\n\n"
-                f"- 자동 설치 실패 시 수동 명령: {direct_cmd or '(권장 pip 명령 생성 실패)'}\n"
-                f"- 대체 경로: {setup_cmd_line}"
+                f"- 자동 설치 실패 시 수동 명령: {direct_cmd or '(권장 pip 명령 생성 실패)'}"
             )
             self._append_log(
                 "⚠ NVIDIA GPU는 감지되었지만 torch CUDA 런타임이 비활성 상태입니다. "

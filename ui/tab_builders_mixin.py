@@ -183,7 +183,7 @@ class TabBuildersMixin:
             (
                 "align",
                 "2. 정렬 단계",
-                "기본 HSMM OTO에서는 건너뜁니다. MFA를 선택한 경우에만 TextGrid를 생성합니다.",
+                "기본 HSMM OTO에서는 건너뜁니다. WFL 엔진 선택 시에만 TextGrid를 생성합니다.",
                 self._run_mfa,
             ),
             (
@@ -304,8 +304,8 @@ class TabBuildersMixin:
         intro_label = ctk.CTkLabel(
             parent,
             text=(
-                "처음 설치나 'MFA 진단/복구'는 환경 구성과 현재 언어 모델 다운로드 때문에 10~20분 이상 걸릴 수 있습니다.\n"
-                "문제가 생기면 먼저 'MFA 진단/복구'를 눌러 자동 복구를 시도한 뒤 정렬을 다시 실행하세요."
+                "HSMM OTO는 외부 도구 설치 없이 바로 실행됩니다.\n"
+                "WFL 엔진을 사용하려면 WFL 모델을 먼저 다운로드하세요."
             ),
             text_color=PALETTE.neutral_text,
             wraplength=760,
