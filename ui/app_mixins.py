@@ -18,7 +18,6 @@ import customtkinter as ctk
 
 from core.format_type_utils import normalize_auto_format_value
 from core.log_events import classify_log_message, log_with_event
-from core.mfa_runner import ALERT_MFA_PERMISSION_DENIED, ALERT_MSVC_REQUIRED
 from core.oto_validator import validate_oto_timing
 from core.runtime_paths import resolve_setup_mfa_script_path
 from ui.theme_tokens import DEFAULT_THEME_PROFILE, PALETTE, normalize_theme_profile_name
@@ -2286,8 +2285,6 @@ class AppRuntimeMixin:
             pass
 
     def _should_show_ui_log(self, msg):
-        if msg in (ALERT_MSVC_REQUIRED, ALERT_MFA_PERMISSION_DENIED):
-            return True
         return bool(classify_log_message(str(msg or "")).get("ui_visible"))
 
     def _append_detail_log(self, msg):
@@ -2392,13 +2389,7 @@ class AppRuntimeMixin:
         self._append_detail_log(raw_msg)
         msg = self._normalize_ui_message(raw_msg)
         link_line = ""
-        if msg == ALERT_MSVC_REQUIRED:
-            msg = (
-                "일부 한국어 의존성 설치에 실패했습니다. "
-                "Windows에서는 Microsoft C++ Build Tools가 필요할 수 있습니다."
-            )
-            link_line = f"다운로드 링크: {self._MSVC_BUILD_TOOLS_URL}"
-        elif self._looks_like_msvc_requirement_message(msg):
+        if self._looks_like_msvc_requirement_message(msg):
             link_line = f"다운로드 링크: {self._MSVC_BUILD_TOOLS_URL}"
         now = time.monotonic()
         last_msg = getattr(self, "_last_log_msg", "")
@@ -2414,23 +2405,9 @@ class AppRuntimeMixin:
             self._log_to_file(msg)
             if link_line:
                 self._log_to_file(link_line)
-        if msg == ALERT_MSVC_REQUIRED or self._looks_like_msvc_requirement_message(msg):
+        if self._looks_like_msvc_requirement_message(msg):
             self._after_safe(
                 self._show_msvc_required_alert
-            )
-        if msg == ALERT_MFA_PERMISSION_DENIED:
-            self._after_safe(
-                lambda: self._show_copyable_alert(
-                    title="MFA permission error",
-                    message=(
-                        "MFA internal executable (compute-mfcc-feats) may fail due to permission issues (WinError 5).\n\n"
-                        "Checklist:\n"
-                        "- Check antivirus/Defender exclusion for the MFA runtime path\n"
-                        "- Check Controlled Folder Access/AppLocker policies\n"
-                        "- Try running the app once with administrator privileges"
-                    ),
-                    alert_key="mfa_permission_denied",
-                )
             )
         self._insert_ui_log_line(msg)
         if link_line:
@@ -3509,9 +3486,6 @@ class ConfigMixin:
             "show_advanced_aligner": self.show_advanced_aligner_var.get() if hasattr(self, "show_advanced_aligner_var") else False,
             "developer_mode_enabled": self.developer_mode_enabled_var.get() if hasattr(self, "developer_mode_enabled_var") else False,
             "aligner": self.aligner_var.get(),
-            "mfa_explicitly_selected": bool(getattr(self, "_mfa_explicitly_selected", False)),
-            "mfa_align_profile": self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "\uae30\ubcf8",
-            "mfa_align_profile_code": self._get_mfa_align_profile_code() if hasattr(self, "_get_mfa_align_profile_code") else "default",
             "whisperx_profile": self.whisperx_profile_var.get() if hasattr(self, "whisperx_profile_var") else "balanced",
             "whisperx_device": self.whisperx_device_var.get() if hasattr(self, "whisperx_device_var") else "auto",
             "whisperx_compute_type": self.whisperx_compute_type_var.get() if hasattr(self, "whisperx_compute_type_var") else "int8",
@@ -3698,14 +3672,12 @@ class ConfigMixin:
                     saved_aligner = normalize_aligner_name(config.get("aligner", "hsmm_oto"), default="hsmm_oto")
                 except Exception:
                     saved_aligner = "hsmm_oto"
-                self._mfa_explicitly_selected = bool(config.get("mfa_explicitly_selected", False))
-                if saved_aligner == "mfa" and not self._mfa_explicitly_selected:
+                if saved_aligner == "mfa":
                     saved_aligner = "hsmm_oto"
                 aligner_label_map = {
                     "none": "HSMM OTO",
                     "sequence": "전용(시퀀스)",
                     "hsmm_oto": "HSMM OTO",
-                    "mfa": "MFA (레거시)",
                     "wfl": "WFL",
                 }
                 self.aligner_var.set(aligner_label_map.get(saved_aligner, "HSMM OTO"))
@@ -3721,42 +3693,6 @@ class ConfigMixin:
                 )
             if hasattr(self, "show_advanced_aligner_var"):
                 self.show_advanced_aligner_var.set(False)
-            if hasattr(self, "mfa_align_profile_var"):
-                saved_profile_raw = str(
-                    config.get(
-                        "mfa_align_profile_code",
-                        config.get("mfa_align_profile", "\uae30\ubcf8"),
-                    )
-                    or ""
-                ).strip()
-                compact = saved_profile_raw.lower().replace(" ", "")
-                if compact in {
-                    "\ube60\ub984".replace(" ", ""),
-                    "\ube60\ub984(\uc800\uc0ac\uc591\ucd94\ucc9c)".replace(" ", ""),
-                    "fast",
-                    "quick",
-                    "lite",
-                    "speed",
-                }:
-                    self.mfa_align_profile_var.set("\ube60\ub984")
-                elif compact in {
-                    "\uc815\ubc00+\ud654\uc790\uc801\uc751".replace(" ", ""),
-                    "\uc815\ud655\ub3c4\uc6b0\uc120+\ud654\uc790\uc801\uc751".replace(" ", ""),
-                    "accurate_adapted",
-                    "speaker_adapted",
-                    "speaker_adaptation",
-                    "adapt",
-                    "speaker",
-                }:
-                    self.mfa_align_profile_var.set("\uc815\ubc00 + \ud654\uc790 \uc801\uc751")
-                elif compact in {
-                    "\uc815\ubc00".replace(" ", ""),
-                    "\uc815\ud655\ub3c4\uc6b0\uc120".replace(" ", ""),
-                    "accurate",
-                }:
-                    self.mfa_align_profile_var.set("\uc815\ubc00")
-                else:
-                    self.mfa_align_profile_var.set("\uae30\ubcf8")
             if "whisperx_profile" in config and hasattr(self, "whisperx_profile_var"):
                 profile = str(config.get("whisperx_profile", "balanced") or "balanced").strip().lower()
                 if profile in {"low_load", "balanced", "high_accuracy"}:

@@ -412,7 +412,7 @@ class LayoutMixin:
         build_left_label(self.row_aligner, t("정렬 엔진:")).pack(side="left")
         self.aligner_menu = ctk.CTkOptionMenu(
             self.row_aligner,
-            values=[HSMM_OTO_LABEL, "WFL", "MFA (레거시)"],
+            values=[HSMM_OTO_LABEL, "WFL"],
             variable=self.aligner_var,
             width=190,
             command=self._on_aligner_change,
@@ -421,7 +421,7 @@ class LayoutMixin:
         self.aligner_menu.pack(side="left", padx=(6, 8))
         self.aligner_help_label = ctk.CTkLabel(
             self.row_aligner,
-            text=t("(기본은 WFL입니다. WFL/MFA는 선택한 경우에만 환경·모델 준비 여부를 확인하며, 준비되지 않으면 자동 폴백합니다.)"),
+            text=t("(기본은 HSMM OTO입니다. WFL은 선택한 경우에만 환경·모델 준비 여부를 확인하며, 준비되지 않으면 HSMM OTO로 자동 폴백합니다.)"),
             text_color=PALETTE.neutral_text,
         )
         self.aligner_help_label.pack(side="left", fill="x", expand=True)
@@ -556,22 +556,6 @@ class LayoutMixin:
         self.oto_crnn_special_aliases_entry.configure(fg_color=PALETTE.input_bg, border_color=PALETTE.input_border)
         self.oto_crnn_special_aliases_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
         self.row_oto_crnn_special_aliases.pack_forget()
-        self.row_align_extra = build_form_row(form_body)
-        build_left_label(self.row_align_extra, t("MFA 정렬 프로필:")).pack(side="left")
-        self.mfa_align_profile_menu = ctk.CTkOptionMenu(
-            self.row_align_extra,
-            values=["기본", "정밀", "정밀 + 화자 적응", "빠름"],
-            variable=self.mfa_align_profile_var,
-            width=220,
-            command=lambda _v: self._save_config(),
-        )
-        _style_blue_menu(self.mfa_align_profile_menu)
-        self.mfa_align_profile_menu.pack(side="left", padx=(6, 8))
-        ctk.CTkLabel(
-            self.row_align_extra,
-            text=t("(기본=정확도 균형)"),
-            text_color=PALETTE.neutral_text,
-        ).pack(side="left", fill="x", expand=True)
 
 
 
@@ -1643,36 +1627,9 @@ class LayoutMixin:
         self._sync_aligner_ui()
         self._save_config()
 
-    def _get_mfa_align_profile_code(self):
-        profile = str(self.mfa_align_profile_var.get() if hasattr(self, "mfa_align_profile_var") else "").strip()
-        if profile in {"빠름", "빠름 (저사양 추천)", "fast"}:
-            return "fast"
-        if profile in {
-            "정밀 + 화자 적응",
-            "정확도 우선 + 화자 적응",
-            "accurate_adapted",
-            "speaker_adapted",
-            "speaker_adaptation",
-        }:
-            return "accurate_adapted"
-        if profile in {"정밀", "정확도 우선", "정확도 우선 (정밀)", "accurate"}:
-            return "accurate"
-        if profile in {"기본", "default", "정확도 우선 (기본)"}:
-            return "default"
-        return "default"
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()
-        try:
-            selected = normalize_aligner_name(
-                self.aligner_var.get() if hasattr(self, "aligner_var") else "",
-                default="hsmm_oto",
-            )
-        except Exception:
-            selected = "hsmm_oto"
-        self._mfa_explicitly_selected = selected == "mfa"
-        if selected == "mfa" and hasattr(self, "_prompt_mfa_install_for_explicit_selection"):
-            self._prompt_mfa_install_for_explicit_selection()
         self._save_config()
 
     def _on_ml_route_change(self, _value=None):
@@ -1691,12 +1648,9 @@ class LayoutMixin:
             if hasattr(self, "developer_mode_enabled_var")
             else False
         )
-        # WFL-ASR is the default/primary aligner. normalize_aligner_name("WFL")
-        # routes to the "wfl" engine; readiness (external torch env + pretrained
-        # model) is checked at run time and falls back if not configured.
-        # MFA is kept as a legacy option; the heuristic sequence aligner is moved
-        # behind developer mode now that WFL is the primary non-MFA engine.
-        options = [HSMM_OTO_LABEL, "WFL", "MFA (레거시)"]
+        # HSMM OTO is the default; WFL-ASR is the external torch-based aligner.
+        # The heuristic sequence aligner is behind developer mode.
+        options = [HSMM_OTO_LABEL, "WFL"]
         if developer_enabled:
             options = options + ["전용(시퀀스)"]
         lang = self._get_language()
@@ -1718,12 +1672,9 @@ class LayoutMixin:
                 self.aligner_menu.set(current)
             except Exception:
                 pass
-        # Show engine-specific action buttons contextually: MFA diagnose/install
-        # only when MFA (legacy) is selected; WFL status only when WFL is selected.
+        # Show engine-specific action buttons contextually.
         current_engine = normalize_aligner_name(current, default="hsmm_oto")
         for _attr, _show in (
-            ("mfa_repair_btn", current_engine == "mfa"),
-            ("mfa_install_btn", current_engine == "mfa"),
             ("wfl_status_btn", current_engine == "wfl"),
             ("wfl_model_btn", current_engine == "wfl"),
         ):
@@ -1932,7 +1883,7 @@ class LayoutMixin:
             elif use_coarse_crnn:
                 self.aligner_help_label.configure(text=t("(CRNN OTO 직접 예측을 사용합니다. TextGrid 정렬 단계는 건너뜁니다.)"))
             else:
-                self.aligner_help_label.configure(text=t("(MFA 정렬을 사용합니다. MFA가 없으면 설치 여부를 먼저 확인합니다.)"))
+                self.aligner_help_label.configure(text=t("(선택한 엔진으로 정렬합니다.)"))
         if hasattr(self, "pipeline_step_align_btn") and self.pipeline_step_align_btn is not None:
             try:
                 if use_no_mfa or use_hsmm_oto:
@@ -1979,7 +1930,7 @@ class LayoutMixin:
                     self.align_step_desc_label.configure(text=t("OTO 생성 단계에서 CRNN 직접 예측 모델로 oto.ini를 생성합니다."))
                 else:
                     self.align_step_title_label.configure(text=t("2. 음성 정렬"))
-                    self.align_step_desc_label.configure(text=t("MFA로 TextGrid를 생성합니다. MFA가 없으면 설치 여부를 먼저 확인합니다."))
+                    self.align_step_desc_label.configure(text=t("선택한 엔진으로 TextGrid를 생성합니다."))
 
     def _toggle_developer_mode(self):
         if not hasattr(self, "developer_mode_enabled_var"):

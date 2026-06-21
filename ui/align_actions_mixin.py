@@ -1,8 +1,7 @@
-﻿import os
+import os
 
 from core.alignment_pipeline import run_alignment_with_fallback
 from core.format_type_utils import normalize_auto_format_value
-from core.mfa_runner import check_mfa_model, download_mfa_model
 from core.pipeline_status import normalize_aligner_name
 from ui.i18n import t
 
@@ -102,7 +101,7 @@ class AlignActionsMixin:
         )
         if (
             wav_dir_for_prompt
-            and primary_engine_for_prompt in {"mfa", "sequence"}
+            and primary_engine_for_prompt in {"wfl", "sequence"}
             and lang_for_prompt != "english"
         ):
             prompt_dirs = [wav_dir_for_prompt]
@@ -184,40 +183,20 @@ class AlignActionsMixin:
                         )()
                     ]
 
-                mfa_profile = (
-                    self._get_mfa_align_profile_code()
-                    if hasattr(self, "_get_mfa_align_profile_code")
-                    else "accurate"
-                )
                 self._append_log(
-                    f"ℹ 정렬 실행 시작: engine={primary_engine}, profile={mfa_profile}"
+                    f"ℹ 정렬 실행 시작: engine={primary_engine}"
                 )
 
-                if primary_engine == "mfa":
-                    if hasattr(self, "_ensure_mfa_ready_for_language"):
-                        if not self._ensure_mfa_ready_for_language(lang):
-                            self._set_status("MFA not ready")
-                            return
-                    elif self.mfa_path:
-                        has_model, msg = check_mfa_model(self.mfa_path, language=lang)
-                        self._append_log(msg)
-                        if not has_model and not download_mfa_model(
-                            self.mfa_path, language=lang, callback=self._append_log
-                        ):
-                            self._set_status("MFA model missing")
-                            return
-                elif primary_engine == "sequence":
+                if primary_engine == "sequence":
                     self._append_log("ℹ 전용 시퀀스 aligner 엔진 선택: frame-hop 라벨 기반 정렬을 실행합니다.")
                 elif primary_engine == "wfl":
                     self._append_log("ℹ WFL-ASR 엔진 선택: 준비되지 않으면 HSMM OTO로 자동 폴백합니다.")
-                if primary_engine == "mfa":
-                    self._append_log(f"MFA profile: {mfa_profile}")
-                elif primary_engine == "sequence":
+                if primary_engine == "sequence":
                     self._append_log("Alignment engine: Dedicated Sequence")
                 elif primary_engine == "wfl":
                     self._append_log("Alignment engine: WFL-ASR")
                 else:
-                    self._append_log("Alignment engine: none (MFA bypass)")
+                    self._append_log(f"Alignment engine: {primary_engine}")
                 if hasattr(self, "_apply_advanced_tuning_envs"):
                     self._apply_advanced_tuning_envs()
 
@@ -232,7 +211,7 @@ class AlignActionsMixin:
                     dict_path = os.path.join(target_wav_dir, dict_filename)
                     output_dir = os.path.join(target_wav_dir, "textgrids")
                     if hasattr(self, "_validate_alignment_input_files"):
-                        needs_lab_dict = primary_engine in ("mfa", "wfl")
+                        needs_lab_dict = primary_engine in ("wfl",)
                         if needs_lab_dict and (not self._validate_alignment_input_files(target_wav_dir, dict_path)):
                             failed_count += 1
                             continue
@@ -244,14 +223,12 @@ class AlignActionsMixin:
                         output_folder=output_dir,
                         primary_aligner=primary_engine,
                         fallback_aligner=("hsmm_oto" if primary_engine == "wfl" else ""),
-                        mfa_path=self.mfa_path or "",
-                        mfa_align_profile=mfa_profile,
                         format_hint=selected_format,
                         overwrite_existing_textgrids=bool(overwrite_existing_textgrids),
                         callback=self._append_log,
                     )
                     if bool(result.get("ok", False)):
-                        used_engine = str(result.get("used_engine", "") or "mfa").upper()
+                        used_engine = str(result.get("used_engine", "") or "unknown").upper()
                         self._append_log(f"{prefix}✅ 정렬 완료: engine={used_engine}, output={output_dir}")
                         success_count += 1
                     else:
@@ -261,15 +238,6 @@ class AlignActionsMixin:
                         if hasattr(self, "_is_lab_or_dict_missing_alignment_error") and hasattr(self, "_notify_lab_or_dict_missing"):
                             if self._is_lab_or_dict_missing_alignment_error(code, err):
                                 self._notify_lab_or_dict_missing(target_wav_dir, dict_path)
-                        if (
-                            primary_engine == "mfa"
-                            and hasattr(self, "_schedule_alignment_failure_mfa_followup")
-                        ):
-                            self._schedule_alignment_failure_mfa_followup(
-                                language=lang,
-                                align_code=code,
-                                align_message=err,
-                            )
                         failed_count += 1
                 if failed_count:
                     self._set_status(f"Alignment partial/failed ({success_count}/{len(targets)})")
