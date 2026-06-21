@@ -1630,6 +1630,16 @@ class LayoutMixin:
 
     def _on_aligner_change(self, _value=None):
         self._sync_aligner_ui()
+        try:
+            selected = normalize_aligner_name(
+                self.aligner_var.get() if hasattr(self, "aligner_var") else "",
+                default="hsmm_oto",
+            )
+        except Exception:
+            selected = "hsmm_oto"
+        self._mfa_explicitly_selected = selected == "mfa"
+        if selected == "mfa" and hasattr(self, "_prompt_mfa_install_for_explicit_selection"):
+            self._prompt_mfa_install_for_explicit_selection()
         self._save_config()
 
     def _on_ml_route_change(self, _value=None):
