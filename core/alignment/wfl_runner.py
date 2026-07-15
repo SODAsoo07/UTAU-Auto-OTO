@@ -176,6 +176,10 @@ def _model_files(model_dir: str) -> Dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Pretrained model download (Archivoice/WFL-ASR-model GitHub releases)
 # --------------------------------------------------------------------------- #
+_WFL_RUNTIME_REPO = "Archivoice/WFL-ASR-model"
+_WFL_RUNTIME_DEFAULT_TAG = "wfl_runtime_v1"
+_WFL_RUNTIME_ASSET_NAME = "wfl_runtime.7z"
+
 _WFL_MODEL_REPO = "Archivoice/WFL-ASR-model"
 _WFL_MODEL_DEFAULT_TAG = "11_lang_models"
 # Map app language -> release asset basename (without .rar).
@@ -270,6 +274,127 @@ def _resolve_model_asset_url(language: str, callback=None) -> Tuple[str, str]:
     except Exception as exc:
         _emit(callback, f"[WFL] release listing failed: {exc}")
     return "", asset_name
+
+
+def _wfl_runtime_install_root() -> str:
+    """Default WFL runtime location: <app-root>/wfl_runtime."""
+    override = _env("UTOA_WFL_RUNTIME_ROOT")
+    if override:
+        return override
+    return os.path.join(_app_root(), "wfl_runtime")
+
+
+def is_wfl_runtime_installed() -> bool:
+    root = _wfl_runtime_install_root()
+    python_candidates = [
+        os.path.join(root, "python", "python.exe"),
+        os.path.join(root, "python.exe"),
+        os.path.join(root, "python", "python"),
+    ]
+    infer = os.path.join(root, "WFL-ASR", "infer.py")
+    return os.path.isfile(infer) and any(os.path.isfile(p) for p in python_candidates)
+
+
+def _resolve_runtime_asset_url(callback=None) -> Tuple[str, str]:
+    """Return (download_url, asset_name) for the WFL runtime archive."""
+    tag = _env("UTOA_WFL_RUNTIME_RELEASE_TAG") or _WFL_RUNTIME_DEFAULT_TAG
+    asset_name = _env("UTOA_WFL_RUNTIME_ASSET") or _WFL_RUNTIME_ASSET_NAME
+    api_url = f"https://api.github.com/repos/{_WFL_RUNTIME_REPO}/releases/tags/{tag}"
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "utoa-wfl"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        for a in data.get("assets", []):
+            if str(a.get("name", "")).lower() == asset_name.lower():
+                return str(a.get("browser_download_url", "")), asset_name
+    except Exception as exc:
+        _emit(callback, f"[WFL] runtime release lookup failed ({tag}): {exc}")
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{_WFL_RUNTIME_REPO}/releases",
+            headers={"User-Agent": "utoa-wfl"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            releases = json.loads(resp.read().decode("utf-8", errors="replace"))
+        for rel in releases:
+            for a in rel.get("assets", []):
+                if str(a.get("name", "")).lower() == asset_name.lower():
+                    return str(a.get("browser_download_url", "")), asset_name
+    except Exception as exc:
+        _emit(callback, f"[WFL] runtime release listing failed: {exc}")
+    return "", asset_name
+
+
+def download_wfl_runtime(callback=None, force: bool = False) -> Tuple[bool, str]:
+    """Download and install the WFL runtime (python env + WFL-ASR code).
+    Models are NOT included — use download_wfl_model() separately.
+    Returns (ok, message)."""
+    if is_wfl_runtime_installed() and not force:
+        return True, "WFL 런타임이 이미 설치되어 있습니다."
+
+    seven_zip = _find_7zip()
+    if not seven_zip:
+        return False, (
+            "WFL 런타임(.7z) 추출에는 7-Zip이 필요합니다. 7-Zip을 설치하거나 "
+            "UTOA_7ZIP_PATH 환경변수로 경로를 지정해 주세요."
+        )
+
+    url, asset_name = _resolve_runtime_asset_url(callback=callback)
+    if not url:
+        return False, f"릴리스에서 '{asset_name}' 자산을 찾지 못했습니다 ({_WFL_RUNTIME_REPO})."
+
+    install_root = _wfl_runtime_install_root()
+    tmp_dir = tempfile.mkdtemp(prefix="utoa_wfl_rt_")
+    archive_path = os.path.join(tmp_dir, asset_name)
+    try:
+        _emit(callback, f"[WFL] 런타임 다운로드 중: {asset_name} ...")
+        # Support resume: if partial file exists, request remaining bytes
+        existing_size = 0
+        if os.path.isfile(archive_path):
+            existing_size = os.path.getsize(archive_path)
+        headers = {"User-Agent": "utoa-wfl"}
+        if existing_size > 0:
+            headers["Range"] = f"bytes={existing_size}-"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp, open(archive_path, "ab" if existing_size else "wb") as out:
+            total = int(resp.headers.get("Content-Length", 0) or 0) + existing_size
+            downloaded = existing_size
+            last_pct = -1
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = downloaded * 100 // total
+                    if pct >= last_pct + 5:
+                        _emit(callback, f"[WFL] 다운로드 중... {downloaded // (1024*1024)}MB / {total // (1024*1024)}MB ({pct}%)")
+                        last_pct = pct
+        size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+        _emit(callback, f"[WFL] 다운로드 완료: {size_mb:.0f} MB. 압축 해제 중...")
+
+        if force and os.path.isdir(install_root):
+            shutil.rmtree(install_root, ignore_errors=True)
+        os.makedirs(install_root, exist_ok=True)
+
+        proc = subprocess.run(
+            [seven_zip, "x", archive_path, f"-o{install_root}", "-y"],
+            capture_output=True, text=False,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or b"").decode("utf-8", errors="replace")[-400:]
+            return False, f"압축 해제 실패(7-Zip code {proc.returncode}): {tail}"
+
+        if not is_wfl_runtime_installed():
+            return False, f"압축 해제 후 런타임 파일이 확인되지 않습니다: {install_root}"
+
+        _emit(callback, f"[WFL] 런타임 설치 완료: {install_root}")
+        return True, f"WFL 런타임 설치 완료: {install_root}"
+    except Exception as exc:
+        return False, f"WFL 런타임 다운로드 실패: {exc}"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def download_wfl_model(language: str, callback=None, force: bool = False) -> Tuple[bool, str]:

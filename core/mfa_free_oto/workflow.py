@@ -30,6 +30,7 @@ from .oto_adapter import (
     _alias_type_for_row,
     _is_nonphonetic_special_alias,
     _is_japanese_language_name,
+    _is_korean_language_name,
     _phone_matches,
     _phone_sequence_variants_match,
     load_oto_template_rows_alias_only,
@@ -143,6 +144,7 @@ def generate_no_mfa_oto_with_model_context(
     guard: NoMfaWorkflowGuard | None = None,
     runtime_policy: WorldV1RuntimePolicy | None = None,
     callback: Callable[[str], None] | None = None,
+    max_workers: int | None = None,
 ) -> NoMfaWorkflowReport:
     cfg = guard or NoMfaWorkflowGuard()
     policy = runtime_policy or WorldV1RuntimePolicy()
@@ -203,6 +205,20 @@ def generate_no_mfa_oto_with_model_context(
         for row in template_rows:
             templates_by_wav.setdefault(str(row.wav).lower(), []).append(row)
 
+        # Guide-grid prior input: the alias-only rows above have their timings
+        # zeroed by design, so load the raw rows once more to extract each
+        # wav's guide-time preutterance grid (used only as a weak HSMM prior).
+        from .hsmm_adapter import template_mora_pre_grid
+        from .oto_adapter import load_oto_template_rows as _load_full_template_rows
+
+        full_rows_by_wav: dict[str, list] = {}
+        for row in _load_full_template_rows(source_oto):
+            full_rows_by_wav.setdefault(str(row.wav).lower(), []).append(row)
+        guide_pre_by_wav: dict[str, list[float]] = {
+            wav_name: template_mora_pre_grid(rows)
+            for wav_name, rows in full_rows_by_wav.items()
+        }
+
         # Index actual wavs by a separator-normalised name so a base OTO that
         # references reclist apostrophes (ga'gi'gu.wav) still matches recordings
         # saved with underscores (ga_gi_gu.wav). Without this the mismatched wavs
@@ -215,10 +231,12 @@ def generate_no_mfa_oto_with_model_context(
         except Exception:
             actual_wavs_by_norm = {}
 
-        source_ordered_lines: list[tuple[int, int, str]] = []
-        source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
+        from .parallel import process_wavs_parallel
+
         total_wav_groups = len(templates_by_wav)
-        for wav_index, raw_wav_key in enumerate(sorted(templates_by_wav), start=1):
+        wav_tasks = []
+        wav_task_keys: list[str] = []
+        for raw_wav_key in sorted(templates_by_wav):
             wav_key = raw_wav_key
             template_group = _template_group_in_filename_order(
                 raw_wav_key,
@@ -230,8 +248,6 @@ def generate_no_mfa_oto_with_model_context(
             if not os.path.isfile(wav_path):
                 resolved = actual_wavs_by_norm.get(_normalize_wav_name(raw_wav_key))
                 if resolved and os.path.isfile(os.path.join(wav_root, resolved)):
-                    # Re-point the group at the real file so it is processed and the
-                    # output references the on-disk filename UTAU can actually find.
                     wav_key = resolved
                     wav_path = os.path.join(wav_root, resolved)
                     template_group = [replace(r, wav=resolved) for r in template_group]
@@ -239,142 +255,67 @@ def generate_no_mfa_oto_with_model_context(
                 else:
                     warnings.append(f"missing_wav:{raw_wav_key}")
                     continue
-            if callback:
-                callback(f"[No-MFA/MFA-Free] wav {wav_index}/{total_wav_groups}: {wav_key}")
+
             row_plan_slots = build_filename_slots(wav_key, language=language, format_type=format_type)
-            expected_phones = _expected_phones(
-                wav_key,
-                [],
-                filename_slots=row_plan_slots,
-            )
+            expected_phones = _expected_phones(wav_key, [], filename_slots=row_plan_slots)
             expected_slots = timeline_expected_slots_for_template_rows(
-                template_group,
-                expected_phones,
-                language=language,
+                template_group, expected_phones, language=language,
             )
-            prediction = predict_wav(
-                wav_path,
-                checkpoint_path=checkpoint_path,
-                expected_phones=expected_phones,
-                expected_slots=expected_slots,
-                encoder=encoder,
-                device=device,
-                use_slot_viterbi=use_slot_viterbi,
-                language=language,
-            )
-            prediction_events = list(_event_source_for_oto(prediction))
-            evidence_pack = build_acoustic_evidence_pack(
-                prediction.posterior,
-                wav_name=wav_key,
-                expected_phones=expected_phones,
-                filename_slots=row_plan_slots if use_hsmm_decoder else (),
-                runtime_events=prediction_events,
-            )
-            evidence_debug.append(evidence_pack)
-            _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
-            slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
-            decoded_source = list(prediction_events)
-            selected_event_source = "runtime_prediction"
-            hsmm = None
-            hsmm_skip_no_expected = (
-                bool(use_hsmm_decoder)
-                and bool(row_plan_slots)
-                and not bool(expected_slots)
-                and _template_group_is_nonphonetic_special_only(template_group)
-            )
-            if use_hsmm_decoder and row_plan_slots and (expected_slots or not hsmm_skip_no_expected):
-                candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
-                hsmm = decode_filename_slots_with_hsmm(
-                    prediction.posterior,
-                    row_plan_slots,
-                    event_priors=(*prediction_events, *candidate_priors),
-                    language=language,
-                )
-                if hsmm.ok and hsmm.events:
-                    hsmm_reject_reason = ""
-                    hsmm_sequence_ok = _hsmm_event_sequence_matches_expected(
-                        expected_slots or (),
-                        hsmm.events,
-                        runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
-                    )
-                    if hsmm_sequence_ok:
-                        hsmm_reject_reason = _hsmm_runtime_replacement_rejection_reason(
-                            expected_slots or (),
-                            prediction_events,
-                            language=language,
-                            format_type=format_type,
-                            template_rows=template_group,
-                        )
-                    if hsmm_sequence_ok and not hsmm_reject_reason:
-                        decoded_source = list(hsmm.events)
-                        selected_event_source = "filename_hsmm"
-                        warnings.append("filename_hsmm_decoder_used")
-                    else:
-                        warnings.append(
-                            f"filename_hsmm_decoder_rejected:{hsmm_reject_reason or 'event_sequence_mismatch'}"
-                        )
-                else:
-                    warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
-            elif hsmm_skip_no_expected:
-                warnings.append(f"filename_hsmm_decoder_skipped:no_expected_slots:{wav_key}")
-            elif use_hsmm_decoder:
-                warnings.append(f"filename_hsmm_decoder_skipped:no_filename_slots:{wav_key}")
-            file_duration_ms = _wav_duration_ms(wav_path, warnings)
-            row_anchors = assign_template_row_anchors(
-                prediction.posterior,
-                decoded_source,
-                template_group,
-                min_score=0.02,
-                use_source_timing_prior=False,
-                expected_phones=expected_phones,
-                language=language,
-            )
-            if one_step_shift_repair_enabled:
-                row_anchors = _repair_anchor_monotonicity(row_anchors)
-            adapter_config = OtoAdapterConfig(
-                mode="template-preserve",
-                language=language,
-                format_type=format_type,
-                alias_type=alias_type,
-                vc_pre_max_ms=vc_pre_max_ms,
-            )
-            timeline_rows: list[dict[str, object]] = []
-            adapted_group = [
-                adapt_template_row(
-                    template_row,
-                    anchor,
-                    file_duration_ms=file_duration_ms,
-                    config=adapter_config,
-                )
-                for template_row, anchor in zip(template_group, row_anchors)
-            ]
-            adapted_group = repair_cvvc_row_sequence(
-                adapted_group,
-                adapter_config,
-                file_duration_ms=file_duration_ms,
-                posterior=prediction.posterior,
-            )
-            for template_row, adapted in zip(template_group, adapted_group):
-                timeline_rows.append(
-                    _adapted_row_debug(
-                        adapted,
-                        row_index=len(timeline_rows),
-                        row_plan_record=_template_row_plan_context(
-                            template_row,
-                            len(timeline_rows),
-                            anchor=adapted.anchor,
-                            filename_slots=row_plan_slots,
-                        ),
-                    )
-                )
+            wav_task_keys.append(wav_key)
+            wav_tasks.append({
+                "wav_path": wav_path,
+                "wav_key": wav_key,
+                "template_group": template_group,
+                "template_guide_pre_ms": list(guide_pre_by_wav.get(raw_wav_key, [])),
+                "row_plan_slots": row_plan_slots,
+                "row_plan_records": [],
+                "expected_phones": expected_phones,
+                "expected_slots": expected_slots,
+                "checkpoint_path": checkpoint_path,
+                "encoder": encoder,
+                "device": device,
+                "use_slot_viterbi": use_slot_viterbi,
+                "use_hsmm_decoder": use_hsmm_decoder,
+                "language": language,
+                "format_type": format_type,
+                "alias_type": alias_type,
+                "vc_pre_max_ms": vc_pre_max_ms,
+                "one_step_shift_repair_enabled": one_step_shift_repair_enabled,
+                "alias_suffix": alias_suffix,
+                "policy_cv_anchor_weight": policy.cv_anchor_weight,
+                "policy_cv_posterior_weight": policy.cv_posterior_weight,
+                "policy_nucleus_anchor_weight": policy.nucleus_anchor_weight,
+                "policy_nucleus_posterior_weight": policy.nucleus_posterior_weight,
+                "policy_row_anchor_weight": policy.row_anchor_weight,
+                "policy_row_boundary_weight": policy.row_boundary_weight,
+                "policy_boundary_evidence_low_confidence": policy.boundary_evidence_low_confidence,
+            })
+
+        parallel_results = process_wavs_parallel(
+            wav_tasks,
+            max_workers=max_workers,
+            callback=callback,
+        )
+
+        source_ordered_lines: list[tuple[int, int, str]] = []
+        source_ordered_results: list[tuple[int, int, NoMfaRowResult]] = []
+        for result in parallel_results:
+            if not result:
+                continue
+            warnings.extend(result["warnings"])
+            slot_scores.extend(result["slot_scores"])
+            slot_warning_count += result["slot_warning_count"]
+            anchor_scores.extend(result["anchor_scores"])
+            cv_conf_values.extend(result["cv_conf_values"])
+            nucleus_conf_values.extend(result["nucleus_conf_values"])
+            row_anchor_hits += result["row_anchor_hits"]
+            rule_based_per_wav.extend(result["rule_based_per_wav"])
+            if result.get("timeline_record"):
+                timeline_debug.append(result["timeline_record"])
+            if result.get("evidence_pack"):
+                evidence_debug.append(result["evidence_pack"])
+            for row_data in result["row_results"]:
                 rows_total += 1
-                if adapted.anchor is not None:
-                    row_anchor_hits += 1
-                    anchor_scores.append(float(adapted.anchor.score))
-                evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
-                row_conf = _row_confidence(adapted, evidence, policy=policy)
-                cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
-                nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
                 source_order = rows_total
                 source_sequence = len(source_ordered_lines)
                 source_ordered_results.append(
@@ -382,50 +323,39 @@ def generate_no_mfa_oto_with_model_context(
                         source_order,
                         source_sequence,
                         NoMfaRowResult(
-                            wav_key=wav_key,
-                            alias=str(adapted.alias or ""),
-                            oto_params={
-                                "offset": float(adapted.timing.offset),
-                                "consonant": float(adapted.timing.consonant),
-                                "cutoff": float(adapted.timing.cutoff),
-                                "preutterance": float(adapted.timing.preutterance),
-                                "overlap": float(adapted.timing.overlap),
-                            },
-                            confidence=row_conf,
-                            boundary_evidence=evidence,
-                            warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+                            wav_key=row_data["wav_key"],
+                            alias=row_data["alias"],
+                            oto_params=row_data["oto_params"],
+                            confidence=row_data["confidence"],
+                            boundary_evidence=BoundaryEvidence(
+                                c_onset=None,
+                                cv_boundary=None,
+                                v_offset=None,
+                                nucleus=None,
+                                cv_confidence=row_data.get("cv_confidence", 0.0),
+                                nucleus_confidence=row_data.get("nucleus_confidence", 0.0),
+                                confidence=row_data["confidence"],
+                                warnings=tuple(row_data.get("warnings", ())),
+                            ),
+                            warnings=tuple(row_data.get("warnings", ())),
                         ),
                     )
                 )
-                source_ordered_lines.append(
-                    (source_order, source_sequence, apply_alias_suffix(adapted.format_line(), alias_suffix))
-                )
-            timeline_debug.append(
-                _build_timeline_debug_record(
-                    wav_name=wav_key,
-                    wav_path=wav_path,
-                    use_hsmm_decoder_requested=bool(use_hsmm_decoder),
-                    selected_event_source=selected_event_source,
-                    expected_phones=expected_phones,
-                    filename_slots=row_plan_slots if use_hsmm_decoder else (),
-                    expected_slots=expected_slots or (),
-                    prediction=prediction,
-                    prediction_events=prediction_events,
-                    selected_events=decoded_source,
-                    hsmm=hsmm,
-                    adapted_rows=timeline_rows,
-                    evidence=evidence_pack,
-                )
-            )
+            for line in result["oto_lines"]:
+                source_ordered_lines.append((rows_total, len(source_ordered_lines), line))
+
         row_results.extend(row for _source_order, _source_sequence, row in sorted(source_ordered_results))
         all_lines.extend(line for _source_order, _source_sequence, line in sorted(source_ordered_lines))
     else:
+        from .parallel import process_wavs_parallel
+
         wav_files = sorted(Path(wav_root).glob("*.wav"))
         total_wav_files = len(wav_files)
-        for wav_index, wav_path in enumerate(wav_files, start=1):
-            if callback:
-                callback(f"[No-MFA/MFA-Free] wav {wav_index}/{total_wav_files}: {wav_path.name}")
-            template_group, row_plan_phones, row_plan_records = build_filename_template_rows(
+
+        wav_tasks = []
+        all_row_plan_records: list[list] = []
+        for wav_path in wav_files:
+            template_group, row_plan_phones, row_plan_records_local = build_filename_template_rows(
                 wav_path.name,
                 language=language,
                 format_type=format_type,
@@ -437,178 +367,78 @@ def generate_no_mfa_oto_with_model_context(
                 if template_group and expected_phones
                 else None
             )
-            prediction = predict_wav(
-                wav_path,
-                checkpoint_path=checkpoint_path,
-                expected_phones=expected_phones,
-                expected_slots=expected_slots,
-                encoder=encoder,
-                device=device,
-                use_slot_viterbi=use_slot_viterbi,
-                language=language,
-            )
-            prediction_events = list(_event_source_for_oto(prediction))
-            evidence_pack = build_acoustic_evidence_pack(
-                prediction.posterior,
-                wav_name=wav_path.name,
-                expected_phones=expected_phones,
-                filename_slots=row_plan_slots,
-                runtime_events=prediction_events,
-            )
-            evidence_debug.append(evidence_pack)
-            _collect_prediction_metrics(prediction, slot_scores, warnings, rule_based_per_wav)
-            slot_warning_count += len(prediction.slot_result.warnings if prediction.slot_result is not None else ())
-            decoded_source = list(prediction_events)
-            selected_event_source = "runtime_prediction"
-            hsmm = None
-            hsmm_skip_no_expected = (
-                bool(use_hsmm_decoder)
-                and bool(row_plan_slots)
-                and not bool(expected_slots)
-                and _template_group_is_nonphonetic_special_only(template_group)
-            )
-            if use_hsmm_decoder and row_plan_slots and (expected_slots or not hsmm_skip_no_expected):
-                candidate_priors = candidate_priors_from_evidence_pack(evidence_pack, row_plan_slots)
-                hsmm = decode_filename_slots_with_hsmm(
-                    prediction.posterior,
-                    row_plan_slots,
-                    event_priors=(*prediction_events, *candidate_priors),
-                    language=language,
-                )
-                if hsmm.ok and hsmm.events:
-                    hsmm_reject_reason = ""
-                    hsmm_sequence_ok = _hsmm_event_sequence_matches_expected(
-                        expected_slots or (),
-                        hsmm.events,
-                        runtime_events=_runtime_events_for_hsmm_guard(prediction, prediction_events),
-                    )
-                    if hsmm_sequence_ok:
-                        hsmm_reject_reason = _hsmm_runtime_replacement_rejection_reason(
-                            expected_slots or (),
-                            prediction_events,
-                            language=language,
-                            format_type=format_type,
-                            template_rows=template_group,
-                        )
-                    if hsmm_sequence_ok and not hsmm_reject_reason:
-                        decoded_source = list(hsmm.events)
-                        selected_event_source = "filename_hsmm"
-                        warnings.append("filename_hsmm_decoder_used")
-                    else:
-                        warnings.append(
-                            f"filename_hsmm_decoder_rejected:{hsmm_reject_reason or 'event_sequence_mismatch'}"
-                        )
-                else:
-                    warnings.append(f"filename_hsmm_decoder_failed:{hsmm.result.reason}")
-            elif hsmm_skip_no_expected:
-                warnings.append(f"filename_hsmm_decoder_skipped:no_expected_slots:{wav_path.name}")
-            file_duration_ms = _wav_duration_ms(str(wav_path), warnings)
-            adapter_config = OtoAdapterConfig(
-                mode="template-preserve" if template_group else "bootstrap",
-                language=language,
-                format_type=format_type,
-                alias_type=alias_type,
-                vc_pre_max_ms=vc_pre_max_ms,
-            )
-            adapted_rows = []
-            if template_group:
-                row_anchors = assign_template_row_anchors(
-                    prediction.posterior,
-                    decoded_source,
-                    template_group,
-                    min_score=0.02,
-                    use_source_timing_prior=False,
-                    expected_phones=expected_phones,
-                    language=language,
-                )
-                if one_step_shift_repair_enabled:
-                    row_anchors = _repair_anchor_monotonicity(row_anchors)
-                for template_row, anchor in zip(template_group, row_anchors):
-                    row_index = len(adapted_rows)
-                    adapted_rows.append(
-                        adapt_template_row(
-                            template_row,
-                            anchor,
-                            file_duration_ms=file_duration_ms,
-                            config=_adapter_config_for_row_plan_record(
-                                adapter_config,
-                                row_plan_records[row_index] if row_index < len(row_plan_records) else None,
-                            ),
-                        )
-                    )
-            else:
-                anchors = anchors_from_prediction(prediction.posterior, decoded_source)
-                adapted_rows.append(
-                    bootstrap_row(
-                        wav_path.name,
-                        wav_path.stem,
-                        anchors[0] if anchors else None,
-                        file_duration_ms=file_duration_ms,
-                            config=OtoAdapterConfig(
-                                mode="bootstrap",
-                                language=language,
-                                format_type=format_type,
-                                alias_type=alias_type,
-                            vc_pre_max_ms=vc_pre_max_ms,
-                        ),
-                    )
-                )
-            adapted_rows = repair_cvvc_row_sequence(
-                adapted_rows,
-                adapter_config,
-                file_duration_ms=file_duration_ms,
-                posterior=prediction.posterior,
-            )
-            for adapted in adapted_rows:
-                rows_total += 1
-                if adapted.anchor is not None:
-                    row_anchor_hits += 1
-                    anchor_scores.append(float(adapted.anchor.score))
-                evidence = _build_boundary_evidence(prediction.posterior, adapted, policy=policy)
-                row_conf = _row_confidence(adapted, evidence, policy=policy)
-                cv_conf_values.append(_safe_conf(evidence.cv_confidence if evidence.cv_boundary is not None else 0.0))
-                nucleus_conf_values.append(_safe_conf(evidence.nucleus_confidence if evidence.nucleus is not None else 0.0))
+            all_row_plan_records.append(list(row_plan_records_local))
+            wav_tasks.append({
+                "wav_path": str(wav_path),
+                "wav_key": wav_path.name,
+                "template_group": template_group if template_group else None,
+                "row_plan_slots": row_plan_slots,
+                "row_plan_records": list(row_plan_records_local),
+                "expected_phones": expected_phones,
+                "expected_slots": expected_slots,
+                "checkpoint_path": checkpoint_path,
+                "encoder": encoder,
+                "device": device,
+                "use_slot_viterbi": use_slot_viterbi,
+                "use_hsmm_decoder": use_hsmm_decoder,
+                "language": language,
+                "format_type": format_type,
+                "alias_type": alias_type,
+                "vc_pre_max_ms": vc_pre_max_ms,
+                "one_step_shift_repair_enabled": one_step_shift_repair_enabled,
+                "alias_suffix": alias_suffix,
+                "policy_cv_anchor_weight": policy.cv_anchor_weight,
+                "policy_cv_posterior_weight": policy.cv_posterior_weight,
+                "policy_nucleus_anchor_weight": policy.nucleus_anchor_weight,
+                "policy_nucleus_posterior_weight": policy.nucleus_posterior_weight,
+                "policy_row_anchor_weight": policy.row_anchor_weight,
+                "policy_row_boundary_weight": policy.row_boundary_weight,
+                "policy_boundary_evidence_low_confidence": policy.boundary_evidence_low_confidence,
+            })
+
+        parallel_results = process_wavs_parallel(
+            wav_tasks,
+            max_workers=max_workers,
+            callback=callback,
+        )
+
+        for result in parallel_results:
+            if not result:
+                continue
+            warnings.extend(result["warnings"])
+            slot_scores.extend(result["slot_scores"])
+            slot_warning_count += result["slot_warning_count"]
+            anchor_scores.extend(result["anchor_scores"])
+            cv_conf_values.extend(result["cv_conf_values"])
+            nucleus_conf_values.extend(result["nucleus_conf_values"])
+            row_anchor_hits += result["row_anchor_hits"]
+            rows_total += result["rows_total"]
+            rule_based_per_wav.extend(result["rule_based_per_wav"])
+            all_lines.extend(result["oto_lines"])
+            if result.get("timeline_record"):
+                timeline_debug.append(result["timeline_record"])
+            if result.get("evidence_pack"):
+                evidence_debug.append(result["evidence_pack"])
+            for row_data in result["row_results"]:
                 row_results.append(
                     NoMfaRowResult(
-                        wav_key=str(wav_path.name).lower(),
-                        alias=str(adapted.alias or ""),
-                        oto_params={
-                            "offset": float(adapted.timing.offset),
-                            "consonant": float(adapted.timing.consonant),
-                            "cutoff": float(adapted.timing.cutoff),
-                            "preutterance": float(adapted.timing.preutterance),
-                            "overlap": float(adapted.timing.overlap),
-                        },
-                        confidence=row_conf,
-                        boundary_evidence=evidence,
-                        warnings=tuple(dict.fromkeys((*adapted.warnings, *evidence.warnings))),
+                        wav_key=row_data["wav_key"],
+                        alias=row_data["alias"],
+                        oto_params=row_data["oto_params"],
+                        confidence=row_data["confidence"],
+                        boundary_evidence=BoundaryEvidence(
+                            c_onset=None,
+                            cv_boundary=None,
+                            v_offset=None,
+                            nucleus=None,
+                            cv_confidence=row_data.get("cv_confidence", 0.0),
+                            nucleus_confidence=row_data.get("nucleus_confidence", 0.0),
+                            confidence=row_data["confidence"],
+                            warnings=tuple(row_data.get("warnings", ())),
+                        ),
+                        warnings=tuple(row_data.get("warnings", ())),
                     )
                 )
-                all_lines.append(apply_alias_suffix(adapted.format_line(), alias_suffix))
-            timeline_debug.append(
-                _build_timeline_debug_record(
-                    wav_name=wav_path.name,
-                    wav_path=str(wav_path),
-                    use_hsmm_decoder_requested=bool(use_hsmm_decoder),
-                    selected_event_source=selected_event_source,
-                    expected_phones=expected_phones,
-                    filename_slots=row_plan_slots,
-                    expected_slots=expected_slots or (),
-                    prediction=prediction,
-                    prediction_events=prediction_events,
-                    selected_events=decoded_source,
-                    hsmm=hsmm,
-                    adapted_rows=[
-                        _adapted_row_debug(
-                            adapted,
-                            row_index=row_index,
-                            row_plan_record=row_plan_records[row_index] if row_index < len(row_plan_records) else None,
-                        )
-                        for row_index, adapted in enumerate(adapted_rows)
-                    ],
-                    evidence=evidence_pack,
-                )
-            )
 
     if rows_total <= 0 or not all_lines:
         errors.append("no_rows_generated")
@@ -722,7 +552,55 @@ def _template_group_in_filename_order(
     if not rows:
         return []
 
+    korean_vcv = (
+        _is_korean_language_name(language)
+        and str(format_type or "").strip().lower() == "vcv"
+    )
     records = build_filename_row_plan(wav_key, language=language, format_type=format_type)
+    if korean_vcv:
+        head_positions = [
+            index
+            for index, row in enumerate(rows)
+            if _alias_type_for_row(row.alias, "auto") == "cv_head"
+        ]
+        multi_phrase_head_targets = _korean_vcv_multi_phrase_head_targets(wav_key, rows, records)
+        if multi_phrase_head_targets:
+            rows = [
+                replace(row, expected_phone_indices=multi_phrase_head_targets[id(row)])
+                if id(row) in multi_phrase_head_targets
+                else row
+                for row in rows
+            ]
+        # A few banks register two complete alias dialects for the same WAV
+        # (for example kk* and gg*). Each dialect starts with its own head row.
+        # Match each block against a fresh copy of the row plan so the second
+        # dialect does not consume only the leftovers from the first.
+        if len(head_positions) > 1 and head_positions[0] == 0 and not multi_phrase_head_targets:
+            boundaries = [*head_positions, len(rows)]
+            split_ordered: list[OtoTemplateRow] = []
+            for start, end in zip(boundaries, boundaries[1:]):
+                split_ordered.extend(
+                    _template_group_in_filename_order(
+                        wav_key,
+                        rows[start:end],
+                        language=language,
+                        format_type=format_type,
+                    )
+                )
+            # Interleave dialect rows by target slot. Concatenating complete
+            # dialect blocks would reset expected indices from the file end to
+            # the head, which a monotonic slot decoder can only satisfy by
+            # pushing the second dialect several seconds late.
+            return sorted(
+                split_ordered,
+                key=lambda row: (
+                    int(row.expected_phone_indices[-1])
+                    if row.expected_phone_indices
+                    else 10**9,
+                    int(getattr(row, "source_row_index", -1)),
+                ),
+            )
+
     if not records:
         return sorted(rows, key=_template_row_semantic_sort_key)
 
@@ -732,6 +610,8 @@ def _template_group_in_filename_order(
         language=language,
         format_type=format_type,
     )
+    if _is_korean_language_name(language) and str(format_type or "").strip().lower() == "vcv":
+        target_hints.update(_korean_vcv_expanded_filename_target_hints(wav_key, rows, records))
     remaining = list(rows)
     ordered: list[OtoTemplateRow] = []
     for record in records:
@@ -748,6 +628,65 @@ def _template_group_in_filename_order(
         if record.expected_phone_indices and matched.expected_phone_indices is None:
             matched = replace(matched, expected_phone_indices=record.expected_phone_indices)
         ordered.append(matched)
+    # A common Korean VCV convention duplicates the initial CV as both
+    # ``- nyeo`` and ``nyeo``. The filename row plan has only one head record,
+    # so a duplicate stored later in the OTO block would otherwise attach to a
+    # repeated final syllable. Bind an adjacent candidate, or a unique
+    # phone-identical candidate, to the same first-slot anchor.
+    if records and remaining and _is_korean_language_name(language):
+        head_record = records[0]
+        head_row = next(
+            (
+                row
+                for row in [*ordered, *remaining]
+                if _alias_type_for_row(row.alias, "auto") == "cv_head"
+            ),
+            None,
+        )
+        if head_row is not None:
+            head_phones = tuple(_template_alias_phone_sequence(head_row.alias, language=language))
+            if head_row.expected_phone_indices is None:
+                replacement = replace(head_row, expected_phone_indices=head_record.expected_phone_indices)
+                if head_row in ordered:
+                    ordered[ordered.index(head_row)] = replacement
+                else:
+                    remaining[remaining.index(head_row)] = replacement
+                head_row = replacement
+            matching_duplicate_indices = [
+                idx
+                for idx, row in enumerate(remaining)
+                if _alias_type_for_row(row.alias, "auto") in {"cv", "v"}
+                and tuple(_template_alias_phone_sequence(row.alias, language=language)) == head_phones
+            ]
+            adjacent_duplicate_index = next(
+                (
+                    idx
+                    for idx in matching_duplicate_indices
+                    if int(getattr(remaining[idx], "source_row_index", -1))
+                    == int(getattr(head_row, "source_row_index", -1)) + 1
+                ),
+                None,
+            )
+            # Winnie-style banks place the one plain-CV duplicate at the end of
+            # the WAV's OTO block even though it aliases the initial ``- CV``.
+            # A unique phone-identical candidate is structurally unambiguous;
+            # multiple candidates remain adjacency-only to avoid stealing a
+            # genuine later CV registration.
+            duplicate_index = (
+                adjacent_duplicate_index
+                if adjacent_duplicate_index is not None
+                else matching_duplicate_indices[0]
+                if len(matching_duplicate_indices) == 1
+                else None
+            )
+            if duplicate_index is not None:
+                duplicate = remaining.pop(duplicate_index)
+                duplicate = replace(duplicate, expected_phone_indices=head_record.expected_phone_indices)
+                if head_row in remaining:
+                    remaining.remove(head_row)
+                    ordered.insert(0, head_row)
+                head_index = ordered.index(head_row)
+                ordered.insert(head_index + 1, duplicate)
     # CV_head aliases like "- w", "- ka" (consonant-led head) represent the file's
     # first phonetic onset. If one ended up in remaining (no row_plan match) it
     # would be appended at the end, causing anchor assignment to place it near the
@@ -755,20 +694,166 @@ def _template_group_in_filename_order(
     # cv_head to position 0. Vowel-only heads ("- あ") are NOT promoted because in
     # VV-chain reclists they don't necessarily correspond to the file start.
     unmatched_heads: list[OtoTemplateRow] = []
+    targeted_unmatched_heads: list[OtoTemplateRow] = []
     unmatched_rest: list[OtoTemplateRow] = []
     for row in remaining:
         if (
             _alias_type_for_row(row.alias, "auto") == "cv_head"
             and _cv_head_has_consonant_onset(row.alias)
         ):
-            unmatched_heads.append(row)
+            if row.expected_phone_indices:
+                targeted_unmatched_heads.append(row)
+            else:
+                unmatched_heads.append(row)
         else:
             unmatched_rest.append(row)
     if unmatched_rest:
         ordered.extend(sorted(unmatched_rest, key=_template_row_semantic_sort_key))
+    if targeted_unmatched_heads:
+        ordered.extend(targeted_unmatched_heads)
+        ordered = sorted(
+            ordered,
+            key=lambda row: (
+                int(row.expected_phone_indices[-1])
+                if row.expected_phone_indices
+                else 10**9,
+                int(getattr(row, "source_row_index", -1)),
+            ),
+        )
     if unmatched_heads:
         ordered = unmatched_heads + ordered
     return ordered
+
+
+def _korean_vcv_multi_phrase_head_targets(
+    wav_key: str,
+    rows: Sequence[OtoTemplateRow],
+    records: Sequence[RowPlanRecord],
+) -> dict[int, tuple[int, ...]]:
+    """Distinguish multiple recorded phrases from multiple alias dialects."""
+    stem = Path(str(wav_key or "")).stem.strip("_")
+    if len([part for part in stem.split("_") if part]) <= 1:
+        return {}
+    heads = [row for row in rows if _alias_type_for_row(row.alias, "auto") == "cv_head"]
+    if len(heads) <= 1 or not records:
+        return {}
+
+    hints: dict[int, tuple[int, ...]] = {}
+    cursor = -1
+    for head in heads:
+        head_phones = tuple(_template_alias_phone_sequence(head.alias, language="korean"))
+        if not head_phones:
+            return {}
+        candidates: list[tuple[int, tuple[int, ...]]] = []
+        for record in records:
+            indices = tuple(int(value) for value in record.expected_phone_indices)
+            if not indices or indices[-1] <= cursor:
+                continue
+            record_phones = tuple(_template_alias_phone_sequence(record.alias, language="korean"))
+            if len(record_phones) < len(head_phones):
+                continue
+            suffix = record_phones[-len(head_phones) :]
+            if suffix == head_phones or _phone_sequence_variants_match(suffix, head_phones):
+                candidates.append((indices[-1], indices))
+        if not candidates:
+            return {}
+        target, indices = min(candidates, key=lambda item: item[0])
+        hints[id(head)] = indices
+        cursor = target
+
+    if len({indices[-1] for indices in hints.values()}) != len(heads):
+        return {}
+    return hints
+
+
+def _korean_vcv_expanded_filename_target_hints(
+    wav_key: str,
+    rows: Sequence[OtoTemplateRow],
+    records: Sequence[RowPlanRecord],
+) -> dict[int, int]:
+    """Map Korean source transitions monotonically onto filename slots.
+
+    This is also needed for apostrophe-separated reclists.  Their source OTO
+    often abbreviates the left glide vowel (``yu -> u``, ``yeo -> eo``) and
+    omits every other transition, so phone-only DP can attach an early
+    ``u yeo`` row to the repeated final ``i yeo`` slot.
+    """
+
+    record_candidates: list[tuple[str, tuple[str, ...], int]] = []
+    for record in records:
+        role = str(record.role_family or "").strip().lower()
+        if role not in {"vcv", "vv"} or not record.expected_phone_indices:
+            continue
+        alias_tokens = [part for part in str(record.alias or "").split() if part]
+        if not alias_tokens:
+            continue
+        right_phones = tuple(_alias_phone_sequence(alias_tokens[-1]))
+        if right_phones:
+            record_candidates.append((role, right_phones, int(record.expected_phone_indices[-1])))
+
+    hints: dict[int, int] = {}
+    cursor = -1
+    for row in rows:
+        role = _alias_type_for_row(row.alias, "auto")
+        if role not in {"vcv", "vv"}:
+            continue
+        alias_tokens = [part for part in str(row.alias or "").split() if part]
+        if not alias_tokens:
+            continue
+        right_phones = tuple(_alias_phone_sequence(alias_tokens[-1]))
+        candidates = [
+            target
+            for record_role, record_right, target in record_candidates
+            if record_role == role
+            and target > cursor
+            and (
+                right_phones == record_right
+                or _phone_sequence_variants_match(right_phones, record_right)
+            )
+        ]
+        if not candidates:
+            continue
+        target = min(candidates)
+        hints[id(row)] = target
+        cursor = target
+
+    # Some reclists insert a dialect alias that deliberately does not resemble
+    # the literal filename transition (e.g. ``o fyeu`` for the fyo->eu slot).
+    # If a contiguous unmatched source run fits exactly into the unused row-plan
+    # targets between two reliable neighbors, fill that structural gap in order.
+    record_targets = [
+        int(record.expected_phone_indices[-1])
+        for record in records
+        if record.expected_phone_indices
+    ]
+    used_targets = set(hints.values())
+    index = 0
+    while index < len(rows):
+        if id(rows[index]) in hints:
+            index += 1
+            continue
+        start = index
+        while index < len(rows) and id(rows[index]) not in hints:
+            index += 1
+        end = index
+        if start == 0 or end >= len(rows):
+            continue
+        left_target = hints.get(id(rows[start - 1]))
+        right_target = hints.get(id(rows[end]))
+        if left_target is None or right_target is None or right_target <= left_target:
+            continue
+        available = [
+            target
+            for target in record_targets
+            if left_target < target < right_target and target not in used_targets
+        ]
+        run = rows[start:end]
+        if len(available) != len(run):
+            continue
+        for row, target in zip(run, available):
+            hints[id(row)] = target
+            used_targets.add(target)
+    return hints
 
 
 def _template_source_target_hints(
@@ -888,12 +973,20 @@ def _template_row_record_match_score(
             )
         )
     )
+    korean_vcv_target_compatible = (
+        _is_korean_language_name(language)
+        and source_role in {"vcv", "vv"}
+        and record_role in {"vcv", "vv"}
+        and preferred_target is not None
+        and int(preferred_target) in record_targets
+    )
     if not source_phones or not (
         phones_compatible
         or yoon_vc_compatible
         or cv_head_initial_compatible
         or cv_head_exact_compatible
         or standalone_glide_v_compatible
+        or korean_vcv_target_compatible
     ):
         return 0
 
@@ -915,6 +1008,8 @@ def _template_row_record_match_score(
             score = 880
         else:
             score = 1000 if alias == record_alias else 900
+    elif korean_vcv_target_compatible:
+        score = 875
     else:
         return 0
 

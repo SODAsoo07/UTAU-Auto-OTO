@@ -48,7 +48,11 @@ FINAL_MAP = {
     'l': 8, 'r': 8, 'lg': 9, 'lm': 10, 'lb': 11, 'ls': 12, 'lt': 13, 'lp': 14, 'lh': 15,
     'm': 16, 'b': 17, 'p': 17, 'bs': 18, 's': 19, 'ss': 20, 'ng': 21, 'j': 22, 'ch': 23,
 }
-_KR_VALID_ONSETS = sorted({str(k or "").lower() for k in INITIAL_MAP.keys()}, key=len, reverse=True)
+_KR_VALID_ONSETS = sorted(
+    {str(k or "").lower() for k in INITIAL_MAP.keys()} | {"v"},
+    key=len,
+    reverse=True,
+)
 _KR_VALID_VOWELS = sorted({str(k or "").lower() for k in VOWEL_MAP.keys()}, key=len, reverse=True)
 _KR_VALID_CODAS = {str(k or "").lower() for k in FINAL_MAP.keys()}
 
@@ -380,8 +384,14 @@ def _split_kr_filename_tokens(name_or_base):
     segmented = []
     for token in parts:
         tok = str(token or "").strip()
-        if re.fullmatch(r"[a-z]+", tok):
-            segs = [seg for seg in _segment_kr_roman_chain(tok) if seg]
+        if re.fullmatch(r"[A-Za-z]+", tok):
+            segs = [seg for seg in _segment_kr_roman_chain(tok.lower()) if seg]
+            if len(segs) == 1 and segs[0] == tok.lower() and tok.lower().endswith(("h", "r")):
+                # H/R are common end/breath markers. If keeping the marker makes
+                # the whole continuous chain unsegmentable, retry without it.
+                marker_stripped = [seg for seg in _segment_kr_roman_chain(tok[:-1].lower()) if seg]
+                if len(marker_stripped) > 1:
+                    segs = marker_stripped
             segmented.extend(segs or [tok])
         else:
             segmented.append(tok)
@@ -391,6 +401,20 @@ def _split_kr_filename_tokens(name_or_base):
             return [ch for ch in base if re.match(r'[가-힣]', ch)]
         return parts
     return parts
+
+
+def split_korean_filename_tokens(name_or_base, *, normalize_roman_case=False):
+    """Return Korean reclist filename tokens using the shared chain segmenter.
+
+    ``normalize_roman_case`` is intended for timing row plans, where terminal
+    markers such as ``K``/``T``/``P`` are phonetic codas rather than distinct
+    case-sensitive control labels. Existing lab/dictionary behavior remains
+    case-preserving by default.
+    """
+    value = str(name_or_base or "")
+    if normalize_roman_case:
+        value = value.lower()
+    return _split_kr_filename_tokens(value)
 
 
 def _split_kr_lab_content_tokens(content):

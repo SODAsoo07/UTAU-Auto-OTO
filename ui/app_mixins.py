@@ -1353,6 +1353,7 @@ class AppRuntimeMixin:
             "oto_crnn_special_aliases_var": "",
             "enable_ml_correction_var": True,
             "disable_lightgbm_correction_var": True,
+            "split_review_oto_var": False,
             "ml_route_var": "자동(자동 라우팅)",
             "ml_selector_mode_var": "+셀렉터",
             "ml_coupled_enable_var": True,
@@ -2885,6 +2886,15 @@ class AppRuntimeMixin:
             return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
 
         keep_file = os.path.normcase(out_file)
+        keep_base, keep_ext = os.path.splitext(out_file)
+        keep_ext = keep_ext or ".ini"
+        # Split-review exports (<name>.review.ini / <name>.clean.ini) are user
+        # deliverables written next to the kept oto; they must survive cleanup.
+        keep_files = {
+            keep_file,
+            os.path.normcase(f"{keep_base}.review{keep_ext}"),
+            os.path.normcase(f"{keep_base}.clean{keep_ext}"),
+        }
         snapshot_files = set()
         snapshot_dirs = set()
         snapshot_provided = isinstance(snapshot, dict)
@@ -2900,7 +2910,7 @@ class AppRuntimeMixin:
             for name in file_names:
                 fpath = os.path.abspath(os.path.join(cur_root, name))
                 norm = os.path.normcase(fpath)
-                if norm == keep_file:
+                if norm in keep_files:
                     continue
                 if not self._is_generated_oto_artifact_file(
                     name,
@@ -2997,6 +3007,15 @@ class AppRuntimeMixin:
             return {"removed_files": 0, "removed_dirs": 0, "failed": 0}
 
         keep_file = os.path.normcase(out_file)
+        keep_base, keep_ext = os.path.splitext(out_file)
+        keep_ext = keep_ext or ".ini"
+        # Split-review exports (<name>.review.ini / <name>.clean.ini) are user
+        # deliverables written next to the kept oto; they must survive cleanup.
+        keep_files = {
+            keep_file,
+            os.path.normcase(f"{keep_base}.review{keep_ext}"),
+            os.path.normcase(f"{keep_base}.clean{keep_ext}"),
+        }
         snapshot_files = set()
         snapshot_dirs = set()
         snapshot_provided = isinstance(snapshot, dict)
@@ -3012,7 +3031,7 @@ class AppRuntimeMixin:
             for name in file_names:
                 fpath = os.path.abspath(os.path.join(cur_root, name))
                 norm = os.path.normcase(fpath)
-                if norm == keep_file:
+                if norm in keep_files:
                     continue
                 if not self._is_generated_oto_artifact_file(
                     name,
@@ -3383,6 +3402,7 @@ class ConfigMixin:
             "recursive_voicebank_scan": self.recursive_voicebank_scan_var.get() if hasattr(self, "recursive_voicebank_scan_var") else False,
             "enable_ml_correction": self.enable_ml_correction_var.get() if hasattr(self, "enable_ml_correction_var") else True,
             "disable_lightgbm_correction": self.disable_lightgbm_correction_var.get() if hasattr(self, "disable_lightgbm_correction_var") else True,
+            "split_review_oto": self.split_review_oto_var.get() if hasattr(self, "split_review_oto_var") else False,
             "ml_route": self._get_ml_route_code() if hasattr(self, "_get_ml_route_code") else "auto",
             "ml_selector_mode": self.ml_selector_mode_var.get() if hasattr(self, "ml_selector_mode_var") else "+셀렉터",
             "ml_coupled_enable": self.ml_coupled_enable_var.get() if hasattr(self, "ml_coupled_enable_var") else True,
@@ -3603,6 +3623,8 @@ class ConfigMixin:
                 self.use_boundary_model_var.set(bool(config.get("use_boundary_model", False)))
             if hasattr(self, "disable_lightgbm_correction_var"):
                 self.disable_lightgbm_correction_var.set(bool(config.get("disable_lightgbm_correction", True)))
+            if hasattr(self, "split_review_oto_var"):
+                self.split_review_oto_var.set(bool(config.get("split_review_oto", False)))
             if hasattr(self, "cvn_correction_enable_var"):
                 self.cvn_correction_enable_var.set(False)
             if hasattr(self, "cvn_low_conf_only_var"):

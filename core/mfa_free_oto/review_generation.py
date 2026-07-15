@@ -34,6 +34,7 @@ def generate_hsmm_oto_review(
     lightgbm_policy: str = "auto",
     lightgbm_model_dir: str = "",
     callback: Callable[[str], None] | None = None,
+    max_workers: int | None = None,
 ) -> dict[str, object]:
     """Generate a UI-safe HSMM OTO preview without importing scripts/dev at runtime."""
     root = Path(out_dir)
@@ -67,6 +68,7 @@ def generate_hsmm_oto_review(
         use_slot_viterbi=True,
         use_hsmm_decoder=True,
         callback=emit,
+        max_workers=max_workers,
     )
     if report.errors or not generated_path.is_file():
         return {
@@ -539,6 +541,8 @@ def _hsmm_validation_metrics_for_row(record: Mapping[str, object], row: object) 
 
     best_margins = [_float_or_none(state.get("selected_vs_best_local_margin")) for state in states]
     second_margins = [_float_or_none(state.get("selected_vs_second_local_margin")) for state in states]
+    global_margins = [_float_or_none(state.get("selected_vs_global_best_margin")) for state in states]
+    wrong_occurrence_count = sum(1 for state in states if bool(state.get("wrong_occurrence_risk")))
     duration_z_values = [_float_or_none(state.get("duration_z_abs")) for state in states]
     event_prior_count = sum(1 for state in states if bool(state.get("has_event_prior")))
     candidate_prior_count = sum(int(state.get("evidence_candidate_prior_count", 0) or 0) for state in states)
@@ -561,6 +565,10 @@ def _hsmm_validation_metrics_for_row(record: Mapping[str, object], row: object) 
         "hsmm_min_selected_vs_second_local_margin": min(value for value in second_margins if value is not None)
         if any(value is not None for value in second_margins)
         else 0.0,
+        "hsmm_min_selected_vs_global_best_margin": min(value for value in global_margins if value is not None)
+        if any(value is not None for value in global_margins)
+        else 0.0,
+        "hsmm_wrong_occurrence_risk_count": float(wrong_occurrence_count),
         "hsmm_max_duration_z_abs": max(value for value in duration_z_values if value is not None)
         if any(value is not None for value in duration_z_values)
         else 0.0,
@@ -652,6 +660,12 @@ def _hsmm_validation_metrics_from_timeline_record(record: Mapping[str, object]) 
         "hsmm_min_selected_vs_second_local_margin": _float_or_none(
             diagnostics.get("min_selected_vs_second_local_margin")
         )
+        or 0.0,
+        "hsmm_min_selected_vs_global_best_margin": _float_or_none(
+            diagnostics.get("min_selected_vs_global_best_margin")
+        )
+        or 0.0,
+        "hsmm_wrong_occurrence_risk_count": _float_or_none(diagnostics.get("wrong_occurrence_risk_state_count"))
         or 0.0,
         "hsmm_max_duration_z_abs": _float_or_none(diagnostics.get("max_duration_z_abs")) or 0.0,
     }

@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import datetime
 import json
 import os
@@ -25,7 +25,6 @@ REQUIRED_MSVC_RUNTIME_DLLS = (
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 )
-MICROMAMBA_EXE_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-win-64"
 
 DEFAULT_APP_NAME = "UTAU_Auto_OTO"
 DEFAULT_CHANNEL = "stable"
@@ -74,6 +73,12 @@ EXCLUDED_BUILD_ONLY_MODULES = [
     "onnxruntime.tools",
     "onnxruntime.transformers",
     "pandas.tests",
+    "pyarrow",
+    "pydantic",
+    "psutil",
+    "transformers",
+    "huggingface_hub",
+    "tokenizers",
 ]
 
 PYINSTALLER_HIDDEN_IMPORTS = [
@@ -140,7 +145,6 @@ RUNTIME_DATA_PATHS = [
     (os.path.join(APP_DIR, "bundle_info.json"), "."),
 ]
 RELEASE_AUX_FILES = [
-    os.path.join(APP_DIR, "setup_mfa.bat"),
     os.path.join(APP_DIR, "requirements.txt"),
     os.path.join(APP_DIR, "requirements-ml.txt"),
     os.path.join(APP_DIR, "scripts", "runtime_recovery.ps1"),
@@ -386,38 +390,6 @@ def _validate_ffmpeg_bin(ffmpeg_bin):
         raise RuntimeError(f"Required FFmpeg runtime files are missing:\n{lines}")
 
 
-def _ensure_micromamba_exe():
-    """
-    Download micromamba.exe for portable builds so setup_mfa.bat can skip tar/bzip2 extraction.
-    Best-effort: warn and continue if download fails.
-    """
-    if os.name != "nt":
-        return False
-    target_dir = os.path.join(BUILD_ASSET_DIR, "micromamba")
-    target_path = os.path.join(target_dir, "micromamba.exe")
-    if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
-        print(f"Micromamba reuse: {target_path}")
-        return True
-    os.makedirs(target_dir, exist_ok=True)
-    try:
-        print("Downloading micromamba.exe for portable bundle...")
-        with urllib.request.urlopen(MICROMAMBA_EXE_URL, timeout=120) as resp:
-            payload = resp.read()
-        if not payload or len(payload) < 1024 * 512:
-            raise RuntimeError("Downloaded micromamba.exe payload is too small.")
-        with open(target_path, "wb") as f:
-            f.write(payload)
-        print(f"Micromamba prepared: {target_path}")
-        return True
-    except Exception as exc:
-        print(
-            f"[WARN] Failed to download micromamba.exe: {exc}\n"
-            "[WARN] Users running setup_mfa.bat without internet access will be unable to\n"
-            "[WARN] install MFA automatically. To fix: ensure network access during build,\n"
-            "[WARN] or manually place micromamba.exe at:\n"
-            f"[WARN]   {target_path}"
-        )
-        return False
 
 
 def _iter_ffmpeg_runtime_files(ffmpeg_bin):
@@ -558,7 +530,7 @@ def _parse_args():
         default="offline",
         choices=["online", "offline"],
         help=(
-            "online: slim build without bundled micromamba (downloaded at runtime). "
+            "online: slim build without heavy bundled assets (downloaded at runtime). "
             "offline: full build with all heavy assets bundled (default)."
         ),
     )
@@ -660,7 +632,6 @@ def _write_bundle_info(app_version: str, bundle_mode: str) -> None:
         "bundle_mode": bundle_mode,
         "app_version": app_version,
         "ffmpeg_bundled": False,
-        "micromamba_bundled": bundle_mode == "offline",
     }
     path = os.path.join(APP_DIR, "bundle_info.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -1163,10 +1134,6 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
         if os.path.exists(extra_path):
             shutil.copy(extra_path, release_dir)
             print(f"   -> copied: {os.path.basename(extra_path)}")
-    micromamba_src = os.path.join(BUILD_ASSET_DIR, "micromamba", "micromamba.exe")
-    if os.path.exists(micromamba_src):
-        shutil.copy(micromamba_src, os.path.join(release_dir, "micromamba.exe"))
-        print("   -> copied: micromamba.exe")
 
     removed_internal_scripts = _prune_internal_test_scripts_from_release(release_dir, app_name)
     if removed_internal_scripts:
@@ -1183,26 +1150,8 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
             print(f"      ... and {len(removed_forbidden) - 40} more")
     _validate_release_payload_no_training_data(release_dir)
 
-    wfl_source = _ensure_wfl_runtime_bundle()
-    wfl_parent = release_dir if onefile else os.path.join(release_dir, app_name)
-    wfl_target = os.path.join(wfl_parent, "wfl_runtime")
-    if os.path.isdir(wfl_target):
-        _safe_rmtree(wfl_target)
-    shutil.copytree(wfl_source, wfl_target)
-    required_wfl_release_files = [
-        os.path.join(wfl_target, "python", "python.exe"),
-        os.path.join(wfl_target, "WFL-ASR", "infer.py"),
-        os.path.join(wfl_target, "WFL-ASR", "encoder", "model.safetensors"),
-        os.path.join(wfl_target, "models", "japanese", "last.ckpt"),
-        os.path.join(wfl_target, "models", "korean", "last.ckpt"),
-    ]
-    missing_wfl_release_files = [
-        path for path in required_wfl_release_files if not os.path.isfile(path)
-    ]
-    if missing_wfl_release_files:
-        lines = "\n".join(f"  - {path}" for path in missing_wfl_release_files)
-        raise RuntimeError(f"Packaged WFL runtime is incomplete:\n{lines}")
-    print(f"   -> copied WFL runtime: {wfl_target}")
+    # WFL runtime is downloaded separately by the user via the UI.
+    # No longer bundled in the release package.
 
     if os.name == "nt":
         release_exe = _resolve_release_executable_path(release_dir, app_name, onefile=onefile)
@@ -1232,80 +1181,6 @@ def _copy_release_outputs(app_name, channel, app_version, built_artifact_path, o
             print("      set UTOA_CREATE_BUILD_SHORTCUT=1 to enable build-time .lnk output.")
     return release_dir
 
-
-def _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=False):
-    runtime_root_abs = os.path.abspath(runtime_root or APP_DIR)
-    env_dir = os.path.join(runtime_root_abs, ".env")
-    mfa_entry = ""
-    for candidate in (
-        os.path.join(env_dir, "Scripts", "mfa.bat"),
-        os.path.join(env_dir, "Scripts", "mfa.exe"),
-        os.path.join(env_dir, "Scripts", "mfa.cmd"),
-    ):
-        if os.path.isfile(candidate):
-            mfa_entry = candidate
-            break
-
-    candidate_model_roots = [
-        os.path.join(runtime_root_abs, ".mfa_root_ascii"),
-        os.path.join(runtime_root_abs, "mfa_root_ascii"),
-    ]
-    model_roots = [path for path in candidate_model_roots if os.path.isdir(path)]
-    if require_models and not model_roots:
-        raise FileNotFoundError(f"MFA model root not found under runtime root: {runtime_root_abs}")
-
-    model_status = {}
-    for root in model_roots:
-        acoustic_dir = os.path.join(root, "acoustic")
-        if not os.path.isdir(acoustic_dir):
-            continue
-        for file_name in os.listdir(acoustic_dir):
-            low = str(file_name).strip().lower()
-            if not low.endswith(".zip"):
-                continue
-            model_name = low[:-4]
-            model_status[model_name] = os.path.join(acoustic_dir, file_name)
-
-    return runtime_root_abs, env_dir, mfa_entry, model_status, model_roots
-
-
-def _copy_mfa_model_bundle(release_dir, runtime_root, require_models=False):
-    (
-        runtime_root_abs,
-        _env_dir,
-        mfa_entry,
-        model_status,
-        model_roots,
-    ) = _resolve_validated_mfa_runtime_bundle_source(runtime_root, require_models=require_models)
-
-    bundle_dir = os.path.join(os.path.abspath(release_dir), "mfa_runtime_bundle")
-    if os.path.isdir(bundle_dir):
-        _safe_rmtree(bundle_dir)
-    os.makedirs(bundle_dir, exist_ok=True)
-
-    copied_roots = []
-    for src_root in model_roots:
-        root_name = os.path.basename(os.path.normpath(src_root))
-        if not root_name:
-            continue
-        dst_root = os.path.join(bundle_dir, root_name)
-        if os.path.exists(dst_root):
-            _safe_rmtree(dst_root)
-        shutil.copytree(src_root, dst_root)
-        copied_roots.append(root_name)
-
-    manifest = {
-        "bundle_kind": "models_only",
-        "runtime_root": runtime_root_abs,
-        "mfa_entry": mfa_entry,
-        "require_models": bool(require_models),
-        "copied_model_roots": copied_roots,
-        "model_status": dict(model_status or {}),
-    }
-    manifest_path = os.path.join(bundle_dir, "bundle_manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-    return bundle_dir
 
 
 def _install_build_dependencies(backend, target_channels=None):
@@ -1374,12 +1249,6 @@ def main():
         _install_build_dependencies(args.backend, target_channels=target_channels)
 
     print("[2/5] Preparing runtime assets...")
-    if bundle_mode == "online":
-        print("[INFO] bundle-mode=online: skipping bundled runtime assets (downloaded at runtime).")
-    else:
-        _ensure_micromamba_exe()
-    wfl_runtime_root = _ensure_wfl_runtime_bundle()
-    print(f"[INFO] wfl_runtime={wfl_runtime_root}")
     ffmpeg_bin = ""
     app_icon_path = _resolve_app_icon_path()
     if app_icon_path:

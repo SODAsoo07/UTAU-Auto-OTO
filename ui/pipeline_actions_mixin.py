@@ -30,7 +30,6 @@ from core.preflight_common import collect_runtime_preflight_issues
 from core.error_codes import format_error_with_recovery
 from core.format_type_utils import normalize_auto_format_value
 from core.distribution_guard import is_training_paths_enabled
-from core.runtime_paths import resolve_setup_mfa_script_path
 from core.cuda_runtime_bootstrap import (
     collect_cuda_runtime_diagnosis,
     install_torch_cuda_runtime,
@@ -215,9 +214,53 @@ class PipelineActionsMixin:
         self._append_log(f"[HSMM OTO] preview oto: {out_path_abs}")
         if generated_path:
             self._append_log(f"[HSMM OTO] generated source: {generated_path}")
+        if self._is_split_review_oto_enabled():
+            self._export_split_review_oto_files(preview_summary, out_path_abs)
         self._append_log("[HSMM OTO] stage 4/4: summarize review split")
         self._log_hsmm_oto_preview_split_summary(preview_summary)
         return row_count, total_count or row_count, []
+
+    def _is_split_review_oto_enabled(self) -> bool:
+        var = getattr(self, "split_review_oto_var", None)
+        if var is None:
+            return False
+        try:
+            return bool(var.get())
+        except Exception:
+            return False
+
+    def _export_split_review_oto_files(self, preview_summary, out_path_abs: str) -> None:
+        """Copy the validation split (review vs clean) next to the main output oto.
+
+        review = fix_required + attention_only rows (need operator review),
+        clean = everything else. Both files keep the split artifacts' encoding.
+        """
+        split_paths = preview_summary.get("split_output_paths")
+        if not isinstance(split_paths, dict):
+            split_paths = preview_summary.get("review_split_output_paths")
+        if not isinstance(split_paths, dict):
+            self._append_log("[HSMM OTO] split export skipped: no split artifacts in summary.")
+            return
+        base, ext = os.path.splitext(out_path_abs)
+        ext = ext or ".ini"
+        targets = (
+            ("review_all", f"{base}.review{ext}", "확인 필요(경고)"),
+            ("clean", f"{base}.clean{ext}", "그 외(정상)"),
+        )
+        for key, dest, label in targets:
+            src = str(split_paths.get(key, "") or "").strip()
+            if not src or not os.path.isfile(src):
+                self._append_log(f"[HSMM OTO] split export skipped: {key} artifact missing.")
+                continue
+            try:
+                dest_dir = os.path.dirname(dest)
+                if dest_dir:
+                    os.makedirs(dest_dir, exist_ok=True)
+                if os.path.abspath(src) != os.path.abspath(dest):
+                    shutil.copyfile(src, dest)
+                self._append_log(f"[HSMM OTO] split oto ({label}): {dest}")
+            except Exception as exc:
+                self._append_log(f"[HSMM OTO] split export failed ({key}): {exc}")
 
     def _parse_hsmm_oto_preview_summary(self, stdout_lines):
         text = "\n".join(str(line or "") for line in (stdout_lines or []) if str(line or "").strip())

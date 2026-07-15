@@ -231,6 +231,18 @@
                         "note":  "Gold-vs-generated OTO residual report grouped by alias role, VC token, and VC onset class for model-improvement targeting."
                     },
                     {
+                        "path":  "scripts/evaluate/evaluate_korean_vcv_hsmm.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Run resumable cross-bank Korean VCV HSMM OTO generation and trusted manual-reference evaluation."
+                    },
+                    {
+                        "path":  "scripts/evaluate/classify_korean_vcv_regressions.py",
+                        "status":  "active",
+                        "owner":  "ml",
+                        "note":  "Classify trusted Korean VCV row-level improvements and 500 ms regressions for structural fallback design."
+                    },
+                    {
                         "path":  "scripts/evaluate/build_oto_residual_dataset.py",
                         "status":  "active",
                         "owner":  "ml",
