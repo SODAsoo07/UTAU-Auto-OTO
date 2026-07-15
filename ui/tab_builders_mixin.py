@@ -242,6 +242,17 @@ class TabBuildersMixin:
         )
         self.wfl_status_btn.grid(row=0, column=0, padx=(0, 6), pady=1, sticky="w")
 
+        self.wfl_runtime_btn = ctk.CTkButton(
+            aligner_btn_row,
+            text=t("⬇ WFL 런타임 받기"),
+            width=130,
+            fg_color="#CE93D8",
+            hover_color="#AB47BC",
+            text_color="black",
+            command=self._run_wfl_runtime_download,
+        )
+        self.wfl_runtime_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
+
         self.wfl_model_btn = ctk.CTkButton(
             aligner_btn_row,
             text=t("⬇ WFL 모델 받기"),
@@ -251,7 +262,7 @@ class TabBuildersMixin:
             text_color="black",
             command=self._run_wfl_model_download,
         )
-        self.wfl_model_btn.grid(row=0, column=1, padx=(6, 0), pady=1, sticky="w")
+        self.wfl_model_btn.grid(row=0, column=2, padx=(6, 0), pady=1, sticky="w")
 
         ctk.CTkLabel(
             right_actions,
@@ -1606,6 +1617,7 @@ class TabBuildersMixin:
         defaults = {
             "enable_ml_correction_var": ("bool", True),
             "disable_lightgbm_correction_var": ("bool", True),
+            "split_review_oto_var": ("bool", False),
             "vc_correction_enable_var": ("bool", True),
             "kr_continuity_enable_var": ("bool", True),
             "cvn_correction_enable_var": ("bool", True),

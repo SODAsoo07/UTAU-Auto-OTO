@@ -135,6 +135,7 @@ def validate_oto_lines(
     hsmm_duration_z_attention: float = 2.0,
     hsmm_duration_z_fix: float = 3.5,
     local_refine_changed_attention_delta_ms: float = 40.0,
+    local_refine_changed_attention_margin: float = 0.04,
 ) -> tuple[ValidationRecord, ...]:
     durations = dict(wav_durations_ms or {})
     diagnostics_by_line = dict(row_diagnostics or {})
@@ -254,6 +255,8 @@ def validate_oto_lines(
                     fix_reasons.append("fix_required.hsmm_local_margin_bad")
                 elif local_margin < float(hsmm_local_margin_attention):
                     attention_reasons.append("attention.hsmm_local_margin_low")
+            if _metric_positive(diagnostic_metrics, "hsmm_wrong_occurrence_risk_count"):
+                attention_reasons.append("attention.hsmm_wrong_occurrence_risk")
             duration_z = diagnostic_metrics.get("hsmm_max_duration_z_abs")
             if duration_z is not None:
                 if duration_z >= float(hsmm_duration_z_fix):
@@ -281,8 +284,16 @@ def validate_oto_lines(
                     attention_reasons.append("attention.evidence_sonorant_ambiguous")
             if _metric_positive(diagnostic_metrics, "local_refine_changed_anchor_count"):
                 local_refine_delta = diagnostic_metrics.get("local_refine_max_delta_ms")
-                if local_refine_delta is None or abs(float(local_refine_delta)) >= float(
-                    local_refine_changed_attention_delta_ms
+                local_refine_margin = diagnostic_metrics.get("local_refine_min_margin")
+                # A large move alone is normal refine behavior (sonorant/nucleus
+                # windows reach 120-220ms); only flag when the landing spot was
+                # also ambiguous (low competing-peak margin).
+                if (
+                    local_refine_delta is None
+                    or abs(float(local_refine_delta)) >= float(local_refine_changed_attention_delta_ms)
+                ) and (
+                    local_refine_margin is None
+                    or float(local_refine_margin) < float(local_refine_changed_attention_margin)
                 ):
                     attention_reasons.append("attention.local_refine_changed_anchor")
             if _metric_positive(diagnostic_metrics, "local_refine_low_margin_count") and _local_refine_low_margin_needs_attention(
@@ -777,6 +788,8 @@ def _numeric_diagnostics(diagnostics: Mapping[str, object] | object) -> dict[str
         "hsmm_max_duration_z_abs",
         "hsmm_min_selected_vs_best_local_margin",
         "hsmm_min_selected_vs_second_local_margin",
+        "hsmm_min_selected_vs_global_best_margin",
+        "hsmm_wrong_occurrence_risk_count",
         "hsmm_runtime_prior_count",
         "hsmm_state_count",
         "evidence_event_candidate_count",

@@ -69,6 +69,7 @@ from core.mfa_free_oto.workflow import (
     _expected_phones,
     _hsmm_event_sequence_matches_expected,
     _runtime_events_for_hsmm_guard,
+    _template_group_in_filename_order,
     _template_row_plan_context,
 )
 from core.model_context.timebase import TimebaseContract, cache_key_matches_timebase, timebase_from_mapping
@@ -3428,7 +3429,7 @@ def test_mfa_free_oto_review_cli_split_flags_local_refine_attention(tmp_path):
                             "anchor_abs_ms": 62.0,
                             "refined_from_abs_ms": 40.0,
                             "local_refine_delta_ms": 42.0,
-                            "local_refine_margin": 0.20,
+                            "local_refine_margin": 0.02,
                             "warnings": ["local_refine_changed_anchor"],
                         },
                     }
@@ -3472,6 +3473,66 @@ def test_mfa_free_oto_review_cli_split_flags_local_refine_attention(tmp_path):
     assert validation["split"] == SPLIT_ATTENTION_ONLY
     assert "attention.local_refine_changed_anchor" in validation["reasons"]
     assert validation["metrics"]["local_refine_max_delta_ms"] == 42.0
+
+
+def test_mfa_free_oto_review_cli_split_keeps_confident_large_refine_clean(tmp_path):
+    generated = tmp_path / "generated.ini"
+    generated.write_text("a.wav=a,0,100,-350,50,25\n", encoding="utf-8")
+    timeline = tmp_path / "case.timeline.jsonl"
+    timeline.write_text(
+        json.dumps(
+            {
+                "wav": "a.wav",
+                "selected_event_source": "filename_hsmm",
+                "adapted_rows": [
+                    {
+                        "raw_line": "a.wav=a,0,100,-350,50,25",
+                        "anchor": {
+                            "anchor_abs_ms": 62.0,
+                            "refined_from_abs_ms": 40.0,
+                            "local_refine_delta_ms": 42.0,
+                            "local_refine_margin": 0.20,
+                            "warnings": ["local_refine_changed_anchor"],
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    durations = tmp_path / "durations.json"
+    durations.write_text(json.dumps({"a.wav": 500.0}), encoding="utf-8")
+    review_dir = tmp_path / "review"
+    script = REPO_ROOT / "scripts/dev/mfa_free_oto_review.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "split",
+            "--generated",
+            str(generated),
+            "--out-dir",
+            str(review_dir),
+            "--name",
+            "case",
+            "--durations-json",
+            str(durations),
+            "--timeline-jsonl",
+            str(timeline),
+        ],
+        cwd=str(REPO_ROOT),
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["counts"] == {"attention_only": 0, "clean": 1, "fix_required": 0, "total": 1}
+    validation = json.loads((review_dir / "case.validation.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert "attention.local_refine_changed_anchor" not in validation["reasons"]
 
 
 def test_mfa_free_oto_review_cli_keeps_small_local_refine_delta_clean(tmp_path):
@@ -4125,6 +4186,330 @@ def test_filename_row_plan_generates_vcv_alias_order_without_template():
     japanese = build_filename_row_plan("va_vi_vu.wav", language="japanese", format_type="vcv")
     assert [record.alias for record in japanese] == ["- va", "a vi", "i vu"]
     assert [record.role_family for record in japanese] == ["cv_head", "vcv", "vcv"]
+
+
+def test_korean_vcv_template_order_keeps_short_vowel_alias_occurrences():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_myu'myu'myeo'mwae'myu'myo'myu'meu.wav"
+    aliases = ["- myu", "u myu", "u myeo", "eo mwae", "e myu", "u myo", "o myu"]
+    rows = [
+        OtoTemplateRow(
+            wav,
+            alias,
+            OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0),
+            source_row_index=index,
+        )
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(
+        wav,
+        rows,
+        language="korean",
+        format_type="vcv",
+    )
+
+    assert [row.alias for row in ordered] == aliases
+    assert [row.expected_phone_indices for row in ordered] == [
+        (0, 1),
+        (1, 2, 3),
+        (3, 4, 5),
+        (5, 6, 7),
+        (7, 8, 9),
+        (9, 10, 11),
+        (11, 12, 13),
+    ]
+
+
+def test_korean_vcv_row_plan_segments_continuous_roman_syllable_chain():
+    from core.mfa_free_oto.row_plan import build_filename_slots
+
+    slots = build_filename_slots(
+        "_gagageogagegagogaK.wav",
+        language="korean",
+        format_type="vcv",
+    )
+
+    assert [slot.token for slot in slots] == [
+        "ga",
+        "ga",
+        "geo",
+        "ga",
+        "ge",
+        "ga",
+        "go",
+        "ga",
+    ]
+    assert slots[-1].coda_phones == ("k",)
+
+
+def test_korean_vcv_row_plan_segments_plus_separated_roman_chains():
+    from core.mfa_free_oto.row_plan import build_filename_slots
+
+    slots = build_filename_slots(
+        "eubbwi+eubbya+eubbyeo+eubbui.wav",
+        language="korean",
+        format_type="vcv",
+    )
+
+    assert [slot.token for slot in slots] == [
+        "eu",
+        "bbwi",
+        "eu",
+        "bbya",
+        "eu",
+        "bbyeo",
+        "eu",
+        "bbui",
+    ]
+
+
+def test_korean_vcv_row_plan_segments_v_onset_and_trailing_breath_marker():
+    v_slots = build_filename_slots(
+        "_veuveuviveuvaveuveoveu.wav",
+        language="korean",
+        format_type="vcv",
+    )
+    breath_slots = build_filename_slots(
+        "_bbabbabbeobbabbebbabbobbaH.wav",
+        language="korean",
+        format_type="vcv",
+    )
+
+    assert [slot.token for slot in v_slots] == ["veu", "veu", "vi", "veu", "va", "veu", "veo", "veu"]
+    assert [slot.token for slot in breath_slots] == ["bba", "bba", "bbeo", "bba", "bbe", "bba", "bbo", "bba"]
+
+
+def test_korean_vcv_single_letter_pitch_suffix_keeps_alias_role():
+    from core.mfa_free_oto.oto_adapter import (
+        _alias_phone_sequence,
+        _alias_type_for_row,
+        _strip_alias_attached_pitch_suffix_token,
+    )
+
+    assert _strip_alias_attached_pitch_suffix_token("gaF") == "ga"
+    assert _strip_alias_attached_pitch_suffix_token("kF") == "k"
+    assert _alias_phone_sequence("a gaF") == ["a", "g", "a"]
+    assert _alias_type_for_row("a gaF", "auto") == "vcv"
+
+
+def test_korean_vcv_continuous_chain_uses_source_transition_order():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_gwegwe+ogwe+ugwe+eugwe.wav"
+    aliases = ["- gwe", "e gwe", "o gwe", "u gwe", "eu gwe"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert [row.alias for row in ordered] == aliases
+    assert [row.expected_phone_indices for row in ordered] == [
+        (0, 1),
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9),
+        (10, 11, 12),
+    ]
+
+
+def test_korean_vcv_sparse_apostrophe_rows_keep_early_repeated_transition():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_yu'yeo'yu'eu'yu'n'yu'm'yu'ng'yu'i'yeoD#4.wav"
+    aliases = ["- yuD#4", "u yeoD#4", "eo yuD#4", "eu yuD#4", "n yuD#4", "m yuD#4", "ng yuD#4", "i yeoD#4"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert [row.alias for row in ordered] == aliases
+    assert [int(row.expected_phone_indices[-1]) for row in ordered] == [0, 1, 2, 4, 6, 8, 10, 12]
+
+
+def test_korean_vcv_adjacent_plain_cv_duplicate_shares_head_slot():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_nyeonyeonyenyeonyonyeonyunyeo.wav"
+    aliases = ["- nyeo", "nyeo", "eo nyeo", "eo nye", "e nyeo", "eo nyo", "o nyeo", "eo nyu", "u nyeo"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert [row.alias for row in ordered] == aliases
+    assert ordered[0].expected_phone_indices == (0, 1)
+    assert ordered[1].expected_phone_indices == (0, 1)
+
+
+def test_korean_vcv_unique_trailing_plain_cv_duplicate_shares_head_slot():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_bababeobabebabobaP.wav"
+    aliases = ["- ba", "a ba", "a beo", "eo ba", "a be", "e ba", "a bo", "o ba", "a p", "ba"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    head = next(row for row in ordered if row.alias == "- ba")
+    duplicate = next(row for row in ordered if row.alias == "ba")
+    assert head.expected_phone_indices == duplicate.expected_phone_indices
+    assert ordered.index(duplicate) == ordered.index(head) + 1
+
+
+def test_korean_vcv_continuous_chain_fills_one_structural_alias_gap():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_fyofyofyufyo+eufyofwifyo.wav"
+    aliases = ["- fyo", "o fyo", "o fyu", "u fyo", "o fyeu", "eu fyo", "o fwi", "i fyo"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert [row.alias for row in ordered] == aliases
+    assert ordered[4].expected_phone_indices == (7, 8)
+
+
+def test_korean_vcv_multiple_recorded_phrases_keep_each_head_position():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_twe'a'tyu_pwe'a'pyu.wav"
+    aliases = ["- twe", "a tyu", "- pwe", "a pyu"]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert [row.alias for row in ordered] == aliases
+    assert [int(row.expected_phone_indices[-1]) for row in ordered] == [1, 4, 6, 9]
+
+
+def test_korean_vcv_multiple_alias_dialects_reuse_filename_row_plan():
+    from core.mfa_free_oto.oto_adapter import OtoTemplateRow, OtoTiming
+
+    wav = "_ggyeoggyeoggyeggyeoggyoggyeoggyuggyeo.wav"
+    first = ["- kkyeo", "kkyeo", "eo kkyeo", "eo kkye", "e kkyeo", "eo kkyo", "o kkyeo", "eo kkyu", "u kkyeo"]
+    second = ["- ggyeo", "ggyeo", "eo ggyeo", "eo ggye", "e ggyeo", "eo ggyo", "o ggyeo", "eo ggyu", "u ggyeo"]
+    aliases = [*first, *second]
+    rows = [
+        OtoTemplateRow(wav, alias, OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0), source_row_index=index)
+        for index, alias in enumerate(aliases)
+    ]
+
+    ordered = _template_group_in_filename_order(wav, rows, language="korean", format_type="vcv")
+
+    assert all(row.expected_phone_indices is not None for row in ordered)
+    assert [row.alias for row in ordered[:4]] == ["- kkyeo", "kkyeo", "- ggyeo", "ggyeo"]
+    targets = [int(row.expected_phone_indices[-1]) for row in ordered]
+    assert targets == sorted(targets)
+
+
+def test_korean_vcv_explicit_duplicate_targets_reuse_anchor():
+    from core.mfa_free_oto.oto_adapter import (
+        OtoTemplateRow,
+        OtoTiming,
+        assign_template_row_anchors,
+    )
+
+    posterior = FramePosterior(
+        wav_path="duplicate.wav",
+        times_ms=[0.0, 100.0, 200.0, 300.0, 400.0],
+        class_probs={label: [0.05] * 5 for label in FRAME_LABELS},
+        event_scores={label: [0.1] * 5 for label in EVENT_LABELS},
+        acoustic_scores={},
+    )
+    rows = [
+        OtoTemplateRow(
+            "duplicate.wav",
+            alias,
+            OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0),
+            expected_phone_indices=(0, 1),
+        )
+        for alias in ("- kkeo", "kkeo", "- ggeo", "ggeo")
+    ]
+    events = [
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": 100.0,
+            "score": 0.9,
+            "expected_phone": "eo",
+            "expected_phone_index": 1,
+            "slot_index": 0,
+        },
+        {
+            "label": "cv_boundary",
+            "selected_time_ms": 300.0,
+            "score": 0.9,
+            "expected_phone": "eo",
+            "expected_phone_index": 1,
+            "slot_index": 1,
+        },
+    ]
+
+    anchors = assign_template_row_anchors(
+        posterior,
+        events,
+        rows,
+        expected_phones=("g", "eo"),
+        language="korean",
+        use_source_timing_prior=False,
+    )
+
+    assert [anchor.anchor_abs_ms for anchor in anchors if anchor is not None] == [100.0] * 4
+    assert all(
+        "template_explicit_target_anchor_reused" in anchor.warnings
+        for anchor in anchors[1:]
+        if anchor is not None
+    )
+
+
+def test_partial_explicit_targets_are_not_discarded_by_alias_dp():
+    from core.mfa_free_oto.oto_adapter import (
+        OtoTemplateRow,
+        OtoTiming,
+        _alias_targets_from_template_rows_or_dp,
+    )
+
+    rows = [
+        OtoTemplateRow(
+            "duplicate.wav",
+            alias,
+            OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0),
+            expected_phone_indices=(0, 1),
+        )
+        for alias in ("- kkeo", "kkeo", "- ggeo", "ggeo")
+    ]
+    rows.append(
+        OtoTemplateRow(
+            "duplicate.wav",
+            "eo -",
+            OtoTiming(0.0, 0.0, 0.0, 0.0, 0.0),
+            expected_phone_indices=None,
+        )
+    )
+
+    targets = _alias_targets_from_template_rows_or_dp(
+        rows,
+        ("g", "eo", "g", "eo"),
+        language="korean",
+    )
+
+    assert targets[:4] == [1, 1, 1, 1]
 
 
 def test_filename_vcv_expected_slots_match_palatal_vowel_tokens():

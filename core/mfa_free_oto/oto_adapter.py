@@ -13,6 +13,7 @@ from core.timing.timing_anchor_profiles import get_anchor_profile
 from core.timing.timing_anchor_runtime import AnchorTimingContext, apply_anchor_lock
 
 from .kana import parse_kana_text
+from .plosive_closure import is_plosive_phone, refine_consonant_onset_for_plosive
 from .slot_viterbi import ExpectedSlot
 from .types import DecodedEvent, FramePosterior, is_vowel_phone
 
@@ -26,10 +27,29 @@ JAPANESE_VCV_BOOTSTRAP_PROFILE = {
     "vcv": (150.0, 100.0, 100.0),
     "vv": (150.0, 100.0, 100.0),
 }
+# RECALIBRATED 2026-07-14 alongside the anchor-lead removal: the old values
+# (vcv 300/220/150, vv 360/260/145) were co-tuned with the 180-277ms anchor
+# leads, so with pre now sitting on the vowel onset they pushed offset/overlap
+# ~120-140ms too far left. Values below are the per-role medians of the
+# DiKORVCV reclist template OTO (pre_target, pre-ovl gap, cons-pre gap).
 KOREAN_VCV_BOOTSTRAP_PROFILE = {
-    "cv_head": (76.0, 55.0, 104.0),
-    "vcv": (300.0, 220.0, 150.0),
-    "vv": (360.0, 260.0, 145.0),
+    "cv_head": (54.0, 65.0, 109.0),
+    "vcv": (176.0, 64.0, 115.0),
+    "vv": (117.0, 23.0, 103.0),
+    # V->coda tail rows ('eo t', 'a ng'): without this they fell back to the
+    # generic vc defaults (pre 80/cons+40/cut 148) and framed almost none of
+    # the preceding vowel. Medians of the DiKORVCV template's coda rows.
+    "vc": (117.0, 54.0, 58.0),
+}
+# Convention cap for the cutoff, |cutoff_abs - pre_abs|, per-role medians of the
+# DiKORVCV reclist template OTO. The acoustic vowel-end estimate runs ~60ms
+# late and tail_margin adds 50ms more, leaving the cutoff a median 110ms past
+# the vowel end and bleeding into the next onset consonant on 16% of rows.
+KOREAN_VCV_CUTOFF_GAP_MS = {
+    "cv_head": 275.0,
+    "vcv": 317.0,
+    "vv": 347.0,
+    "vc": 360.0,
 }
 # Per-role bootstrap profiles for CVVC, derived from surveyed gold OTOs (Dabi,
 # SODA etc.). Tuple: (pre_target_ms, ovl_gap_ms, cons_gap_ms).
@@ -433,10 +453,14 @@ JAPANESE_VCV_HSMM_ANCHOR_LEAD_MS = {
     "vcv": 205.0,
     "vv": 260.0,
 }
+# RECALIBRATED 2026-07-14 (DiKORvcv_8-10mora, 3858 rows): decoded anchors now
+# sit within -40..+50ms of the vowel-state onset for every (role, label), so
+# the legacy 180-277ms leads double-compensated and pushed preutterance into
+# the onset consonant/breath, shifting the whole offset..cutoff window early.
 KOREAN_VCV_HSMM_ANCHOR_LEAD_MS = {
-    "cv_head": 180.0,
-    "vcv": 240.0,
-    "vv": 200.0,
+    "cv_head": 0.0,
+    "vcv": 0.0,
+    "vv": 0.0,
 }
 JAPANESE_VCV_HSMM_ANCHOR_LEAD_BY_EVENT_MS = {
     ("cv_head", "vv_boundary"): 8.0,
@@ -446,10 +470,10 @@ JAPANESE_VCV_HSMM_ANCHOR_LEAD_BY_EVENT_MS = {
     ("vv", "vowel_nucleus"): 230.0,
 }
 KOREAN_VCV_HSMM_ANCHOR_LEAD_BY_EVENT_MS = {
-    ("cv_head", "vowel_nucleus"): 220.0,
-    ("vcv", "cv_boundary"): 195.0,
-    ("vcv", "vowel_nucleus"): 264.0,
-    ("vv", "vv_boundary"): 277.0,
+    ("cv_head", "vowel_nucleus"): 0.0,
+    ("vcv", "cv_boundary"): 0.0,
+    ("vcv", "vowel_nucleus"): 0.0,
+    ("vv", "vv_boundary"): 0.0,
 }
 KOREAN_CVC_RELEASE_CLUSTER_RIGHT_TOKENS = frozenset({"R", "L"})
 KOREAN_CVC_RELEASE_CLUSTER_FIRST_ANCHOR_AFTER_START_MS = 350.0
@@ -1219,6 +1243,10 @@ class OtoAnchor:
     vowel_nucleus_abs_ms: float | None = None
     vowel_start_abs_ms: float | None = None
     vowel_end_abs_ms: float | None = None
+    # Last time the vowel is still at stable amplitude (>=70% of its RMS peak).
+    # Cutoff convention places the right edge here: after the fixed region but
+    # before the vowel starts decaying.
+    vowel_stable_end_abs_ms: float | None = None
     # Absolute onset of the leading consonant for headed (C->V) anchors. Used so
     # the generated offset reaches back far enough to include the whole
     # consonant instead of clipping its attack.
@@ -1583,7 +1611,12 @@ def bootstrap_row(
             prev_end = max_prev_end
         offset = max(float(prev_end) - cfg.previous_tail_keep_ms, 0.0)
     elif alias_type == "vc":
-        vc_pre_target_ms, vc_context_warnings = _cvvc_vc_context_pre_ms(cfg, anchor, anchor_abs)
+        if _korean_vcv_cutoff_gap_ms(cfg, alias_type) is not None:
+            # Korean VCV coda tails use the reclist-convention profile so the
+            # window frames the preceding vowel, not just the coda onset.
+            vc_pre_target_ms, vc_context_warnings = float(pre_target_ms), ()
+        else:
+            vc_pre_target_ms, vc_context_warnings = _cvvc_vc_context_pre_ms(cfg, anchor, anchor_abs)
         anchor_warnings.extend(vc_context_warnings)
         vc_pre_cap_ms = max(vc_pre_cap_ms, vc_pre_target_ms)
         offset = max(anchor_abs - vc_pre_target_ms, 0.0)
@@ -1613,11 +1646,29 @@ def bootstrap_row(
     consonant = pre + cons_gap_ms
     cutoff_warnings: tuple[str, ...] = ()
     if alias_type == "vc":
-        cut_gap = _role_cut_gap_ms(cfg, alias_type)
-        cutoff = -(max(consonant + 8.0, consonant + cut_gap))
+        korean_vc_cut_gap = _korean_vcv_cutoff_gap_ms(cfg, alias_type)
+        if korean_vc_cut_gap is not None:
+            cutoff = -(max(consonant + 8.0, pre + float(korean_vc_cut_gap)))
+        else:
+            cut_gap = _role_cut_gap_ms(cfg, alias_type)
+            cutoff = -(max(consonant + 8.0, consonant + cut_gap))
     else:
         vowel_end = anchor.vowel_end_abs_ms if anchor.vowel_end_abs_ms is not None else min(file_duration_ms, anchor_abs + 180.0)
         raw_cutoff_trim = max(consonant + 8.0, float(vowel_end) - offset + cfg.tail_margin_ms - anchor_lead_ms)
+        korean_vcv_cut_gap = _korean_vcv_cutoff_gap_ms(cfg, alias_type)
+        if korean_vcv_cut_gap is not None:
+            convention_trim = max(consonant + 8.0, pre + float(korean_vcv_cut_gap))
+            stable_end = anchor.vowel_stable_end_abs_ms
+            if stable_end is not None and np.isfinite(float(stable_end)):
+                # Convention: cutoff sits after the fixed region but before the
+                # vowel starts decaying — cap at the last stable-amplitude time.
+                stable_trim = max(consonant + 30.0, float(stable_end) - offset)
+                convention_trim = min(convention_trim, stable_trim)
+            if convention_trim < raw_cutoff_trim - 1e-6:
+                anchor_warnings.append(
+                    f"korean_vcv_cutoff_convention_capped:{raw_cutoff_trim:.1f}->{convention_trim:.1f}"
+                )
+                raw_cutoff_trim = convention_trim
         raw_cutoff_trim, cvvc_head_cutoff_warnings = _cvvc_cv_head_cutoff_trim_ms(
             cfg,
             alias_type,
@@ -1652,6 +1703,83 @@ def bootstrap_row(
     )
 
 
+def _advance_onset_past_leading_silence(
+    consonant_onset_abs_ms: float,
+    anchor_abs_ms: float,
+    times_ms: Sequence[float],
+    silence_probs: Sequence[float],
+    *,
+    lookback_ms: float = 80.0,
+    max_advance_ms: float = 120.0,
+    rms_track: Sequence[float] | None = None,
+    min_rms: float = 0.08,
+) -> float:
+    """Advance an utterance-initial consonant onset past silent lead-in frames.
+
+    Onset estimates for a file-initial consonant often start inside the leading
+    silence (a plosive closure is indistinguishable from silence there), which
+    drags the offset left and packs dead air into the sample window. Only
+    applies when the region before the estimated onset is itself silent, so
+    mid-file onsets (preceded by the previous vowel) are left untouched.
+    """
+    times = np.asarray(times_ms, dtype=np.float32)
+    silence = np.asarray(silence_probs, dtype=np.float32)
+    if times.size == 0 or silence.shape[0] != times.shape[0]:
+        return consonant_onset_abs_ms
+    # "Inactive" = silence-classified OR below the audibility floor. A voiced
+    # stop's closure/voice bar is not silence-classified but is visually and
+    # audibly blank; an offset placed there reads as sitting in empty space.
+    inactive = silence >= 0.5
+    if rms_track is not None:
+        rms = np.asarray(rms_track, dtype=np.float32)
+        if rms.shape[0] == times.shape[0]:
+            inactive = inactive | (rms < float(min_rms))
+    onset_idx = int(np.searchsorted(times, float(consonant_onset_abs_ms)))
+    onset_idx = max(0, min(onset_idx, int(times.size) - 1))
+    look_idx = int(np.searchsorted(times, float(consonant_onset_abs_ms) - float(lookback_ms)))
+    look_idx = max(0, min(look_idx, onset_idx))
+    before = inactive[look_idx : onset_idx + 1]
+    if before.size and float(np.mean(before)) < 0.5:
+        return consonant_onset_abs_ms
+    limit_ms = min(float(anchor_abs_ms), float(consonant_onset_abs_ms) + float(max_advance_ms))
+    limit_idx = int(np.searchsorted(times, limit_ms))
+    limit_idx = max(onset_idx, min(limit_idx, int(times.size)))
+    active = np.where(~inactive[onset_idx:limit_idx])[0]
+    if active.size == 0:
+        return consonant_onset_abs_ms
+    advanced = float(times[onset_idx + int(active[0])])
+    return advanced if advanced > consonant_onset_abs_ms else consonant_onset_abs_ms
+
+
+def _vowel_stable_end_abs_ms(
+    posterior: FramePosterior,
+    *,
+    nucleus_abs_ms: float | None,
+    vowel_end_abs_ms: float | None,
+    drop_ratio: float = 0.7,
+) -> float | None:
+    """Last time within [nucleus, vowel_end] where the RMS is still >= drop_ratio
+    of the vowel's peak — the conventional cutoff position (stable, pre-decay)."""
+    if nucleus_abs_ms is None or vowel_end_abs_ms is None:
+        return None
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    rms = np.asarray(posterior.acoustic_scores.get("rms", ()), dtype=np.float32)
+    if times.size == 0 or rms.shape[0] != times.shape[0]:
+        return None
+    i0 = int(np.searchsorted(times, float(nucleus_abs_ms)))
+    i1 = int(np.searchsorted(times, float(vowel_end_abs_ms)))
+    i0 = max(0, min(i0, int(times.size) - 1))
+    i1 = max(i0 + 1, min(i1, int(times.size)))
+    segment = rms[i0:i1]
+    peak = float(np.max(segment))
+    if peak <= 0.0:
+        return None
+    stable = np.where(segment >= float(drop_ratio) * peak)[0]
+    if stable.size == 0:
+        return None
+    return float(times[i0 + int(stable[-1])])
+
+
 def anchors_from_prediction(
     posterior: FramePosterior,
     decoded_events: Sequence[DecodedEvent | Mapping[str, object]],
@@ -1659,6 +1787,9 @@ def anchors_from_prediction(
     anchors: list[OtoAnchor] = []
     previous_vowel_end: float | None = None
     pending_consonant_onset: float | None = None
+    pending_consonant_phone: str | None = None
+    times_ms = list(posterior.times_ms)
+    silence_probs = list(posterior.class_probs.get("silence", []))
     decoded = [_event_to_dict(event) for event in decoded_events]
     for idx, event in enumerate(decoded):
         if event["label"] not in {"cv_boundary", "phone_change", "vowel_nucleus", "vv_boundary"}:
@@ -1669,12 +1800,29 @@ def anchors_from_prediction(
         # consonant inside its offset window.
         if str(event["label"]) == "phone_change":
             pending_consonant_onset = anchor_ms
+            pending_consonant_phone = str(event.get("expected_phone") or "").strip().lower()
         consonant_onset_abs = None
         if str(event["label"]) == "cv_boundary" and pending_consonant_onset is not None:
             if 0.0 <= float(pending_consonant_onset) < anchor_ms:
                 consonant_onset_abs = float(pending_consonant_onset)
+                if is_plosive_phone(pending_consonant_phone or "") and silence_probs:
+                    consonant_onset_abs = refine_consonant_onset_for_plosive(
+                        pending_consonant_phone or "",
+                        consonant_onset_abs,
+                        times_ms,
+                        silence_probs,
+                    )
+        if consonant_onset_abs is not None and silence_probs and times_ms:
+            consonant_onset_abs = _advance_onset_past_leading_silence(
+                consonant_onset_abs,
+                anchor_ms,
+                times_ms,
+                silence_probs,
+                rms_track=posterior.acoustic_scores.get("rms"),
+            )
         if str(event["label"]) != "phone_change":
             pending_consonant_onset = None
+            pending_consonant_phone = None
         span = estimate_vowel_span(posterior, anchor_ms)
         nucleus_time, nucleus_conf, nucleus_warnings = estimate_vowel_nucleus(
             posterior,
@@ -1709,6 +1857,11 @@ def anchors_from_prediction(
             vowel_nucleus_abs_ms=selected_nucleus,
             vowel_start_abs_ms=span.get("vowel_start_abs_ms"),
             vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+            vowel_stable_end_abs_ms=_vowel_stable_end_abs_ms(
+                posterior,
+                nucleus_abs_ms=selected_nucleus,
+                vowel_end_abs_ms=span.get("vowel_end_abs_ms"),
+            ),
             consonant_onset_abs_ms=consonant_onset_abs,
             previous_vowel_end_abs_ms=previous_vowel_end,
             next_vowel_abs_ms=next_vowel,
@@ -1773,6 +1926,29 @@ def assign_template_row_anchors(
             and 0 <= int(original_target_phone_index) < len(expected_phones or ())
             else ""
         )
+        if (
+            row_idx > 0
+            and row.expected_phone_indices is not None
+            and template_rows[row_idx - 1].expected_phone_indices == row.expected_phone_indices
+            and target_phone_index is not None
+            and last_target_phone_index == target_phone_index
+            and out
+            and out[-1] is not None
+        ):
+            previous_anchor = out[-1]
+            shared_anchor = replace(
+                previous_anchor,
+                role=role,
+                warnings=tuple(
+                    dict.fromkeys(
+                        (*previous_anchor.warnings, "template_explicit_target_anchor_reused")
+                    )
+                ),
+            )
+            out.append(shared_anchor)
+            last_time = float(shared_anchor.anchor_abs_ms)
+            last_target_phone_index = int(target_phone_index)
+            continue
         expected_time = _template_expected_time(
             row,
             row_idx,
@@ -14641,6 +14817,14 @@ def _strip_alias_attached_pitch_suffix_token_preserve_case(token: str) -> str:
         return ""
     if _is_breath_alias_with_attached_pitch_style_suffix_token(normalized):
         return normalized
+    # Some Korean multi-pitch banks use a single uppercase note-group suffix
+    # (notably ``F``) without an octave digit: ``gaF``, ``a gaF``, ``kF``.
+    # It is unambiguous against Korean coda markers K/T/P/R/H and must be
+    # removed before alias-role and phone-sequence classification.
+    if len(normalized) >= 2 and normalized[-1] in "ABCDEFG" and normalized[-2].islower():
+        stem = normalized[:-1].rstrip("_- ").strip()
+        if stem:
+            return stem
     kana_positions = [
         idx for idx, char in enumerate(normalized)
         if "\u3040" <= char <= "\u30ff"
@@ -17749,6 +17933,14 @@ def _is_cvvc_format(config: OtoAdapterConfig) -> bool:
     return str(config.format_type or "").strip().lower() == "cvvc"
 
 
+def _korean_vcv_cutoff_gap_ms(config: OtoAdapterConfig, alias_type: str) -> float | None:
+    if str(config.format_type or "").strip().lower() != "vcv":
+        return None
+    if str(config.language or "").strip().lower() != "korean":
+        return None
+    return KOREAN_VCV_CUTOFF_GAP_MS.get(str(alias_type or "").strip().lower())
+
+
 def _bootstrap_cutoff_trim_ms(
     config: OtoAdapterConfig,
     alias_type: str,
@@ -18196,6 +18388,10 @@ def _strip_alias_attached_pitch_suffix_token(token: str) -> str:
         return ""
     if _is_breath_alias_with_attached_pitch_style_suffix_token(raw):
         return raw
+    if len(raw) >= 2 and raw[-1] in "ABCDEFG" and raw[-2].islower():
+        stem = raw[:-1].rstrip("_- ").strip()
+        if stem:
+            return stem
     kana_positions = [
         idx for idx, char in enumerate(raw)
         if "\u3040" <= char <= "\u30ff"
@@ -18266,6 +18462,8 @@ def _alias_has_attached_pitch_suffix(alias: str) -> bool:
     if not value:
         return False
     if ALIAS_ATTACHED_PITCH_SUFFIX_RE.search(value):
+        return True
+    if any(len(token) >= 2 and token[-1] in "ABCDEFG" and token[-2].islower() for token in value.split()):
         return True
     for token in value.split():
         separated_suffix = re.search(r"[_-]([A-Za-z][A-Za-z0-9]{0,4})$", token)
@@ -18352,7 +18550,15 @@ def _alias_targets_from_template_rows_or_dp(
     pre_assigned = [row.expected_phone_indices for row in rows]
     if all(indices is not None and len(indices) > 0 for indices in pre_assigned):
         return [int(indices[-1]) for indices in pre_assigned]  # type: ignore[index]
-    return _assign_alias_target_indices(rows, expected_phones, language=language)
+    inferred = _assign_alias_target_indices(rows, expected_phones, language=language)
+    # Filename/template matching can confidently assign most rows while leaving
+    # only terminal or special aliases unresolved. Do not discard every explicit
+    # occurrence target merely because one row is missing a target; that makes
+    # the DP remap duplicate dialect rows to later repeated syllables.
+    return [
+        int(indices[-1]) if indices is not None and len(indices) > 0 else inferred[index]
+        for index, indices in enumerate(pre_assigned)
+    ]
 
 
 def _assign_alias_target_indices(
@@ -19338,6 +19544,7 @@ def _refine_anchor_sequence_locally(
     attention_delta_ms: float = 12.0,
     low_margin_threshold: float = 0.04,
     min_order_gap_ms: float = 4.0,
+    margin_guard_ms: float = 10.0,
 ) -> list[OtoAnchor | None]:
     if not anchors:
         return []
@@ -19348,6 +19555,8 @@ def _refine_anchor_sequence_locally(
     max_window = max(1.0, float(window_ms))
     for idx, anchor in enumerate(refined):
         if anchor is None:
+            continue
+        if "template_explicit_target_anchor_reused" in set(anchor.warnings):
             continue
         anchor_is_sonorant = _anchor_phone_is_sonorant_like(anchor)
         retarget_cv_boundary = _japanese_cv_nucleus_anchor_requires_boundary_refine(
@@ -19402,10 +19611,16 @@ def _refine_anchor_sequence_locally(
         if allowed.size == 0:
             continue
         best_idx = int(allowed[int(np.argmax(scores[allowed]))])
-        ordered_scores = sorted((float(scores[item]) for item in allowed), reverse=True)
         best_score = float(scores[best_idx])
-        second_score = ordered_scores[1] if len(ordered_scores) > 1 else best_score
-        margin = max(0.0, best_score - float(second_score))
+        # Margin measures whether a *competing* peak exists: compare against the
+        # best frame outside a guard radius around the chosen peak. Comparing
+        # against the raw second-best frame would just measure curve smoothness
+        # (the runner-up is almost always the frame adjacent to the peak).
+        best_time_ms = float(times[best_idx])
+        competitor_mask = np.abs(times[allowed] - best_time_ms) > float(margin_guard_ms)
+        competitor_scores = scores[allowed][competitor_mask]
+        second_score = float(np.max(competitor_scores)) if competitor_scores.size else 0.0
+        margin = max(0.0, best_score - second_score)
         refined_time = float(times[best_idx])
         delta = refined_time - source_time
         if abs(delta) <= 1e-6:
@@ -19555,9 +19770,18 @@ def _local_refine_scores(
         sonorant = _normalized_track(posterior, "sonorant_onset_likelihood", times)
         spectral_delta = _normalized_track(posterior, "spectral_shape_delta_likelihood", times)
         silence = _normalized_track(posterior, "silence_likelihood", times)
+        # Band-balance swing inside voiced regions (mid/low band delta): marks
+        # V<->nasal/liquid boundaries that energy/flux-based tracks miss.
+        murmur_boundary = _normalized_track(posterior, "sonorant_boundary_likelihood", times)
         non_silence = 1.0 - silence
         event = np.maximum(phone_change, cv_boundary)
-        sonorant_edge = np.maximum(sonorant, np.clip((0.70 * spectral_delta) + (0.30 * transition), 0.0, 1.0))
+        sonorant_edge = np.maximum.reduce(
+            [
+                sonorant,
+                np.clip((0.70 * spectral_delta) + (0.30 * transition), 0.0, 1.0),
+                murmur_boundary,
+            ]
+        )
         return np.clip(
             (0.48 * sonorant_edge)
             + (0.18 * event)

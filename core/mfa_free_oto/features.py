@@ -260,7 +260,7 @@ def acoustic_world_features(
     sp_delta = np.pad(sp_delta, (1, 0), mode="edge")
     spectral_stability = 1.0 - _robust_unit(sp_delta)
 
-    onset_times, rms, onset = _frame_rms_flux_tracks(
+    onset_times, rms, onset, spectral_centroid_raw, low_band_ratio_raw, mid_band_ratio_raw = _frame_rms_flux_tracks(
         samples.astype(np.float32),
         sample_rate,
         frame_ms=float(cfg.frame_ms),
@@ -268,6 +268,9 @@ def acoustic_world_features(
     )
     onset = _safe_smooth_track(onset.astype(np.float32), gaussian_filter1d)
     rms = _safe_smooth_track(rms.astype(np.float32), gaussian_filter1d)
+    spectral_centroid_smooth = _safe_smooth_track(spectral_centroid_raw.astype(np.float32), gaussian_filter1d)
+    low_band_ratio_smooth = _safe_smooth_track(low_band_ratio_raw.astype(np.float32), gaussian_filter1d)
+    mid_band_ratio_smooth = _safe_smooth_track(mid_band_ratio_raw.astype(np.float32), gaussian_filter1d)
 
     world_voicing = _interp_vector(world_times_ms, _safe_smooth_track(voiced, gaussian_filter1d), aux.times_ms)
     world_periodicity = _interp_vector(world_times_ms, _safe_smooth_track(periodicity.astype(np.float32), gaussian_filter1d), aux.times_ms)
@@ -295,6 +298,21 @@ def acoustic_world_features(
         1.0,
     ).astype(np.float32)
 
+    centroid_interp = _interp_vector(onset_times, _robust_unit(spectral_centroid_smooth), aux.times_ms)
+    low_band_interp = _interp_vector(onset_times, low_band_ratio_smooth, aux.times_ms)
+    mid_band_interp = _interp_vector(onset_times, mid_band_ratio_smooth, aux.times_ms)
+    voicing_blend = np.clip(0.55 * merged_scores["voicing"] + 0.45 * world_voicing, 0.0, 1.0).astype(np.float32)
+    # Nasal murmur presence and V<->sonorant boundary strength: within voiced
+    # regions, a fast swing of the mid/low band balance marks the transition
+    # into/out of a nasal or liquid constriction even when total energy and
+    # voicing stay flat (which is why energy-based onsets miss it).
+    nasal_murmur = np.clip(low_band_interp * voicing_blend * (1.0 - centroid_interp), 0.0, 1.0).astype(np.float32)
+    band_delta = (
+        np.abs(np.diff(mid_band_interp, prepend=mid_band_interp[:1]))
+        + np.abs(np.diff(low_band_interp, prepend=low_band_interp[:1]))
+    ).astype(np.float32)
+    band_delta = _safe_smooth_track(band_delta, gaussian_filter1d)
+    sonorant_boundary = np.clip(_robust_unit(band_delta) * voicing_blend, 0.0, 1.0).astype(np.float32)
     merged_scores.update(
         {
             "world_f0_hz": _interp_vector(world_times_ms, np.asarray(f0, dtype=np.float32), aux.times_ms),
@@ -308,6 +326,11 @@ def acoustic_world_features(
             "voicing": np.clip(0.55 * merged_scores["voicing"] + 0.45 * world_voicing, 0.0, 1.0).astype(np.float32),
             "nucleus_likelihood": nucleus_world,
             "onset_strength": onset_interp,
+            "spectral_centroid": centroid_interp,
+            "low_band_ratio": low_band_interp,
+            "mid_band_ratio": mid_band_interp,
+            "nasal_murmur_likelihood": nasal_murmur,
+            "sonorant_boundary_likelihood": sonorant_boundary,
             "acoustic_feature_set_world_v1": np.ones_like(nucleus_world, dtype=np.float32),
         }
     )
@@ -320,6 +343,8 @@ def acoustic_world_features(
             nucleus_world,
             onset_interp,
             rms_interp,
+            centroid_interp,
+            low_band_interp,
         ],
         axis=1,
     ).astype(np.float32)
@@ -337,35 +362,39 @@ def _frame_rms_flux_tracks(
     *,
     frame_ms: float,
     hop_ms: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     frame_size = max(1, int(round(sample_rate * frame_ms / 1000.0)))
     hop = max(1, int(round(sample_rate * hop_ms / 1000.0)))
     if samples.shape[0] < frame_size:
         samples = np.pad(samples, (0, frame_size - samples.shape[0]))
     frame_count = 1 + max(0, (samples.shape[0] - frame_size) // hop)
     window = np.hanning(frame_size).astype(np.float32)
-    previous_mag: np.ndarray | None = None
-    rms_values: list[float] = []
-    flux_values: list[float] = []
-    for idx in range(frame_count):
-        start = idx * hop
-        frame = samples[start : start + frame_size]
-        if frame.shape[0] < frame_size:
-            frame = np.pad(frame, (0, frame_size - frame.shape[0]))
-        weighted = frame.astype(np.float32) * window
-        rms_values.append(float(np.sqrt(np.mean(frame * frame) + 1e-12)))
-        mag = np.abs(np.fft.rfft(weighted)).astype(np.float32)
-        if previous_mag is None:
-            flux_values.append(0.0)
-        else:
-            flux_values.append(float(np.mean(np.maximum(0.0, mag - previous_mag))))
-        previous_mag = mag
+    padded_len = samples.shape[0] + frame_size
+    padded = np.pad(samples.astype(np.float32), (0, max(0, padded_len - samples.shape[0])))
+    indices = np.arange(frame_size)[None, :] + (np.arange(frame_count)[:, None] * hop)
+    frames = padded[indices]
+    rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+    weighted = frames * window[None, :]
+    mags = np.abs(np.fft.rfft(weighted, axis=1)).astype(np.float32)
+    flux = np.mean(np.maximum(0.0, mags[1:] - mags[:-1]), axis=1)
+    flux = np.concatenate([[0.0], flux]).astype(np.float32)
+    n_fft_bins = mags.shape[1]
+    freq_bins = np.linspace(0, sample_rate / 2.0, n_fft_bins, dtype=np.float32)
+    mag_sum = np.sum(mags, axis=1, keepdims=True) + 1e-12
+    spectral_centroid = (np.sum(mags * freq_bins[None, :], axis=1) / mag_sum[:, 0]).astype(np.float32)
+    low_cutoff_bin = int(round(1500.0 / (sample_rate / 2.0) * (n_fft_bins - 1)))
+    low_cutoff_bin = max(1, min(n_fft_bins - 1, low_cutoff_bin))
+    low_band_ratio = (np.sum(mags[:, :low_cutoff_bin], axis=1) / mag_sum[:, 0]).astype(np.float32)
+    # Mid band (800-3000Hz): vowels keep strong F2/F3 energy here while nasal
+    # murmur / liquid constrictions attenuate it, so its delta marks V<->sonorant
+    # boundaries that total energy misses.
+    mid_lo_bin = int(round(800.0 / (sample_rate / 2.0) * (n_fft_bins - 1)))
+    mid_hi_bin = int(round(3000.0 / (sample_rate / 2.0) * (n_fft_bins - 1)))
+    mid_lo_bin = max(1, min(n_fft_bins - 2, mid_lo_bin))
+    mid_hi_bin = max(mid_lo_bin + 1, min(n_fft_bins - 1, mid_hi_bin))
+    mid_band_ratio = (np.sum(mags[:, mid_lo_bin:mid_hi_bin], axis=1) / mag_sum[:, 0]).astype(np.float32)
     times_ms = (np.arange(frame_count, dtype=np.float32) * float(hop) * 1000.0) / float(sample_rate)
-    return (
-        times_ms,
-        np.asarray(rms_values, dtype=np.float32),
-        np.asarray(flux_values, dtype=np.float32),
-    )
+    return times_ms, rms.astype(np.float32), flux, spectral_centroid, low_band_ratio, mid_band_ratio
 
 
 def acoustic_frame_features(

@@ -8,7 +8,7 @@ from typing import Iterable, Sequence
 
 from core.model_context.filename import filename_syllable_order_tokens
 
-from .kana import parse_kana_slots
+from .kana import parse_kana_slots, phones_to_kana
 from .manifest_audit import infer_filename_phone_sequence
 from .oto_adapter import OtoTemplateRow, OtoTiming
 from .types import is_vowel_phone
@@ -17,6 +17,8 @@ from .types import is_vowel_phone
 ROW_PLAN_SCHEMA_VERSION = 1
 
 _IGNORE_TOKENS = {"", "sil", "pau", "sp", "ap", "br", "bre", "breath", "endbr"}
+# Standalone sung coda segments in Korean VCV reclists (N'bui'L'bui'...).
+_KOREAN_STANDALONE_CODA_TOKENS = {"n", "m", "l", "ng"}
 _CONSONANT_CLUSTERS = (
     "ng",
     "sh",
@@ -125,7 +127,23 @@ def build_filename_slots(
         kana_phone_slots = parse_kana_slots(stem)
         if kana_phone_slots:
             return _slots_from_kana_phone_slots(wav, kana_phone_slots)
-    tokens = filename_syllable_order_tokens(wav, language=language)
+    if _is_korean_language(language):
+        # Korean VCV banks commonly concatenate romanized syllables without
+        # apostrophes (``gagageo...``) and mix those chains with ``+`` groups.
+        # The generic order tokenizer sees each chain as one oversized token,
+        # which collapses an 8-syllable row plan into one slot and moves OTO
+        # anchors by several seconds. Reuse the alignment filename segmenter so
+        # lab generation and MFA-free timing agree on the syllable sequence.
+        from core.alignment.lab_generator import split_korean_filename_tokens
+
+        generic_tokens = filename_syllable_order_tokens(wav, language=language)
+        segmented_tokens = split_korean_filename_tokens(wav, normalize_roman_case=True)
+        # Keep the established tokenizer for already-delimited filenames and
+        # test/runtime overrides.  The Korean segmenter is only authoritative
+        # when it actually recovers additional syllable slots.
+        tokens = segmented_tokens if len(segmented_tokens) > len(generic_tokens) else generic_tokens
+    else:
+        tokens = filename_syllable_order_tokens(wav, language=language)
     if not tokens:
         return _slots_from_phone_sequence(wav, infer_filename_phone_sequence(wav), language=language)
 
@@ -136,6 +154,28 @@ def build_filename_slots(
         if token in _IGNORE_TOKENS:
             continue
         parsed = _split_syllable_token(token, language=language, format_type=format_type)
+        if parsed is None and token in _KOREAN_STANDALONE_CODA_TOKENS and str(language or "").strip().lower().startswith("ko"):
+            # DiKOR-style reclists record standalone coda sonorants (N'bui'L'...)
+            # as their own sung segments. Dropping them (no vowel -> no slot)
+            # leaves the decoder with half the real segment count and shifts
+            # every boundary late. Model them as syllabic-sonorant slots.
+            slots.append(
+                FilenameSlot(
+                    wav=wav,
+                    slot_index=len(slots),
+                    token=token,
+                    onset="",
+                    vowel=token,
+                    onset_phones=(),
+                    vowel_phone=token,
+                    coda_phones=(),
+                    phone_start_index=phone_index,
+                    vowel_phone_index=phone_index,
+                    warnings=("standalone_coda_slot",),
+                )
+            )
+            phone_index += 1
+            continue
         if parsed is None:
             fallback = infer_filename_phone_sequence(token)
             if fallback:
@@ -231,6 +271,10 @@ def build_filename_row_plan(
     fmt = str(format_type or "").strip().lower()
     if fmt == "vcv":
         return _build_vcv_filename_row_plan(slots)
+    if _is_japanese_language(language) and fmt in {"cvvc", "cv-vc"}:
+        return _build_ja_cvvc_filename_row_plan(slots)
+    if _is_korean_language(language) and fmt in {"cvc", "cvvc", "cv-vc"}:
+        return _build_ko_cvc_filename_row_plan(slots)
     transitions = _format_supports_transitions(fmt) if include_transitions is None else bool(include_transitions)
     records: list[RowPlanRecord] = []
     for position, slot in enumerate(slots):
@@ -308,6 +352,332 @@ def build_filename_row_plan(
                 warnings=tuple(dict.fromkeys((*slot.warnings, *next_slot.warnings))),
             )
     return tuple(records)
+
+
+def _build_ja_cvvc_filename_row_plan(slots: Sequence[FilenameSlot]) -> tuple[RowPlanRecord, ...]:
+    """Japanese CVVC row plan: HEAD + (VC, CV)* + TAIL pattern."""
+    records: list[RowPlanRecord] = []
+    first = slots[0]
+
+    # HEAD: "- {first_vowel}" or "- {onset}{vowel}" for CV-initial
+    head_alias = f"- {first.vowel}" if not first.onset else f"- {_kana_alias_for_slot(first)}"
+    _append_record(
+        records,
+        wav=first.wav,
+        alias=head_alias,
+        role_family="cv_head",
+        slot_index=first.slot_index,
+        left_slot_index=first.slot_index,
+        right_slot_index=first.slot_index,
+        expected_tokens=("-", *(first.onset_phones if first.onset else ()), first.vowel),
+        expected_phone_indices=tuple(range(first.phone_start_index, first.vowel_phone_index + 1)),
+        warnings=first.warnings,
+    )
+
+    # CV for the first slot (hiragana)
+    _append_record(
+        records,
+        wav=first.wav,
+        alias=_kana_alias_for_slot(first),
+        role_family="cv" if first.onset else "v",
+        slot_index=first.slot_index,
+        left_slot_index=first.slot_index,
+        right_slot_index=first.slot_index,
+        expected_tokens=(*(first.onset_phones if first.onset else ()), first.vowel),
+        expected_phone_indices=tuple(range(first.phone_start_index, first.vowel_phone_index + 1)),
+        warnings=first.warnings,
+    )
+
+    for position in range(len(slots) - 1):
+        slot = slots[position]
+        next_slot = slots[position + 1]
+
+        # VC: "{prev_vowel} {next_onset}" or VV: "{prev_vowel} {next_vowel}"
+        if next_slot.onset:
+            vc_onset = _ja_vc_onset(next_slot.onset, next_slot.onset_phones)
+            _append_record(
+                records,
+                wav=slot.wav,
+                alias=f"{slot.vowel} {vc_onset}",
+                role_family="vc",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=next_slot.slot_index,
+                expected_tokens=(slot.vowel, next_slot.onset),
+                expected_phone_indices=(
+                    slot.vowel_phone_index,
+                    *range(next_slot.phone_start_index, next_slot.vowel_phone_index),
+                ),
+                warnings=tuple(dict.fromkeys((*slot.warnings, *next_slot.warnings))),
+            )
+        else:
+            _append_record(
+                records,
+                wav=slot.wav,
+                alias=f"{slot.vowel} {next_slot.vowel}",
+                role_family="vv",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=next_slot.slot_index,
+                expected_tokens=(slot.vowel, next_slot.vowel),
+                expected_phone_indices=(slot.vowel_phone_index, next_slot.vowel_phone_index),
+                warnings=tuple(dict.fromkeys((*slot.warnings, *next_slot.warnings))),
+            )
+
+        # CV for next slot (hiragana)
+        _append_record(
+            records,
+            wav=next_slot.wav,
+            alias=_kana_alias_for_slot(next_slot),
+            role_family="cv" if next_slot.onset else "v",
+            slot_index=next_slot.slot_index,
+            left_slot_index=next_slot.slot_index,
+            right_slot_index=next_slot.slot_index,
+            expected_tokens=(*(next_slot.onset_phones if next_slot.onset else ()), next_slot.vowel),
+            expected_phone_indices=tuple(range(next_slot.phone_start_index, next_slot.vowel_phone_index + 1)),
+            warnings=next_slot.warnings,
+        )
+
+    # TAIL: "{last_vowel} R"
+    last = slots[-1]
+    _append_record(
+        records,
+        wav=last.wav,
+        alias=f"{last.vowel} R",
+        role_family="vc_tail",
+        slot_index=last.slot_index,
+        left_slot_index=last.slot_index,
+        right_slot_index=last.slot_index,
+        expected_tokens=(last.vowel, "R"),
+        expected_phone_indices=(last.vowel_phone_index,),
+        warnings=last.warnings,
+    )
+
+    return tuple(records)
+
+
+def _kana_alias_for_slot(slot: FilenameSlot) -> str:
+    """Get hiragana alias for a slot, falling back to romaji token."""
+    all_phones = (*slot.onset_phones, slot.vowel_phone)
+    kana = phones_to_kana(all_phones)
+    if kana and kana != "".join(all_phones):
+        return kana
+    return slot.token
+
+
+_JA_VC_ONSET_CONSONANTS = {
+    "k", "g", "s", "sh", "z", "j", "t", "ch", "ts", "d",
+    "n", "h", "f", "b", "p", "m", "y", "r", "w", "v",
+    "ky", "gy", "ny", "hy", "by", "py", "my", "ry", "dy", "ty",
+    "kw", "gw", "ng",
+}
+
+
+def _ja_vc_onset(onset: str, onset_phones: tuple[str, ...]) -> str:
+    """Get the VC-transition onset consonant for Japanese CVVC.
+
+    For geminates (っか = k,k,a), the VC uses a single consonant (k not kk).
+    For palatalized via y-glide (chy, shy), the standard cluster is used (ch, sh).
+    """
+    if len(onset_phones) >= 2 and onset_phones[0] == onset_phones[1]:
+        return onset_phones[0]
+    if onset in _JA_VC_ONSET_CONSONANTS:
+        return onset
+    if onset.endswith("y") and onset[:-1] in _JA_VC_ONSET_CONSONANTS:
+        return onset[:-1]
+    return onset
+
+
+def _build_ko_cvc_filename_row_plan(slots: Sequence[FilenameSlot]) -> tuple[RowPlanRecord, ...]:
+    """Korean CVC/CVVC row plan: HEAD + (VC-space, VC-compact, CV)* + TAIL."""
+    records: list[RowPlanRecord] = []
+    first = slots[0]
+    seen_vc: set[str] = set()
+
+    first_token = f"{first.onset}{first.vowel}" if first.onset else first.vowel
+
+    # HEAD: "- {CV}" and "-{CV}"
+    for head_alias in (f"- {first_token}", f"-{first_token}"):
+        _append_record(
+            records,
+            wav=first.wav,
+            alias=head_alias,
+            role_family="cv_head",
+            slot_index=first.slot_index,
+            left_slot_index=first.slot_index,
+            right_slot_index=first.slot_index,
+            expected_tokens=("-", *(first.onset_phones if first.onset else ()), first.vowel),
+            expected_phone_indices=tuple(range(first.phone_start_index, first.vowel_phone_index + 1)),
+            warnings=first.warnings,
+        )
+
+    if first.onset:
+        _append_record(
+            records,
+            wav=first.wav,
+            alias=first_token,
+            role_family="cv",
+            slot_index=first.slot_index,
+            left_slot_index=first.slot_index,
+            right_slot_index=first.slot_index,
+            expected_tokens=(*first.onset_phones, first.vowel),
+            expected_phone_indices=tuple(range(first.phone_start_index, first.vowel_phone_index + 1)),
+            warnings=first.warnings,
+        )
+
+    def _emit_vc_pair(alias_space: str, alias_compact: str, **kwargs: object) -> None:
+        for alias in (alias_space, alias_compact):
+            if alias in seen_vc:
+                continue
+            seen_vc.add(alias)
+            _append_record(records, alias=alias, **kwargs)
+
+    for position in range(len(slots) - 1):
+        slot = slots[position]
+        next_slot = slots[position + 1]
+        out_vowel = _ko_vc_vowel(slot.vowel)
+
+        # Coda VC from current slot
+        if slot.coda_phones:
+            coda_str = "".join(slot.coda_phones)
+            _emit_vc_pair(
+                f"{out_vowel} {coda_str}",
+                f"{out_vowel}{coda_str}",
+                wav=slot.wav,
+                role_family="vc",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=slot.slot_index,
+                expected_tokens=(slot.vowel, *slot.coda_phones),
+                expected_phone_indices=tuple(
+                    range(slot.vowel_phone_index, slot.vowel_phone_index + 1 + len(slot.coda_phones))
+                ),
+                warnings=slot.warnings,
+            )
+
+        # VC transition to next slot
+        full_onset = _ko_full_vc_onset(next_slot.onset, next_slot.vowel)
+        if full_onset:
+            _emit_vc_pair(
+                f"{out_vowel} {full_onset}",
+                f"{out_vowel}{full_onset}",
+                wav=slot.wav,
+                role_family="vc",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=next_slot.slot_index,
+                expected_tokens=(slot.vowel, next_slot.onset),
+                expected_phone_indices=(
+                    slot.vowel_phone_index,
+                    *range(next_slot.phone_start_index, next_slot.vowel_phone_index),
+                ),
+                warnings=tuple(dict.fromkeys((*slot.warnings, *next_slot.warnings))),
+            )
+            # CV for next slot
+            next_token = f"{next_slot.onset}{next_slot.vowel}"
+            _append_record(
+                records,
+                wav=next_slot.wav,
+                alias=next_token,
+                role_family="cv",
+                slot_index=next_slot.slot_index,
+                left_slot_index=next_slot.slot_index,
+                right_slot_index=next_slot.slot_index,
+                expected_tokens=(*next_slot.onset_phones, next_slot.vowel),
+                expected_phone_indices=tuple(range(next_slot.phone_start_index, next_slot.vowel_phone_index + 1)),
+                warnings=next_slot.warnings,
+            )
+        elif not next_slot.onset and not next_slot.coda_phones:
+            _append_record(
+                records,
+                wav=slot.wav,
+                alias=f"{out_vowel} {next_slot.vowel}",
+                role_family="vv",
+                slot_index=slot.slot_index,
+                left_slot_index=slot.slot_index,
+                right_slot_index=next_slot.slot_index,
+                expected_tokens=(slot.vowel, next_slot.vowel),
+                expected_phone_indices=(slot.vowel_phone_index, next_slot.vowel_phone_index),
+                warnings=tuple(dict.fromkeys((*slot.warnings, *next_slot.warnings))),
+            )
+
+    # Last slot coda
+    last = slots[-1]
+    if last.coda_phones:
+        out_vowel = _ko_vc_vowel(last.vowel)
+        coda_str = "".join(last.coda_phones)
+        _emit_vc_pair(
+            f"{out_vowel} {coda_str}",
+            f"{out_vowel}{coda_str}",
+            wav=last.wav,
+            role_family="vc",
+            slot_index=last.slot_index,
+            left_slot_index=last.slot_index,
+            right_slot_index=last.slot_index,
+            expected_tokens=(last.vowel, *last.coda_phones),
+            expected_phone_indices=tuple(
+                range(last.vowel_phone_index, last.vowel_phone_index + 1 + len(last.coda_phones))
+            ),
+            warnings=last.warnings,
+        )
+
+    # TAIL
+    tail_vowel = _ko_vc_vowel(last.vowel)
+    _append_record(
+        records,
+        wav=last.wav,
+        alias=f"{tail_vowel} R",
+        role_family="vc_tail",
+        slot_index=last.slot_index,
+        left_slot_index=last.slot_index,
+        right_slot_index=last.slot_index,
+        expected_tokens=(last.vowel, "R"),
+        expected_phone_indices=(last.vowel_phone_index,),
+        warnings=last.warnings,
+    )
+
+    return tuple(records)
+
+
+_KO_FORTIS_TO_BASE = {"bb": "b", "dd": "d", "gg": "g", "ss": "s", "jj": "j"}
+_KO_GLIDE_VOWELS = {
+    "ya": ("y", "a"), "yae": ("y", "ae"), "ye": ("y", "e"),
+    "yo": ("y", "o"), "yu": ("y", "u"), "yeo": ("y", "eo"),
+    "wa": ("w", "a"), "wae": ("w", "ae"), "we": ("w", "e"),
+    "wi": ("w", "i"), "wo": ("w", "o"), "weo": ("w", "eo"),
+}
+
+
+def _ko_vc_onset(onset: str) -> str:
+    """Normalize Korean onset for VC transition alias.
+
+    Fortis doubled consonants are reduced to single (bb→b, dd→d, gg→g, ss→s, jj→j).
+    Aspirated nasals (mh, nh, ngh) use the plain base.
+    """
+    if onset in _KO_FORTIS_TO_BASE:
+        return _KO_FORTIS_TO_BASE[onset]
+    if onset.endswith("h") and onset[:-1] in ("m", "n", "ng"):
+        return onset[:-1]
+    return onset
+
+
+def _ko_vc_vowel(vowel: str) -> str:
+    """Extract the nucleus from a Korean compound vowel (strip y/w glide)."""
+    if vowel in _KO_GLIDE_VOWELS:
+        return _KO_GLIDE_VOWELS[vowel][1]
+    return vowel
+
+
+def _ko_full_vc_onset(onset: str, next_vowel: str) -> str:
+    """Build the full VC onset including glide from next slot's compound vowel.
+
+    e.g., onset='b' + vowel='ya' → 'by'; onset='' + vowel='wae' → 'w'
+    Normalization is applied to the consonant BEFORE adding the glide.
+    """
+    glide = _KO_GLIDE_VOWELS.get(next_vowel, ("", ""))[0]
+    normalized = _ko_vc_onset(onset) if onset else ""
+    raw = f"{normalized}{glide}" if normalized or glide else ""
+    return raw
 
 
 def _build_vcv_filename_row_plan(slots: Sequence[FilenameSlot]) -> tuple[RowPlanRecord, ...]:

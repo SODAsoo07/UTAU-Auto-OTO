@@ -17,7 +17,58 @@ from .types import FramePosterior
 
 
 HSMM_ADAPTER_SCHEMA_VERSION = 1
-_SONORANT_PHONES = frozenset({"m", "n", "ng", "ny", "r", "l", "w", "y", "j"})
+_SONORANT_PHONES = frozenset({"m", "n", "ng", "ny", "r", "l", "w", "y"})
+
+# Local-margin diagnostics compare the decoded segment against the best segment
+# near the selected position.  The search must stay windowed: in multi-mora
+# recordings the same phone occurs several times, and an unwindowed search makes
+# every repeated state compete with its best occurrence anywhere in the file,
+# driving the margin negative even for correct boundaries.
+LOCAL_MARGIN_SEARCH_WINDOW_MS = 250.0
+
+# Leading breath handling: a pre-utterance breath is non-silent but unvoiced,
+# so silence-based onset detection mistakes it for the first syllable and the
+# decoded chain latches on one syllable early.  Frames more than the allowance
+# before the first sustained voiced onset are treated as breath; the allowance
+# leaves room for the first syllable's own unvoiced onset consonant
+# (longest Korean onsets kk/tt/pp/ss ~135ms).
+LEADING_BREATH_ONSET_ALLOWANCE_MS = 200.0
+LEADING_BREATH_SCORE_SCALE = 0.25
+# A file-wide best segment that beats the selected one by more than this margin
+# *and* lies outside the local window suggests the state may have been decoded
+# at the wrong occurrence of the phone.  Calibrated on DiKORvcv_8-10mora
+# (2026-07-14): -0.12 flagged 36% of rows (repeated-phone competition noise);
+# -0.25 flags ~5% concentrated on genuinely suspicious placements.
+WRONG_OCCURRENCE_MARGIN_THRESHOLD = -0.25
+
+# Korean onset consonant mode durations (ms) derived from GT OTO preutterance
+# across 12 voicebanks.  Grouped by phonetic class:
+#   plain stops / affricates → short
+#   tense (doubled) → medium-short
+#   aspirated → medium-long
+#   fricatives → long
+_KO_ONSET_MODE_MS: dict[str, float] = {
+    # plain obstruents
+    "g": 49.0, "d": 43.0, "b": 39.0, "j": 63.0,
+    # tense (fortis)
+    "gg": 55.0, "dd": 50.0, "bb": 43.0, "jj": 76.0, "ss": 128.0,
+    # aspirated
+    "k": 85.0, "t": 71.0, "p": 71.0, "ch": 85.0, "h": 79.0,
+    # strong tense
+    "kk": 135.0, "tt": 128.0, "pp": 134.0,
+    # sonorants
+    "n": 44.0, "m": 54.0, "ng": 83.0, "r": 43.0, "l": 48.0,
+    # fricatives
+    "s": 101.0, "sh": 128.0,
+    # rare
+    "z": 50.0, "zz": 68.0,
+}
+
+_KO_CODA_MODE_MS: dict[str, float] = {
+    "n": 45.0, "m": 50.0, "ng": 55.0, "l": 50.0,
+    "k": 30.0, "t": 25.0, "p": 30.0,
+    "g": 35.0, "d": 30.0, "b": 30.0,
+}
 
 
 @dataclass(frozen=True)
@@ -39,30 +90,39 @@ def build_hsmm_states_for_slots(
     slots: Sequence[FilenameSlot],
     *,
     duration_ms: float = 0.0,
+    active_duration_ms: float = 0.0,
     enable_sonorant_hold: bool = False,
+    language: str = "",
 ) -> tuple[HSMMStateSpec, ...]:
     if not slots:
         return ()
+    korean = _is_korean_language(language)
     state_count = sum(
         1 + _onset_state_count(slot.onset_phones, enable_sonorant_hold=enable_sonorant_hold)
+        + (1 if korean and slot.coda_phones else 0)
         for slot in slots
     )
     base_duration = float(duration_ms or 0.0) / float(max(1, state_count)) if duration_ms > 0.0 else 90.0
+    active_base = float(active_duration_ms or 0.0) / float(max(1, state_count)) if active_duration_ms > 0.0 else base_duration
     states: list[HSMMStateSpec] = []
     for slot in slots:
         sonorant_onset = bool(enable_sonorant_hold) and _phones_include_sonorant(slot.onset_phones)
         if slot.onset_phones:
-            cons_mode = _clamp(
-                base_duration * (0.48 if sonorant_onset else 0.65),
-                22.0 if sonorant_onset else 28.0,
-                95.0,
-            )
+            if korean:
+                cons_mode = _ko_onset_mode_for_phones(slot.onset_phones, base_duration)
+            else:
+                cons_mode = _clamp(
+                    base_duration * (0.48 if sonorant_onset else 0.65),
+                    22.0 if sonorant_onset else 28.0,
+                    95.0,
+                )
+            ko_long_onset = korean and cons_mode > 95.0
             states.append(
                 HSMMStateSpec(
                     state_id=_state_id(slot, "onset"),
                     state_type="consonant",
                     min_duration_ms=max(8.0, min(24.0, cons_mode * 0.45)),
-                    max_duration_ms=max(48.0, min(240.0, cons_mode * 2.8)),
+                    max_duration_ms=max(48.0, min(320.0 if ko_long_onset else 240.0, cons_mode * 2.8)),
                     mode_duration_ms=cons_mode,
                     duration_sigma_ms=max(12.0, cons_mode * 0.55),
                 )
@@ -80,7 +140,8 @@ def build_hsmm_states_for_slots(
                     )
                 )
         vowel_scale = 1.12 if sonorant_onset else (1.20 if slot.onset_phones else 1.55)
-        vowel_mode = _clamp(base_duration * vowel_scale, 48.0, 240.0)
+        vowel_mode_cap = max(240.0, min(550.0, active_base * 0.80))
+        vowel_mode = _clamp(base_duration * vowel_scale, 48.0, vowel_mode_cap)
         states.append(
             HSMMStateSpec(
                 state_id=_state_id(slot, "vowel"),
@@ -89,14 +150,21 @@ def build_hsmm_states_for_slots(
                 max_duration_ms=max(80.0, min(900.0, vowel_mode * 3.4)),
                 mode_duration_ms=vowel_mode,
                 duration_sigma_ms=max(20.0, vowel_mode * 0.62),
-                # Held vowels routinely run far longer than the nominal mode.
-                # Penalising the over-length side symmetrically caused the vowel
-                # segment to be trimmed from the front, pushing the C->V boundary
-                # (the OTO offset anchor) late. Keep the over-length penalty weak
-                # so the vowel locks to its acoustic onset and only the tail moves.
                 over_duration_penalty_scale=0.12,
             )
         )
+        if korean and slot.coda_phones:
+            coda_mode = _ko_coda_mode_for_phones(slot.coda_phones, base_duration)
+            states.append(
+                HSMMStateSpec(
+                    state_id=_state_id(slot, "coda"),
+                    state_type="consonant",
+                    min_duration_ms=max(8.0, min(18.0, coda_mode * 0.40)),
+                    max_duration_ms=max(40.0, min(180.0, coda_mode * 2.5)),
+                    mode_duration_ms=coda_mode,
+                    duration_sigma_ms=max(10.0, coda_mode * 0.50),
+                )
+            )
     return tuple(states)
 
 
@@ -142,26 +210,79 @@ def build_hsmm_frame_scores(
         keys=("nucleus_likelihood", "world_nucleus", "vowel_nucleus"),
     )
     active = np.clip(1.0 - silence, 0.0, 1.0)
+    low_band = _first_track(frame_count, posterior.acoustic_scores, keys=("low_band_ratio",))
+    centroid = _first_track(frame_count, posterior.acoustic_scores, keys=("spectral_centroid",))
+    has_spectral = bool(np.any(low_band))
     consonant_score = np.clip(
         (0.44 * consonant) + (0.24 * transition) + (0.18 * onset) + (0.14 * active),
         0.0,
         1.0,
     )
-    sonorant_consonant_score = np.clip(
-        (0.34 * onset) + (0.24 * transition) + (0.22 * voicing) + (0.20 * active),
-        0.0,
-        1.0,
+    # Band-balance boundary evidence (V<->nasal/liquid swings inside voiced
+    # regions) sharpens sonorant onset states whose energy/flux cues are flat.
+    murmur_boundary = _first_track(
+        frame_count, posterior.acoustic_scores, keys=("sonorant_boundary_likelihood",)
     )
-    sonorant_hold_score = np.clip(
-        (0.30 * voicing) + (0.26 * active) + (0.22 * consonant) + (0.22 * (1.0 - transition)),
-        0.0,
-        1.0,
-    )
+    if np.any(murmur_boundary):
+        sonorant_consonant_score = np.clip(
+            (0.28 * onset) + (0.20 * transition) + (0.20 * voicing) + (0.18 * active)
+            + (0.14 * murmur_boundary),
+            0.0,
+            1.0,
+        )
+    else:
+        # Track unavailable (non-WORLD encoders / legacy posteriors): keep the
+        # original weight budget so scores are not uniformly deflated.
+        sonorant_consonant_score = np.clip(
+            (0.34 * onset) + (0.24 * transition) + (0.22 * voicing) + (0.20 * active),
+            0.0,
+            1.0,
+        )
+    if has_spectral:
+        nasal_indicator = np.clip(low_band * voicing * (1.0 - centroid), 0.0, 1.0)
+        nasal_track = _first_track(
+            frame_count, posterior.acoustic_scores, keys=("nasal_murmur_likelihood",)
+        )
+        if np.any(nasal_track):
+            nasal_indicator = np.maximum(nasal_indicator, nasal_track)
+        sonorant_hold_score = np.clip(
+            (0.24 * voicing) + (0.22 * active) + (0.18 * consonant)
+            + (0.18 * (1.0 - transition)) + (0.18 * nasal_indicator),
+            0.0,
+            1.0,
+        )
+    else:
+        sonorant_hold_score = np.clip(
+            (0.30 * voicing) + (0.26 * active) + (0.22 * consonant) + (0.22 * (1.0 - transition)),
+            0.0,
+            1.0,
+        )
     vowel_score = np.clip(
         (0.50 * vowel) + (0.22 * voicing) + (0.18 * nucleus) + (0.10 * active),
         0.0,
         1.0,
     )
+
+    # Leading-breath demotion: frames that are non-silent but lie well before
+    # the first sustained voiced onset are breath noise, not the first
+    # syllable's onset consonant. Left attractive (breath scores like a
+    # consonant via the active/onset/transition terms), they pull the whole
+    # decoded chain one syllable early.
+    voiced_onset_ms = _first_sustained_voiced_onset_ms(posterior, times)
+    if voiced_onset_ms > 0.0:
+        breath_end_ms = voiced_onset_ms - float(LEADING_BREATH_ONSET_ALLOWANCE_MS)
+        if breath_end_ms > 0.0:
+            breath_mask = (times < breath_end_ms) & (active > 0.5)
+            if np.any(breath_mask):
+                demote = np.where(
+                    breath_mask,
+                    np.float32(LEADING_BREATH_SCORE_SCALE),
+                    np.float32(1.0),
+                )
+                consonant_score = consonant_score * demote
+                sonorant_consonant_score = sonorant_consonant_score * demote
+                sonorant_hold_score = sonorant_hold_score * demote
+                vowel_score = vowel_score * demote
 
     out: dict[str, tuple[float, ...]] = {}
     duration = _posterior_duration_ms(times)
@@ -176,10 +297,15 @@ def build_hsmm_frame_scores(
         for slot in slots
         if slot.onset_phones and _phones_include_sonorant(slot.onset_phones)
     }
+    sonorant_coda_state_ids = {
+        _state_id(slot, "coda")
+        for slot in slots
+        if slot.coda_phones and _phones_include_sonorant(slot.coda_phones)
+    }
     for order, state in enumerate(states):
         if state.state_type == "consonant" and state.state_id in sonorant_onset_state_ids:
             base = sonorant_consonant_score
-        elif state.state_type == "consonant" and state.state_id in sonorant_hold_state_ids:
+        elif state.state_type == "consonant" and state.state_id in (sonorant_hold_state_ids | sonorant_coda_state_ids):
             base = sonorant_hold_score
         else:
             base = consonant_score if state.state_type == "consonant" else vowel_score
@@ -341,6 +467,57 @@ _EVENT_SNAP_TRACK_KEYS = {
 }
 
 
+_UNVOICED_CODA_SNAP_PHONES = frozenset({"p", "t", "k", "h", "ch", "s", "ss"})
+_NASAL_CODA_SNAP_PHONES = frozenset({"n", "m", "ng", "l"})
+_CODA_SNAP_WINDOW_MS = 420.0
+
+
+def _snap_coda_boundary_ms(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    cur_time: float,
+    lower: float,
+    upper: float,
+    phone: str,
+) -> float | None:
+    """Snap a coda phone_change to its acoustic boundary.
+
+    The decoded coda state start rides the duration prior and lands a median
+    ~290ms inside the final vowel. For unvoiced codas the true boundary is the
+    voicing falling edge; for nasal/liquid codas it is the band-balance swing.
+    """
+    frame_count = int(times.size)
+    lo = max(float(cur_time) - _CODA_SNAP_WINDOW_MS, float(lower))
+    hi = min(float(cur_time) + _CODA_SNAP_WINDOW_MS, float(upper))
+    mask = (times >= lo) & (times <= hi)
+    if not np.any(mask):
+        return None
+    idxs = np.flatnonzero(mask)
+    if phone in _NASAL_CODA_SNAP_PHONES:
+        track = _first_track(frame_count, posterior.acoustic_scores, keys=("sonorant_boundary_likelihood",))
+        if not np.any(track):
+            return None
+        peak = idxs[int(np.argmax(track[idxs]))]
+        if float(track[peak]) < 0.30:
+            return None
+        return float(times[peak])
+    voicing = _first_track(frame_count, posterior.acoustic_scores, keys=("voicing", "world_voicing"))
+    if not np.any(voicing):
+        return None
+    voiced = voicing >= 0.5
+    best: int | None = None
+    for j in idxs:
+        if not voiced[j]:
+            continue
+        k0 = j + 1
+        k1 = min(frame_count, j + 1 + 8)
+        if k1 > k0 and float(np.mean(voiced[k0:k1])) < 0.3:
+            best = int(j)
+    if best is None:
+        return None
+    return float(times[min(best + 1, frame_count - 1)])
+
+
 def _snap_events_to_posterior_tracks(
     events: Sequence[Mapping[str, object]],
     posterior: FramePosterior,
@@ -382,7 +559,17 @@ def _snap_events_to_posterior_tracks(
         )
         lower = prev_time + _EVENT_SNAP_MIN_GAP_MS
         upper = next_time - _EVENT_SNAP_MIN_GAP_MS
-        if track is not None and upper > lower:
+        snapped_by_coda = False
+        if label == "phone_change" and str(event.get("segment_role", "")) == "coda" and upper > lower:
+            phone = str(event.get("expected_phone", "") or "").strip().lower()
+            if phone in _UNVOICED_CODA_SNAP_PHONES or phone in _NASAL_CODA_SNAP_PHONES:
+                coda_time = _snap_coda_boundary_ms(posterior, times, cur_time, lower, upper, phone)
+                if coda_time is not None and lower <= coda_time <= upper:
+                    event["selected_time_ms"] = coda_time
+                    event["frame_index"] = int(min(int(np.searchsorted(times, coda_time)), frame_count - 1))
+                    cur_time = coda_time
+                    snapped_by_coda = True
+        if not snapped_by_coda and track is not None and upper > lower:
             lo = max(cur_time - window_ms, lower)
             hi = min(cur_time + window_ms, upper)
             mask = (times >= lo) & (times <= hi)
@@ -492,6 +679,10 @@ def _structured_vowel_onset_event_priors(
 
     covered: set[tuple[str, int]] = set()
     for event in existing_priors:
+        # The weak template-grid prior must not suppress structured onsets
+        # (score 0.9) — both regularisers should coexist per slot.
+        if str(event.get("source", "")) == "template_grid":
+            continue
         label = str(event.get("label", ""))
         if label in ("cv_boundary", "vv_boundary"):
             idx = _int_or_none(event.get("expected_phone_index"))
@@ -554,10 +745,13 @@ def decode_filename_slots_with_hsmm(
     # edge) matters for every language, not just Korean — otherwise long held
     # vowels drift the C->V boundary late. Default it on across the board.
     vowel_start_enabled = True if use_vowel_start_score is None else bool(use_vowel_start_score)
+    active_dur = _active_duration_ms(posterior, np.asarray(times, dtype=np.float32), duration)
     states = build_hsmm_states_for_slots(
         slots,
         duration_ms=duration,
+        active_duration_ms=active_dur,
         enable_sonorant_hold=sonorant_hold_enabled,
+        language=language,
     )
     state_interval_priors = build_state_interval_priors_for_slots(
         posterior,
@@ -578,7 +772,10 @@ def decode_filename_slots_with_hsmm(
     # shifts the whole sequence early -> wrong pronunciation. Allow the leading gap
     # up to the acoustic onset (where the recording stops being silent), bounded so
     # it never skips real voiced content.
-    max_leading_gap = _resolve_max_leading_gap_ms(posterior, np.asarray(times, dtype=np.float32), duration, len(states))
+    times_arr = np.asarray(times, dtype=np.float32)
+    max_leading_gap = _resolve_max_leading_gap_ms(posterior, times_arr, duration, len(states))
+    max_trailing_gap = _resolve_max_trailing_gap_ms(posterior, times_arr, duration, len(states))
+    trailing_penalty = 0.00005 if active_dur < duration * 0.70 else 0.00002
     decode_kwargs = {
         "beam_width_per_state": beam_width_per_state,
         "timeout_ms": timeout_ms,
@@ -586,7 +783,7 @@ def decode_filename_slots_with_hsmm(
         "allow_trailing_gap": True,
         "leading_gap_penalty_per_ms": 0.00005,
         "max_leading_gap_ms": max_leading_gap,
-        "trailing_gap_penalty_per_ms": 0.00002,
+        "trailing_gap_penalty_per_ms": trailing_penalty,
         "allow_internal_gaps": True,
         "internal_gap_penalty_per_ms": 0.0003,
         "max_internal_gap_ms": _max_internal_gap_ms(duration, len(states)),
@@ -667,6 +864,97 @@ def _acoustic_active_onset_ms(posterior: FramePosterior, times: np.ndarray) -> f
     return float(times[idx]) if idx < frame_count else 0.0
 
 
+def _first_sustained_voiced_onset_ms(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    *,
+    min_run_ms: float = 40.0,
+) -> float:
+    """First time (ms) a sustained voiced region begins.
+
+    Unlike :func:`_acoustic_active_onset_ms` this ignores non-silent but
+    unvoiced lead-ins (breath noise). Returns 0.0 when no sustained voicing
+    is found.
+    """
+    frame_count = int(times.size)
+    if frame_count == 0:
+        return 0.0
+    voicing = _first_track(frame_count, posterior.acoustic_scores, keys=("voicing", "world_voicing"))
+    vowel = _track(posterior.class_probs, "vowel", frame_count)
+    voiced = np.maximum(voicing, vowel) > 0.5
+    if not np.any(voiced):
+        return 0.0
+    diffs = np.diff(times.astype(np.float32))
+    positive = diffs[diffs > 0.0]
+    frame_ms = float(np.median(positive)) if positive.size else 5.0
+    min_run = max(1, int(round(float(min_run_ms) / max(0.001, frame_ms))))
+    run = 0
+    for idx in range(frame_count):
+        if voiced[idx]:
+            run += 1
+            if run >= min_run:
+                return float(times[idx - min_run + 1])
+        else:
+            run = 0
+    return 0.0
+
+
+def _acoustic_active_offset_ms(posterior: FramePosterior, times: np.ndarray) -> float:
+    """Last time (ms) the recording is still active (non-silent).
+
+    Scans backward from the end to find where silence drops below 0.5.
+    Returns 0.0 when no clear trailing silence is present.
+    """
+    frame_count = int(times.size)
+    if frame_count == 0:
+        return 0.0
+    silence = _track(posterior.class_probs, "silence", frame_count)
+    active = np.clip(1.0 - silence, 0.0, 1.0)
+    if not np.any(active > 0.5):
+        voicing = _first_track(
+            frame_count, posterior.acoustic_scores, keys=("voicing", "world_voicing")
+        )
+        vowel = _track(posterior.class_probs, "vowel", frame_count)
+        active = np.clip(np.maximum(voicing, vowel), 0.0, 1.0)
+        if not np.any(active > 0.5):
+            return 0.0
+    for i in range(frame_count - 1, -1, -1):
+        if float(active[i]) > 0.5:
+            return float(times[i])
+    return 0.0
+
+
+def _resolve_max_trailing_gap_ms(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    duration_ms: float,
+    state_count: int,
+) -> float:
+    base = _clamp(duration_ms * 0.20, 120.0, 600.0) if duration_ms > 0.0 else 300.0
+    if state_count <= 2 or duration_ms <= 0.0:
+        return base
+    offset_ms = _acoustic_active_offset_ms(posterior, times)
+    if offset_ms <= 0.0:
+        return base
+    trailing_silence = max(0.0, duration_ms - offset_ms)
+    return float(max(base, trailing_silence + 80.0))
+
+
+def _active_duration_ms(
+    posterior: FramePosterior,
+    times: np.ndarray,
+    total_duration_ms: float,
+) -> float:
+    """Duration of the active (non-silent) portion of the recording."""
+    onset = _acoustic_active_onset_ms(posterior, times)
+    offset = _acoustic_active_offset_ms(posterior, times)
+    if onset <= 0.0 and offset <= 0.0:
+        return total_duration_ms
+    if offset <= onset:
+        return total_duration_ms
+    return max(100.0, offset - onset)
+
+
 def _resolve_max_leading_gap_ms(
     posterior: FramePosterior,
     times: np.ndarray,
@@ -677,6 +965,12 @@ def _resolve_max_leading_gap_ms(
     if state_count <= 2 or duration_ms <= 0.0:
         return base
     onset_ms = _acoustic_active_onset_ms(posterior, times)
+    voiced_onset_ms = _first_sustained_voiced_onset_ms(posterior, times)
+    if voiced_onset_ms > onset_ms:
+        # The non-silent lead-in before the first sustained voicing is breath
+        # noise; capping the gap at the breath start forces the first state
+        # into the breath and shifts the whole chain one syllable early.
+        onset_ms = voiced_onset_ms
     if onset_ms <= 0.0:
         return base
     # Permit skipping the silent lead-in (plus a small margin) but never more than
@@ -723,6 +1017,20 @@ def build_hsmm_diagnostics(
             frame_shift_ms=frame_shift,
             selected_start_frame=start_frame,
             selected_end_frame=end_frame,
+            search_window_ms=LOCAL_MARGIN_SEARCH_WINDOW_MS,
+        )
+        global_best = _best_local_state_segments(
+            scores,
+            spec,
+            frame_shift_ms=frame_shift,
+            selected_start_frame=start_frame,
+            selected_end_frame=end_frame,
+        )
+        global_best_distance_ms = abs(int(global_best["best_start_frame"]) - start_frame) * frame_shift
+        selected_vs_global_best_margin = float(selected_total - float(global_best["best_total_score"]))
+        wrong_occurrence_risk = bool(
+            selected_vs_global_best_margin < WRONG_OCCURRENCE_MARGIN_THRESHOLD
+            and global_best_distance_ms > LOCAL_MARGIN_SEARCH_WINDOW_MS
         )
         prior = np.asarray((state_interval_priors or {}).get(decoded.state_id, ()), dtype=np.float32)
         prior_selected_mean = _segment_mean_array(prior, start_frame, min(end_frame, int(prior.size))) if prior.size else 0.0
@@ -740,6 +1048,12 @@ def build_hsmm_diagnostics(
                 "selected_vs_second_local_margin": float(selected_total - float(local["second_total_score"])),
                 "best_local_start_frame": int(local["best_start_frame"]),
                 "best_local_end_frame": int(local["best_end_frame"]),
+                "global_best_total_score": float(global_best["best_total_score"]),
+                "selected_vs_global_best_margin": selected_vs_global_best_margin,
+                "global_best_start_frame": int(global_best["best_start_frame"]),
+                "global_best_end_frame": int(global_best["best_end_frame"]),
+                "global_best_distance_ms": float(global_best_distance_ms),
+                "wrong_occurrence_risk": wrong_occurrence_risk,
                 "duration_mode_delta_ms": float(selected_duration_ms - float(spec.mode_duration_ms or 0.0)),
                 "duration_z_abs": float(abs(duration_z)),
                 "has_event_prior": bool(prior.size and np.any(prior > 0.0)),
@@ -754,6 +1068,8 @@ def build_hsmm_diagnostics(
         )
     selected_vs_best = [float(item["selected_vs_best_local_margin"]) for item in state_diagnostics]
     selected_vs_second = [float(item["selected_vs_second_local_margin"]) for item in state_diagnostics]
+    selected_vs_global = [float(item["selected_vs_global_best_margin"]) for item in state_diagnostics]
+    wrong_occurrence_count = sum(1 for item in state_diagnostics if bool(item["wrong_occurrence_risk"]))
     duration_z_values = [float(item["duration_z_abs"]) for item in state_diagnostics]
     source_counts = _string_int_counts(prior_summary.get("source_counts", {}))
     candidate_count = int(source_counts.get("evidence_candidate", 0))
@@ -773,6 +1089,8 @@ def build_hsmm_diagnostics(
         "event_prior_summary": prior_summary,
         "min_selected_vs_best_local_margin": float(min(selected_vs_best)) if selected_vs_best else 0.0,
         "min_selected_vs_second_local_margin": float(min(selected_vs_second)) if selected_vs_second else 0.0,
+        "min_selected_vs_global_best_margin": float(min(selected_vs_global)) if selected_vs_global else 0.0,
+        "wrong_occurrence_risk_state_count": int(wrong_occurrence_count),
         "max_duration_z_abs": float(max(duration_z_values)) if duration_z_values else 0.0,
         "states": tuple(state_diagnostics),
     }
@@ -821,6 +1139,134 @@ def summarize_hsmm_event_priors_for_slots(
         "label_counts": dict(sorted(label_counts.items())),
         "states": {key: _normalize_event_prior_state_summary(value) for key, value in sorted(states.items())},
     }
+
+
+# Guide-grid prior: RecStar recordings follow the reclist guide BGM, so the
+# real mora onsets sit on the template OTO's preutterance grid plus a per-file
+# constant shift (measured ~stable within a file). A weak prior on that grid
+# regularises files whose acoustic boundary evidence is poor (sonorant/vowel
+# chains) without overriding clear acoustics.
+TEMPLATE_GRID_PRIOR_SCORE = 0.35
+
+
+def template_grid_event_priors(
+    posterior: FramePosterior,
+    slots: Sequence[FilenameSlot],
+    guide_pre_ms: Sequence[float],
+) -> tuple[dict[str, object], ...]:
+    """Weak per-slot vowel-onset priors on the guide grid.
+
+    ``guide_pre_ms`` are the template OTO preutterance positions for this wav
+    (guide time). Template aliases are de-duplicated across the bank, so this
+    is only a *partial* grid — enough to estimate the mora spacing, but not
+    each mora position. The grid is therefore anchored at the first sustained
+    voiced onset (mora 0 vowel onset) and extended by the estimated spacing.
+    """
+    if not guide_pre_ms or not slots:
+        return ()
+    times = np.asarray(posterior.times_ms, dtype=np.float32)
+    if times.size == 0:
+        return ()
+    spacing = _template_mora_spacing_ms(guide_pre_ms)
+    if spacing is None:
+        return ()
+    voiced_onset = _first_sustained_voiced_onset_ms(posterior, times)
+    if voiced_onset <= 0.0:
+        return ()
+    duration = _posterior_duration_ms(times)
+    grid = [float(voiced_onset) + index * float(spacing) for index in range(len(slots))]
+    if grid[-1] > duration + 200.0:
+        return ()
+    out: list[dict[str, object]] = []
+    for slot, guide_ms in zip(slots, grid):
+        label = "cv_boundary" if slot.onset_phones else "vv_boundary"
+        out.append(
+            {
+                "label": label,
+                "time_ms": float(guide_ms),
+                "score": float(TEMPLATE_GRID_PRIOR_SCORE),
+                "expected_phone_index": int(slot.vowel_phone_index),
+                "slot_index": int(slot.slot_index),
+                "source": "template_grid",
+            }
+        )
+    return tuple(out)
+
+
+def _template_mora_spacing_ms(
+    guide_pre_ms: Sequence[float],
+    *,
+    min_spacing_ms: float = 250.0,
+    max_spacing_ms: float = 700.0,
+) -> float | None:
+    """Estimate the guide mora spacing from the wav's (partial) template grid.
+
+    Adjacent template rows may span multiple morae (deduplicated aliases), so
+    each gap is normalised by its nearest mora multiple before taking the
+    median.
+    """
+    pres: list[float] = []
+    for value in sorted(float(item) for item in guide_pre_ms):
+        if pres and value - pres[-1] < 100.0:
+            continue
+        pres.append(value)
+    if len(pres) < 3:
+        return None
+    diffs = [b - a for a, b in zip(pres, pres[1:]) if (b - a) > 1.0]
+    if not diffs:
+        return None
+    unit_candidates: list[float] = []
+    for diff in diffs:
+        for multiple in (1, 2, 3):
+            value = diff / multiple
+            if min_spacing_ms <= value <= max_spacing_ms:
+                unit_candidates.append(value)
+                break
+    if not unit_candidates:
+        return None
+    base = float(np.median(unit_candidates))
+    normalized = []
+    for diff in diffs:
+        multiple = max(1, int(round(diff / base)))
+        value = diff / multiple
+        if min_spacing_ms <= value <= max_spacing_ms:
+            normalized.append(value)
+    if not normalized:
+        return None
+    return float(np.median(normalized))
+
+
+def template_mora_pre_grid(template_rows: Sequence[object]) -> list[float]:
+    """Guide-time mora vowel-onset grid: pre_abs of head/transition rows.
+
+    Expects template rows WITH original timing (not alias-only rows, whose
+    timings are zeroed).
+    """
+    grid: list[float] = []
+    for row in template_rows:
+        alias = str(getattr(row, "alias", "") or "").strip()
+        timing = getattr(row, "timing", None)
+        if timing is None:
+            continue
+        parts = alias.split()
+        if len(parts) != 2:
+            continue
+        right = parts[1].strip()
+        if not right or right.upper() in {"R", "-", "BR"}:
+            continue
+        try:
+            pre_abs = float(timing.offset) + float(timing.preutterance)
+        except Exception:
+            continue
+        if np.isfinite(pre_abs) and pre_abs >= 0.0:
+            grid.append(pre_abs)
+    grid.sort()
+    merged: list[float] = []
+    for value in grid:
+        if merged and value - merged[-1] < 100.0:
+            continue
+        merged.append(value)
+    return merged
 
 
 def build_state_interval_priors_for_slots(
@@ -962,6 +1408,23 @@ def hsmm_result_to_slot_events(
                     frame_index=max(vowel_state.start_frame, min(vowel_state.end_frame - 1, int(round((vowel_state.start_frame + vowel_state.end_frame - 1) * 0.55)))),
                 )
             )
+            event_index += 1
+        coda_state = by_id.get(_state_id(slot, "coda"))
+        if coda_state is not None and slot.coda_phones:
+            # Trailing-coda rows (e.g. 'eo t' from deoT) expect a phone_change
+            # at the coda phone; without this event the sequence guard rejects
+            # an otherwise-correct decode and falls back to runtime events.
+            coda_event = _event(
+                label="phone_change",
+                time_ms=coda_state.start_ms,
+                score=coda_state.score,
+                expected_phone=slot.coda_phones[0],
+                expected_phone_index=slot.vowel_phone_index + 1,
+                slot_index=event_index,
+                frame_index=coda_state.start_frame,
+            )
+            coda_event["segment_role"] = "coda"
+            events.append(coda_event)
             event_index += 1
     return tuple(events)
 
@@ -1187,6 +1650,7 @@ def _best_local_state_segments(
     frame_shift_ms: float,
     selected_start_frame: int,
     selected_end_frame: int,
+    search_window_ms: float | None = None,
 ) -> dict[str, float | int]:
     frame_count = int(scores.size)
     min_frames = max(1, int(np.ceil(float(spec.min_duration_ms) / max(0.001, frame_shift_ms))))
@@ -1217,6 +1681,17 @@ def _best_local_state_segments(
             duration_z = ((float(duration) * frame_shift_ms) - mode_ms) / sigma_ms
             duration_score = -0.5 * duration_z * duration_z
         totals[:valid_start_count, duration_index] = means + duration_score
+
+    if search_window_ms is not None:
+        window_frames = max(0, int(round(float(search_window_ms) / max(0.001, frame_shift_ms))))
+        window_lo = max(0, min(int(selected_start_frame), start_count - 1) - window_frames)
+        window_hi = min(start_count - 1, max(int(selected_start_frame), 0) + window_frames)
+        if window_lo > window_hi:
+            window_lo = window_hi
+        if window_lo > 0:
+            totals[:window_lo, :] = float("-inf")
+        if window_hi + 1 < start_count:
+            totals[window_hi + 1 :, :] = float("-inf")
 
     flat_totals = totals.ravel()
     best_index = int(np.argmax(flat_totals))
@@ -1332,6 +1807,35 @@ def _posterior_duration_ms(times: np.ndarray) -> float:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(float(lo), min(float(hi), float(value)))
+
+
+def _ko_coda_mode_for_phones(coda_phones: Sequence[str], base_duration: float) -> float:
+    """Return Korean-specific coda consonant mode duration."""
+    key = "".join(coda_phones).lower().strip()
+    if key in _KO_CODA_MODE_MS:
+        return _KO_CODA_MODE_MS[key]
+    for phone in coda_phones:
+        p = phone.lower().strip()
+        if p in _KO_CODA_MODE_MS:
+            return _KO_CODA_MODE_MS[p]
+    return _clamp(base_duration * 0.45, 20.0, 80.0)
+
+
+def _ko_onset_mode_for_phones(onset_phones: Sequence[str], base_duration: float) -> float:
+    """Return Korean-specific consonant mode duration based on GT profiles."""
+    key = "".join(onset_phones).lower().strip()
+    if key in _KO_ONSET_MODE_MS:
+        return _KO_ONSET_MODE_MS[key]
+    for phone in reversed(onset_phones):
+        p = phone.lower().strip()
+        if p in _KO_ONSET_MODE_MS:
+            return _KO_ONSET_MODE_MS[p]
+    sonorant = _phones_include_sonorant(onset_phones)
+    return _clamp(
+        base_duration * (0.48 if sonorant else 0.65),
+        22.0 if sonorant else 28.0,
+        140.0,
+    )
 
 
 __all__ = [

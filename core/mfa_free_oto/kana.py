@@ -195,4 +195,52 @@ def _katakana_to_hiragana(char: str) -> str:
     return char
 
 
-__all__ = ["parse_kana_slots", "parse_kana_text"]
+_PHONES_TO_KANA: dict[tuple[str, ...], str] = {}
+_YOON_VOWELS = {"a": "ゃ", "u": "ゅ", "o": "ょ"}
+
+
+def _build_reverse_map() -> None:
+    if _PHONES_TO_KANA:
+        return
+    for kana, phones in _BASE_PHONES.items():
+        key = phones
+        if key not in _PHONES_TO_KANA:
+            _PHONES_TO_KANA[key] = kana
+
+
+def phones_to_kana(phones: tuple[str, ...]) -> str:
+    """Convert a phone tuple back to hiragana.
+
+    Handles simple morae (k,a)->か, palatalized (k,y,a)->きゃ,
+    and special cases like (ts,u)->つ, (ch,i)->ち.
+    Returns romaji joined string if no kana mapping exists.
+    """
+    _build_reverse_map()
+    if not phones:
+        return ""
+    direct = _PHONES_TO_KANA.get(phones)
+    if direct is not None:
+        return direct
+    if len(phones) >= 3 and phones[-2] == "y" and phones[-1] in _YOON_VOWELS:
+        base_onset = phones[:-2]
+        base_key = (*base_onset, "i")
+        base_kana = _PHONES_TO_KANA.get(base_key)
+        if base_kana is not None:
+            return base_kana + _YOON_VOWELS[phones[-1]]
+    if len(phones) == 3 and phones[0] == phones[1] and phones[-1] in _VOWELS:
+        base_key = (phones[0], phones[-1])
+        base_kana = _PHONES_TO_KANA.get(base_key)
+        if base_kana is not None:
+            return "っ" + base_kana
+    if len(phones) >= 2 and phones[-1] in _VOWELS:
+        base_key = phones[:-1] + ("i",) if phones[-1] != "i" else None
+        if base_key is None:
+            base_key = phones[:-1] + ("u",)
+        consonant_kana = _PHONES_TO_KANA.get(phones[:-1] + ("u",)) or _PHONES_TO_KANA.get(phones[:-1] + ("i",))
+        if consonant_kana is not None:
+            small_vowel_map = {"a": "ぁ", "i": "ぃ", "u": "ぅ", "e": "ぇ", "o": "ぉ"}
+            return consonant_kana + small_vowel_map.get(phones[-1], phones[-1])
+    return "".join(phones)
+
+
+__all__ = ["parse_kana_slots", "parse_kana_text", "phones_to_kana"]

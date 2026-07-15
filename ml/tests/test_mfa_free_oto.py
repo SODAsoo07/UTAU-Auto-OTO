@@ -7977,9 +7977,11 @@ def test_korean_vcv_bootstrap_uses_long_transition_profile():
         config=OtoAdapterConfig(language="korean", format_type="vcv", alias_type="vcv"),
     )
 
-    assert adapted.timing.preutterance == pytest.approx(300.0)
-    assert adapted.timing.overlap == pytest.approx(80.0)
-    assert adapted.timing.consonant == pytest.approx(450.0)
+    # Profile recalibrated 2026-07-14 to the DiKORVCV reclist template medians
+    # (pre 176 / ovl_gap 64 / cons_gap 115) after the anchor-lead removal.
+    assert adapted.timing.preutterance == pytest.approx(176.0)
+    assert adapted.timing.overlap == pytest.approx(112.0)
+    assert adapted.timing.consonant == pytest.approx(291.0)
 
 
 def test_korean_vcv_bootstrap_uses_vv_transition_profile():
@@ -7997,12 +7999,15 @@ def test_korean_vcv_bootstrap_uses_vv_transition_profile():
         config=OtoAdapterConfig(language="korean", format_type="vcv", alias_type="vv"),
     )
 
-    assert adapted.timing.preutterance == pytest.approx(360.0)
-    assert adapted.timing.overlap == pytest.approx(100.0)
-    assert adapted.timing.consonant == pytest.approx(505.0)
+    assert adapted.timing.preutterance == pytest.approx(117.0)
+    assert adapted.timing.overlap == pytest.approx(94.0)
+    assert adapted.timing.consonant == pytest.approx(220.0)
 
 
-def test_korean_vcv_bootstrap_applies_hsmm_anchor_lead_only_to_hsmm_events():
+def test_korean_vcv_bootstrap_applies_no_hsmm_anchor_lead():
+    # Korean VCV anchor leads were recalibrated to 0 (2026-07-14): decoded
+    # anchors already sit at the vowel onset, so any lead double-compensates
+    # and drags preutterance into the onset consonant/breath.
     hsmm = bootstrap_row(
         "vcv.wav",
         "a gyeo",
@@ -8028,10 +8033,10 @@ def test_korean_vcv_bootstrap_applies_hsmm_anchor_lead_only_to_hsmm_events():
         config=OtoAdapterConfig(language="korean", format_type="vcv", alias_type="vcv"),
     )
 
-    assert hsmm.timing.offset == pytest.approx(80.0)
-    assert runtime.timing.offset == pytest.approx(320.0)
+    assert hsmm.timing.offset == pytest.approx(444.0)
+    assert runtime.timing.offset == pytest.approx(444.0)
     assert hsmm.timing.cutoff == pytest.approx(runtime.timing.cutoff)
-    assert "hsmm_anchor_lead:620.0->380.0" in hsmm.warnings
+    assert not any(str(w).startswith("hsmm_anchor_lead:") for w in hsmm.warnings)
 
 
 def test_anchors_from_prediction_preserves_event_source_for_hsmm_policy():

@@ -262,6 +262,18 @@ class LayoutMixin:
         _style_primary_button(out_save_btn)
         out_save_btn.pack(side="right")
 
+        row3b = build_form_row(form_body)
+        ctk.CTkLabel(row3b, text="", width=115).pack(side="left")
+        if not hasattr(self, "split_review_oto_var"):
+            self.split_review_oto_var = ctk.BooleanVar(value=False)
+        self.split_review_oto_checkbox = ctk.CTkCheckBox(
+            row3b,
+            text=t("검증 결과로 oto 분리 저장 (경고: <이름>.review.ini / 정상: <이름>.clean.ini)"),
+            variable=self.split_review_oto_var,
+            command=self._save_config,
+        )
+        self.split_review_oto_checkbox.pack(side="left", padx=(6, 0))
+
         row_suffix = build_form_row(form_body)
         build_left_label(row_suffix, t("접미사:")).pack(side="left")
         self.suffix_entry = ctk.CTkEntry(
