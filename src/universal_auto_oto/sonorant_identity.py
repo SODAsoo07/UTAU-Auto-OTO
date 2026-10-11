@@ -20,6 +20,8 @@ import soundfile as sf
 
 from .domain import PhoneDefinition
 
+from . import analysis_cache
+
 CEPSTRUM_HOP_MS = 5.0
 CEPSTRUM_WINDOW_MS = 30.0
 CEPSTRUM_BANDS = 26
@@ -60,6 +62,10 @@ def has_adjacent_sonorants(phones: Sequence[str], inventory: Mapping[str, PhoneD
 
 def cepstra(wav_path: Path) -> tuple[np.ndarray, np.ndarray]:
     """Mel cepstra c1..c12 (level-free spectral shape) on a 5 ms grid: (times_ms, frames)."""
+    return analysis_cache.cached("cepstra", wav_path, (), lambda: _cepstra(wav_path))
+
+
+def _cepstra(wav_path: Path) -> tuple[np.ndarray, np.ndarray]:
     audio, sample_rate = sf.read(str(wav_path), always_2d=True)
     signal = audio.mean(axis=1)
     hop = max(1, int(round(sample_rate * CEPSTRUM_HOP_MS / 1000.0)))
@@ -98,15 +104,19 @@ class SonorantTemplates:
 
     @classmethod
     def build(cls, items: Iterable[tuple[Path, Sequence[tuple[str, float, float]]]],
-              inventory: Mapping[str, PhoneDefinition], scope: str = "sonorant") -> "SonorantTemplates":
-        """Templates from the middle half of every decoded sonorant segment of at least 40 ms."""
+              inventory: Mapping[str, PhoneDefinition], scope: str = "sonorant",
+              cepstra_cache: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None) -> "SonorantTemplates":
+        """Templates from the middle half of every decoded sonorant segment of at least 40 ms.
+
+        ``cepstra_cache`` maps str(wav_path) to a precomputed ``cepstra(wav_path)`` result."""
         frames: dict[str, list[np.ndarray]] = {}
         for wav_path, segments in items:
             wanted = [(phone, start, end) for phone, start, end in segments
                       if in_identity_scope(inventory.get(phone), scope) and end - start >= TEMPLATE_MIN_SEGMENT_MS]
             if not wanted:
                 continue
-            grid, cep = cepstra(wav_path)
+            cached = (cepstra_cache or {}).get(str(wav_path))
+            grid, cep = cached if cached is not None else cepstra(wav_path)
             for phone, start, end in wanted:
                 quarter = 0.25 * (end - start)
                 mask = (grid >= start + quarter) & (grid <= end - quarter)

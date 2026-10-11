@@ -47,3 +47,18 @@ def test_japanese_romaji_moraic_n_and_glued_breath_parse() -> None:
     assert parse_filename_phone_slots("ga-N-ga.wav", format_hint="cvvc", language_hint="japanese") == (
         ("g", "a"), ("n",), ("g", "a"))
     assert parse_filename_phone_slots("aR.wav", format_hint="cv", language_hint="japanese") == (("a",), ("exh",))
+
+
+def test_korean_vcv_run_together_names_are_segmented_without_an_oto():
+    from universal_auto_oto.alias_generation import generate_aliases
+    from universal_auto_oto.voicebank_project_adapter import _segment_korean_vcv_compact
+
+    assert generate_aliases("_gagageogagegagogaK.wav", format_hint="vcv", language_hint="korean") == [
+        "- ga", "a ga", "a geo", "eo ga", "a ge", "e ga", "a go", "o ga", "a k"]
+    # The base syllable repeats (bbeo, not bbe+o); vowel-only lists keep single vowels.
+    assert _segment_korean_vcv_compact("_bbeobbeobbebbeobbobbeobbubbeo.wav")[:3] == (
+        ("bb", "eo"), ("bb", "eo"), ("bb", "e"))
+    assert _segment_korean_vcv_compact("_aaeoaeaoaNGH.wav") == (
+        ("a",), ("a",), ("eo",), ("a",), ("e",), ("a",), ("o",), ("a", "ng", "h"))
+    assert _segment_korean_vcv_compact("L'baL'beo.wav") == (("l",), ("b", "a"), ("l",), ("b", "eo"))
+    assert generate_aliases("_aaeoaeaoaNGH.wav", format_hint="vcv", language_hint="korean")[-2:] == ["a ng", "ng h"]

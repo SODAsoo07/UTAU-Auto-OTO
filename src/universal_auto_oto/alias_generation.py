@@ -6,7 +6,8 @@ hand-made banks (see docs/FEATURE_ROADMAP_2026-10-11.md):
 - CV:   ``ka`` per syllable
 - CVVC: ``- ka`` head, ``ka``, ``a k`` (vowel to next consonant), ``a i`` (vowel to vowel),
         ``a n``/``n k`` around codas, ``a -`` at the end, ``a R`` before a breath
-- VCV:  ``- ka`` head, ``a ka`` for every following syllable, ``a -`` at the end
+- VCV:  ``- ka`` head, ``a ka`` for every following syllable, ``a k`` for a final coda,
+        otherwise ``a -`` at the end; run-together Korean names are segmented by list structure
 - CVC:  CVVC, with codas written as one syllable (``ang``) instead of ``a ng``
 
 Kana file names give kana CV aliases (``か``, ``a か``) and romaji vowels and
@@ -29,6 +30,7 @@ from .voicebank_project_adapter import (
     VoicebankReviewRequired,
     _is_pitch_token,
     _kana_surface_slots,
+    _segment_korean_vcv_compact,
     parse_filename_phone_slots,
 )
 
@@ -62,7 +64,15 @@ def generate_aliases(wav_name: str, *, format_hint: str, language_hint: str | No
     format_type = format_hint.strip().casefold()
     if format_type not in {"cv", "cvc", "cvvc", "vcv"}:
         raise ValueError(f"unsupported format for alias generation: {format_hint}")
-    slots = parse_filename_phone_slots(wav_name, format_hint=format_type, language_hint=language_hint)
+    try:
+        slots = parse_filename_phone_slots(wav_name, format_hint=format_type, language_hint=language_hint)
+    except VoicebankReviewRequired:
+        # Run-together Korean VCV names (_gagageogage…K) are segmented by the list structure.
+        compact = (_segment_korean_vcv_compact(wav_name)
+                   if format_type == "vcv" and (language_hint or "").casefold() in {"ko", "kr", "korean"} else ())
+        if not compact:
+            raise
+        slots = compact
     syllables = _syllables(wav_name, slots, language_hint)
     aliases: list[str] = []
     previous: _Syllable | None = None
@@ -84,6 +94,9 @@ def generate_aliases(wav_name: str, *, format_hint: str, language_hint: str | No
             previous = None
         if format_type == "vcv":
             aliases.append(f"{'-' if previous is None else _left(previous, format_type)} {item.surface}")
+            # A closing coda is its own row (a k, a ng) and a breath after it too (ng h).
+            ends = (_vowel_tail(item.vowel), *item.coda)
+            aliases.extend(f"{left} {right}" for left, right in zip(ends, ends[1:]))
             previous = item
             continue
         # CVVC / CVC
@@ -99,7 +112,7 @@ def generate_aliases(wav_name: str, *, format_hint: str, language_hint: str | No
         if item.coda:
             aliases.append(_coda_alias(item, format_type))
         previous = item
-    if previous is not None and format_type != "cv":
+    if previous is not None and format_type != "cv" and not (format_type == "vcv" and previous.coda):
         aliases.append(f"{_left(previous, format_type)} -")
     return aliases
 

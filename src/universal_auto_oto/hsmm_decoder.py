@@ -347,17 +347,8 @@ def decode_segmental_hsmm_exact(
                 best[window.start_max_frame + 1:] = -np.inf
         prefix = prefix_by_state[spec.state_id]
         transition = np.append(transition_by_state[spec.state_id], 0.0)
-        durations = [_duration_score(spec, float(d) * frame_shift) for d in range(max_frames + 1)]
-        curr = np.full(frame_count + 1, -np.inf)
-        best_start = np.zeros(frame_count + 1, dtype=np.int64)
-        for duration_frames in range(max_frames, min_frames - 1, -1):
-            starts = frames[:frame_count + 1 - duration_frames]
-            ends = starts + duration_frames
-            score = (best[starts] + (prefix[ends] - prefix[starts]) / duration_frames
-                     + durations[duration_frames] + transition[starts])
-            better = score > curr[ends]
-            curr[ends[better]] = score[better]
-            best_start[ends[better]] = starts[better]
+        durations = _duration_scores(spec, frame_shift, max_frames)
+        curr, best_start = _best_segment_ends(best, prefix, transition, durations, min_frames, max_frames)
         if window is not None:
             curr[:window.end_min_frame] = -np.inf
             if window.end_max_frame is not None:
@@ -400,6 +391,71 @@ def decode_segmental_hsmm_exact(
         allow_trailing_gap=allow_trailing_gap,
     )
     return _copy_result_with_meta(result, {"exact_search": True, "coarse_to_refine": False})
+
+
+# Ends handled per block so the (ends x durations) score matrix stays near this many elements.
+SEGMENT_BLOCK_ELEMENTS = 1 << 21
+
+
+def _best_segment_ends(best: np.ndarray, prefix: np.ndarray, transition: np.ndarray, durations: Sequence[float],
+                       min_frames: int, max_frames: int) -> tuple[np.ndarray, np.ndarray]:
+    """For every end frame, the best start of one state segment: (score, start) per end.
+
+    score(start, end) = best[start] + mean frame score over [start, end) + duration score
+    + transition[start], over durations ``min_frames..max_frames``. Equal to
+    ``_best_segment_ends_reference`` bit for bit: the same additions in the same order,
+    the longest duration wins ties (first maximum over descending durations), and an end
+    without a finite score keeps -inf with start 0. All durations of a block of ends are
+    scored in one array operation instead of one Python iteration per duration.
+    """
+    size = len(best)
+    count = max_frames - min_frames + 1
+    if count <= 0:
+        return np.full(size, -np.inf), np.zeros(size, dtype=np.int64)
+    # Column j of a window at end e reads index e - (max_frames - j): durations descend along j.
+    pad = max_frames
+    best_windows = np.lib.stride_tricks.sliding_window_view(np.concatenate((np.full(pad, -np.inf), best)), pad + 1)
+    prefix_windows = np.lib.stride_tricks.sliding_window_view(np.concatenate((np.zeros(pad), prefix)), pad + 1)
+    transition_windows = np.lib.stride_tricks.sliding_window_view(np.concatenate((np.zeros(pad), transition)), pad + 1)
+    duration_frames = np.arange(max_frames, min_frames - 1, -1, dtype=np.int64)
+    divisors = duration_frames.astype(np.float64)
+    duration_scores = np.asarray([durations[d] for d in duration_frames], dtype=np.float64)
+    curr = np.full(size, -np.inf)
+    best_start = np.zeros(size, dtype=np.int64)
+    block = max(1, SEGMENT_BLOCK_ELEMENTS // count)
+    for first in range(0, size, block):
+        ends = slice(first, min(size, first + block))
+        score = best_windows[ends, :count] + (prefix[ends, None] - prefix_windows[ends, :count]) / divisors
+        score = score + duration_scores
+        score = score + transition_windows[ends, :count]
+        end_index = np.arange(ends.start, ends.stop)
+        score[end_index[:, None] - duration_frames[None, :] < 0] = -np.inf  # start before the first frame
+        score[np.isnan(score)] = -np.inf  # NaN never wins a strict comparison
+        choice = np.argmax(score, axis=1)
+        top = score[np.arange(len(end_index)), choice]
+        found = top > -np.inf
+        curr[ends] = np.where(found, top, -np.inf)
+        best_start[ends] = np.where(found, end_index - duration_frames[choice], 0)
+    return curr, best_start
+
+
+def _best_segment_ends_reference(best: np.ndarray, prefix: np.ndarray, transition: np.ndarray,
+                                 durations: Sequence[float], min_frames: int, max_frames: int
+                                 ) -> tuple[np.ndarray, np.ndarray]:
+    """The original per-duration loop, kept as the reference for _best_segment_ends."""
+    size = len(best)
+    frames = np.arange(size)
+    curr = np.full(size, -np.inf)
+    best_start = np.zeros(size, dtype=np.int64)
+    for duration_frames in range(max_frames, min_frames - 1, -1):
+        starts = frames[:size - duration_frames]
+        ends = starts + duration_frames
+        score = (best[starts] + (prefix[ends] - prefix[starts]) / duration_frames
+                 + durations[duration_frames] + transition[starts])
+        better = score > curr[ends]
+        curr[ends[better]] = score[better]
+        best_start[ends[better]] = starts[better]
+    return curr, best_start
 
 
 def _path_result(
@@ -468,7 +524,7 @@ def _path_result(
             "max_internal_gap_ms": float(max_internal_gap_ms or 0.0),
             "allow_trailing_gap": bool(allow_trailing_gap),
             "transition_start_score_state_count": sum(
-                int(any(value != 0.0 for value in scores))
+                int(np.any(np.asarray(scores, dtype=np.float64) != 0.0))
                 for scores in transition_by_state.values()
             ),
         },
@@ -753,6 +809,19 @@ def _segment_mean(prefix: Sequence[float], start: int, end: int) -> float:
     if end <= start:
         return -1e9
     return (float(prefix[end]) - float(prefix[start])) / float(end - start)
+
+
+def _duration_scores(spec: HSMMStateSpec, frame_shift: float, max_frames: int) -> np.ndarray:
+    """``_duration_score`` for 0..max_frames frames at once (same float64 operations, same values)."""
+    mode = float(spec.mode_duration_ms or 0.0)
+    if mode <= 0.0:
+        return np.zeros(max_frames + 1)
+    sigma = max(1.0, float(spec.duration_sigma_ms or 40.0))
+    duration_ms = np.arange(max_frames + 1, dtype=np.float64) * float(frame_shift)
+    z = (duration_ms - mode) / sigma
+    penalty = -0.5 * z * z
+    over_scale = max(0.0, float(getattr(spec, "over_duration_penalty_scale", 1.0)))
+    return np.where(duration_ms > mode, penalty * over_scale, penalty)
 
 
 def _duration_score(spec: HSMMStateSpec, duration_ms: float) -> float:

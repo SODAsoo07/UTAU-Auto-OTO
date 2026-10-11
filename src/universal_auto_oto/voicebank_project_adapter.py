@@ -219,6 +219,20 @@ def parse_filename_phone_slots(
                 slots.append(before)
                 slots.append(("exh",))
                 continue
+        korean_cvc = format_type == "cvc" and (language_hint or "").casefold() in {"ko", "kr", "korean"}
+        surface = _PITCH_SUFFIX_RE.sub("", raw_token.strip()).strip("_'- ")
+        if korean_cvc and surface.endswith("Long") and len(surface) > 4:
+            # aLong: one held vowel recorded for V, "V V" and "V R"; two slots of the same vowel.
+            held = _parse_roman_slot(surface[:-4].casefold(), format_type=format_type, language_hint=language_hint)
+            if len(held) == 1 and _is_vowel_id(held[0]):
+                slots.extend((held, held))
+                continue
+        if korean_cvc and len(surface) > 1 and surface.endswith("R"):
+            # Korean CVC lists glue the closing breath to each syllable (aR_eR, eunR_eumR).
+            before = _parse_roman_slot(surface[:-1].casefold(), format_type=format_type, language_hint=language_hint)
+            if before:
+                slots.append((*before, "exh"))
+                continue
         # Uppercase R denotes ending exhalation, not the consonant r.
         if raw_token == "R" and token_index == len(raw_tokens) - 1:
             if pending_leading_coda:
@@ -408,6 +422,7 @@ def build_routed_voicebank_project(
                 format_type=format_type,
                 language_hint=language,
                 explicit_inventory=inventory,
+                alias_hints=tuple(row.alias for row in source_rows),
             )
         except VoicebankReviewRequired as exc:
             if unmapped_alias_policy != "exclude_row" or not source_rows:
@@ -776,6 +791,7 @@ def _recording_phone_contract(
     format_type: str,
     language_hint: str,
     explicit_inventory: Mapping[str, PhoneDefinition],
+    alias_hints: Sequence[str] = (),
 ) -> tuple[tuple[str, ...], tuple[_PhoneSlot, ...], str, str | None]:
     if raw_record is not None:
         raw_phones = raw_record.get("phones")
@@ -793,13 +809,154 @@ def _recording_phone_contract(
         )
         phones, slots = _flatten_slots(slot_phones)
         return phones, slots, "voicebank_reclist", artifact
-    slot_phones = parse_filename_phone_slots(
-        wav.name,
-        format_hint=format_type,
-        language_hint=language_hint,
-    )
+    try:
+        slot_phones = parse_filename_phone_slots(
+            wav.name,
+            format_hint=format_type,
+            language_hint=language_hint,
+        )
+    except VoicebankReviewRequired:
+        compact = (_segment_korean_vcv_compact(wav.name, alias_hints)
+                   if format_type == "vcv" and language_hint in {"ko", "kr", "korean"} and alias_hints else ())
+        if not compact:
+            raise
+        phones, slots = _flatten_slots(compact)
+        return phones, slots, "korean_vcv_compact_segmentation", None
     phones, slots = _flatten_slots(slot_phones)
     return phones, slots, "original_filename_only", None
+
+
+_KOREAN_VCV_COMPACT_ONSETS = ("bb", "dd", "gg", "jj", "ss", "pp", "tt", "kk", "ch", "th", "sh", "b", "d", "g", "j", "s",
+                              "p", "t", "k", "h", "m", "n", "r", "l", "f", "v", "z", "")
+_KOREAN_VCV_COMPACT_VOWELS = ("yeo", "weo", "yae", "wae", "eui", "ae", "eo", "eu", "oe", "ui", "ya", "ye", "yo", "yu",
+                              "wa", "we", "wi", "wo", "a", "e", "i", "o", "u")
+# Upper-case filename codas; H/R are the closing breath.
+_KOREAN_VCV_COMPACT_CODAS = ("NG", "K", "T", "P", "N", "M", "L", "H", "R")
+_KOREAN_VCV_NUCLEUS = {"ya": "a", "yeo": "eo", "yo": "o", "yu": "u", "ye": "e", "yae": "ae", "wa": "a", "weo": "eo",
+                       "we": "e", "wi": "i", "wo": "o", "wae": "ae", "ui": "i", "eui": "i", "oe": "e"}
+_KOREAN_TENSE_RESPELLING = {"pp": "bb", "tt": "dd", "kk": "gg"}
+
+
+def _segment_korean_vcv_compact(source: str, alias_hints: Sequence[str] = ()) -> tuple[tuple[str, ...], ...]:
+    """Segment run-together Korean VCV names (``_gagageogage…K``).
+
+    Units are ``[onset] vowel`` or an upper-case coda/breath; separators (' _ + - space) only
+    bound units. With the bank's aliases, the lattice keeps the segmentation whose adjacent-unit
+    VCV aliases (``a geo``, ``- ga``, ``a k``, ``l ba``) explain most of them, then the fewest
+    units, and returns () when none is explained. Without aliases (alias generation), the list
+    structure decides: VCV lists repeat one base syllable (ga ga geo ga ge …), so the
+    segmentation whose most common unit occurs most often wins, then the fewest distinct units,
+    then the fewest units.
+    """
+
+    stem = _PITCH_SUFFIX_RE.sub("", Path(str(source)).stem.strip())
+    tokens = [token for token in re.split(r"[_'+\- ]+", stem) if token]
+    if not tokens:
+        return ()
+    hints = {_PITCH_SUFFIX_RE.sub("", " ".join(str(alias).split())).casefold() for alias in alias_hints}
+    units = _korean_vcv_units_by_aliases(tokens, hints) if hints else _korean_vcv_units_by_structure(tokens)
+    return _korean_vcv_units_to_slots(units) if units else ()
+
+
+def _korean_vcv_token_units(token: str, start: int) -> list[tuple[int, tuple[str, str]]]:
+    out = [(start + len(coda), ("", coda)) for coda in _KOREAN_VCV_COMPACT_CODAS if token.startswith(coda, start)]
+    for onset in _KOREAN_VCV_COMPACT_ONSETS:
+        if not token.startswith(onset, start):
+            continue
+        j = start + len(onset)
+        out += [(j + len(vowel), (onset, vowel)) for vowel in _KOREAN_VCV_COMPACT_VOWELS if token.startswith(vowel, j)]
+    return out
+
+
+def _korean_vcv_units_by_aliases(tokens: Sequence[str], hints: set[str]) -> tuple[tuple[str, str], ...]:
+    def left(unit: tuple[str, str]) -> str:
+        onset, vowel = unit
+        return vowel.casefold() if not onset and vowel.isupper() else _KOREAN_VCV_NUCLEUS.get(vowel, vowel)
+
+    def right(unit: tuple[str, str]) -> str:
+        return "".join(unit).casefold()
+
+    # Lattice over the whole file: state = last unit; score = explained aliases, then fewer units.
+    best: dict[tuple[str, str] | None, tuple[float, tuple[tuple[str, str], ...]]] = {None: (0.0, ())}
+    for token in tokens:
+        frontier = {(0, key): value for key, value in best.items()}
+        finished: dict[tuple[str, str] | None, tuple[float, tuple[tuple[str, str], ...]]] = {}
+        while frontier:
+            (pos, last), (score, path) = min(frontier.items(), key=lambda item: item[0][0])
+            del frontier[(pos, last)]
+            if pos == len(token):
+                if last not in finished or score > finished[last][0]:
+                    finished[last] = (score, path)
+                continue
+            for end, unit in _korean_vcv_token_units(token, pos):
+                if last is None:
+                    gain = float(f"- {right(unit)}" in hints) if unit[1].islower() else 0.0
+                else:
+                    gain = float(f"{left(last)} {right(unit)}" in hints)
+                candidate = (score + gain - 0.001, (*path, unit))
+                key = (end, unit)
+                if key not in frontier or candidate[0] > frontier[key][0]:
+                    frontier[key] = candidate
+        if not finished:
+            return ()
+        best = finished
+    score, units = max(best.values(), key=lambda item: item[0])
+    return units if score > 0 else ()
+
+
+def _korean_vcv_units_by_structure(tokens: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """Alias-free segmentation: VCV lists repeat their first (base) syllable.
+
+    For each candidate base unit, an exact DP picks the segmentation with the most units equal
+    to it, minus a penalty for each bare vowel glued to a preceding syllable, then the fewest
+    units; the best first unit wins. ``bbeobbeobbe…`` stays bbeo bbeo bbe rather than
+    bbe o bbe o, ``aaeoae…`` stays a a eo a e (5 a's, fewer split vowels).
+    """
+    # Base candidates: the sung unit opening any token (L'aL'eo… opens with a coda mark).
+    firsts = {unit for token in tokens for _end, unit in _korean_vcv_token_units(token, 0) if unit[1].islower()}
+    best: tuple[float, tuple[tuple[str, str], ...]] | None = None
+    for first in sorted(firsts):
+        state: tuple[float, tuple[tuple[str, str], ...]] | None = (0.0, ())
+        for token in tokens:
+            table: dict[int, tuple[float, tuple[tuple[str, str], ...]]] = {0: state}
+            for pos in range(len(token)):
+                if pos not in table:
+                    continue
+                score, path = table[pos]
+                for end, unit in _korean_vcv_token_units(token, pos):
+                    # A bare vowel glued to a consonant-initial syllable is almost always a longer vowel
+                    # split apart (bbe+o for bbeo, bbe+u for bbeu); separators (+o) are exempt.
+                    split_vowel = pos > 0 and not unit[0] and unit[1].islower() and bool(path and path[-1][0])
+                    candidate = (score + (1.0 if unit == first else 0.0) - (2.0 if split_vowel else 0.0) - 0.001,
+                                 (*path, unit))
+                    if end not in table or candidate[0] > table[end][0]:
+                        table[end] = candidate
+            state = table.get(len(token))
+            if state is None:
+                break
+        if state is not None and state[1] and (best is None or state[0] > best[0]):
+            best = state
+    return best[1] if best is not None else ()
+
+
+def _korean_vcv_units_to_slots(units: Sequence[tuple[str, str]]) -> tuple[tuple[str, ...], ...]:
+    # A trailing '-' only marks the closing release; it has no phone of its own.
+    slots: list[tuple[str, ...]] = []
+    for index, (onset, vowel) in enumerate(units):
+        if vowel.islower():
+            slots.append(tuple(value for value in (onset, vowel) if value))
+            continue
+        coda = vowel.casefold()
+        terminal = all(not unit[1].islower() for unit in units[index:])
+        if coda == "r" and index == len(units) - 1:
+            slots.append(("exh",))
+        elif slots and (terminal or coda not in _STANDALONE_SONORANTS):
+            # Final codas (gaK, aNGH) and mid-file obstruents close the preceding syllable.
+            slots[-1] = (*slots[-1], coda)
+        else:
+            # Mid-file sonorant codas (weoN'bbeo, L'ba) are syllabic slots of their own.
+            slots.append((coda,))
+    return tuple(slots)
 
 
 def _untag_phone(value: str, inventory: Mapping[str, PhoneDefinition]) -> str:
@@ -995,6 +1152,7 @@ def _planned_aliases(
     japanese = (language_hint or "").casefold() in {"ja", "jp", "japanese"}
     korean_cvvc = format_type == "cvvc" and (language_hint or "").casefold() in {"ko", "kr", "korean"}
     korean_cvc = format_type == "cvc" and (language_hint or "").casefold() in {"ko", "kr", "korean"}
+    korean_vcv = format_type == "vcv" and (language_hint or "").casefold() in {"ko", "kr", "korean"}
     pause_heads = _pause_token_slot_indices(wav_name, len(slots))
 
     def add(key: tuple[str, ...], indices: Sequence[int], role: str,
@@ -1073,12 +1231,16 @@ def _planned_aliases(
             previous = slots[index-1]
             left = phones[previous.end]
             if left not in (_BREATH_PHONES | _SILENCE_PHONES) and vowel not in (_BREATH_PHONES | _SILENCE_PHONES):
+                # Korean VCV aliases name a diphthong by its nucleus on the left (bya'bye: "a bye").
+                lefts = dict.fromkeys((left, _KOREAN_VCV_NUCLEUS.get(left, left) if korean_vcv else left))
                 if cv_role == "cv" and cv_indices[0] == slot.start:
-                    add((left, cv_key), (previous.end, *cv_indices), "vcv")
+                    for spelling in lefts:
+                        add((spelling, cv_key), (previous.end, *cv_indices), "vcv")
                 elif cv_role in {"v", "special"}:
                     # Japanese N mora transitions use the existing VV contract.
                     role = "vv" if japanese or _is_vowel_id(left) == _is_vowel_id(vowel) else ("cv" if _is_vowel_id(vowel) else "vc")
-                    add((left, cv_key), (previous.end, slot.vowel), role)
+                    for spelling in lefts:
+                        add((spelling, cv_key), (previous.end, slot.vowel), role)
             if compact_pairs and index % 2 == 1:
                 onset = phones[slot.start]
                 indices = tuple(dict.fromkeys((previous.vowel, slot.start)))
@@ -1122,6 +1284,22 @@ def _planned_aliases(
                 # Same templates as Korean CVVC coda notation: held sonorant or stop closure.
                 add((a + tense.get(b, b),), (left, left+1), "vc",
                     "builtin:vc_soft_voiced" if left+1 in standalone else "builtin:vc_hard")
+        # In-syllable codas are also written glued: "ang"/"am"/"al" (V->coda) and
+        # "nga"/"ngi" (coda -> next vowel-initial syllable); "n R" closes with breath.
+        in_slot_codas = {s.start + i for s in slots for i, p in enumerate(s.phones)
+                         if p in _KOREAN_CODAS and s.start + i > s.vowel}
+        for left in sorted(phones):
+            a, b = phones[left], phones.get(left+1)
+            if b is None:
+                continue
+            if _is_vowel_id(a) and left+1 in in_slot_codas:
+                template = "builtin:vc_soft_voiced" if b in _STANDALONE_SONORANTS else "builtin:vc_hard"
+                for spelling in dict.fromkeys((a, _KOREAN_VCV_NUCLEUS.get(a, a))):
+                    add((spelling + b,), (left, left+1), "vc", template)
+            if left in in_slot_codas and a in _STANDALONE_SONORANTS and _is_vowel_id(b):
+                add((a + b,), (left, left+1), "cv")
+            if left in in_slot_codas and a in _STANDALONE_SONORANTS and b == "exh":
+                add((a, "R"), (left, left+1), "release", "builtin:ending_exhalation")
 
     if korean_cvvc:
         nuclei = {"wa": "a", "wi": "i", "wo": "o", "we": "e", "weo": "eo",
@@ -1196,6 +1374,8 @@ def _planned_aliases(
                         template = "builtin:vc_hard" if variant[-1] in {"K", "T", "P"} else "builtin:vc_soft_voiced"
                     add(variant, plan.phone_indices, plan.role, template)
 
+    vcv_coda_indices = {s.start + i for s in slots for i, p in enumerate(s.phones)
+                        if korean_vcv and p in _KOREAN_CODAS and s.start + i > s.vowel}
     result = []
     for row in rows:
         key, occurrence = _alias_surface(row.alias, preserve_coda_case=korean_cvvc)
@@ -1227,6 +1407,16 @@ def _planned_aliases(
             key = _unique_transliterated_key(key, candidates)
         if korean_cvvc and key not in candidates:
             key = _unique_korean_respelling(key, candidates, phones)
+        if korean_cvc and key not in candidates:
+            # ㄹ onsets are filed as r but aliased as l (ral'ril: "la", rwal: "lwa").
+            respelled = tuple(("r" + part[1:]) if part.startswith("l") and len(part) > 1 and part[1] in "aeiouwy"
+                              else part for part in key)
+            key = respelled if respelled in candidates else key
+        if korean_vcv and key not in candidates:
+            # Tense onsets are romanized either way (ㅃ: bb/pp); files and aliases may differ.
+            respelled = tuple(re.sub(r"^(-?)(pp|tt|kk)", lambda m: m.group(1) + _KOREAN_TENSE_RESPELLING[m.group(2)], part)
+                              for part in key)
+            key = respelled if respelled in candidates else key
         if key not in candidates and len(key) >= 2 and key[0] == "-":
             # Heads are normally limited to file start, breath/silence or a pause
             # token; by user policy a head may also name a mid-file syllable,
@@ -1248,7 +1438,11 @@ def _planned_aliases(
             matches = [p for p in matches if p.phone_indices[0] == target]
         elif occurrence is not None:
             matches = matches[occurrence-1:occurrence] if 1 <= occurrence <= len(matches) else []
-        elif len(key) == 2 and (key[-1] == "R" or (korean_cvvc and key[-1] == "-")):
+        elif korean_vcv and len(key) == 2 and _is_vowel_id(key[0]) and key[1] in _KOREAN_CODAS and any(
+                p.phone_indices[-1] in vcv_coda_indices for p in matches):
+            # VCV lists have no VC-into-onset rows: "a n" in nana…naN is the final N coda.
+            matches = [p for p in matches if p.phone_indices[-1] in vcv_coda_indices][-1:]
+        elif len(key) == 2 and (key[-1] == "R" or ((korean_cvvc or korean_vcv) and key[-1] == "-")):
             # R endings take the last event. Korean CVVC lists also mean the
             # phrase end by a trailing '-' (user-confirmed 2026-10-09); other
             # formats keep the first event, as their banks are not consistent.

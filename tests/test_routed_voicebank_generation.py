@@ -689,3 +689,76 @@ def test_bpm_out_of_range_is_rejected(tmp_path: Path) -> None:
             GenerationOptions(bank=bank, output=tmp_path / "out", backend="routed_hsmm", format_hint="cvvc",
                               language_hint="korean", generate_missing_aliases=True, bpm=20.0)
         )
+
+
+def test_exclude_row_policy_lists_a_recording_that_cannot_be_aligned(tmp_path: Path, monkeypatch) -> None:
+    import csv
+    from universal_auto_oto import project_runtime
+    from universal_auto_oto.alignment import AlignmentError
+
+    bank = tmp_path / "bank"
+    bank.mkdir()
+    _write_cv(bank / "ka.wav")
+    _write_cv(bank / "ki.wav")
+    (bank / "oto.ini").write_text("ka.wav=ka,0,1,-2,3,4\r\nki.wav=ki,0,1,-2,3,4\r\n", encoding="utf-8")
+    real = project_runtime.align_recording
+
+    def silent_ki(project, recording, **options):
+        if recording.wav == "ki.wav":
+            raise AlignmentError("HSMM decode 실패: timeline_decode_failed (ki.wav)")
+        return real(project, recording, **options)
+
+    monkeypatch.setattr(project_runtime, "align_recording", silent_ki)
+    options = dict(bank=bank, base_oto=bank / "oto.ini", backend="routed_hsmm", format_hint="cv", language_hint="mixed")
+    with pytest.raises(AlignmentError):
+        generate_voicebank(GenerationOptions(output=tmp_path / "strict", **options))
+    report = generate_voicebank(GenerationOptions(output=tmp_path / "out", unmapped_alias_policy="exclude_row", **options))
+    assert report["generated_rows"] == 1 and report["failed_recordings"][0]["wav"] == "ki.wav"
+    assert (tmp_path / "out" / "oto.ini").read_text(encoding="utf-8").startswith("ka.wav=ka,")
+    with (tmp_path / "out" / "unmapped_aliases.csv").open(encoding="utf-8-sig") as stream:
+        listed = list(csv.DictReader(stream))
+    assert [(row["wav"], row["alias"], row["reason"]) for row in listed] == [("ki.wav", "ki", "alignment_failed")]
+
+
+def test_parallel_alignment_matches_serial_and_reports_progress(tmp_path: Path) -> None:
+    from universal_auto_oto.generator import GenerationCancelled
+
+    bank = tmp_path / "bank"
+    bank.mkdir()
+    for name in ("ka", "ki", "ku"):
+        _write_cv(bank / f"{name}.wav")
+    (bank / "oto.ini").write_text("".join(f"{n}.wav={n},0,1,-2,3,4\r\n" for n in ("ka", "ki", "ku")), encoding="utf-8")
+    seen: list[tuple[str, int, int]] = []
+    common = dict(bank=bank, base_oto=bank / "oto.ini", backend="routed_hsmm", format_hint="cv", language_hint="mixed")
+    generate_voicebank(GenerationOptions(output=tmp_path / "serial", alignment_workers=1, **common))
+    generate_voicebank(GenerationOptions(output=tmp_path / "parallel", alignment_workers=2,
+                                         progress=lambda *event: seen.append(event), **common))
+    assert (tmp_path / "serial" / "oto.ini").read_bytes() == (tmp_path / "parallel" / "oto.ini").read_bytes()
+    assert ("align:1/1", 3, 3) in seen and seen[0] == ("align:1/1", 0, 3) and ("render", 2, 3) in seen
+
+    def cancel(stage, done, total):
+        if done:
+            raise GenerationCancelled()
+
+    with pytest.raises(GenerationCancelled):
+        generate_voicebank(GenerationOptions(output=tmp_path / "cancelled", alignment_workers=2, progress=cancel, **common))
+    assert not (tmp_path / "cancelled" / "oto.ini").exists()
+
+
+def test_batch_stops_on_cancel_but_not_on_folder_errors(tmp_path: Path) -> None:
+    from universal_auto_oto.batch import BankFolder, run_batch
+    from universal_auto_oto.generator import GenerationCancelled
+
+    folders = [BankFolder(path=tmp_path / name, relative=name, wav_count=1, has_oto=False, detection=None)
+               for name in ("a", "b", "c")]
+    calls: list[str] = []
+
+    def generate_one(folder, output):
+        calls.append(folder.relative)
+        if folder.relative == "a":
+            raise ValueError("broken folder")
+        raise GenerationCancelled()
+
+    with pytest.raises(GenerationCancelled):
+        run_batch(folders, root=tmp_path, output_root=tmp_path / "out", in_place=False, generate_one=generate_one)
+    assert calls == ["a", "b"]

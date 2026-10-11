@@ -7,10 +7,10 @@ import platform
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .alias_generation import generate_bank_alias_rows
@@ -212,6 +212,19 @@ class GenerationOptions:
     write_timelines: bool = True
     write_project_manifest: bool = True
     write_unmapped_aliases_csv: bool = True
+    # routed_hsmm: recordings aligned in parallel processes (same rows, less time); 0 = automatic.
+    alignment_workers: int = 1
+    # routed_hsmm: progress(stage, done, total); stage is "align:k/n" or "render".
+    progress: Callable[[str, int, int], None] | None = field(default=None, compare=False, repr=False)
+
+
+class GenerationCancelled(Exception):
+    """Raised by a progress callback to stop a generation (the user pressed cancel)."""
+
+
+def default_alignment_workers() -> int:
+    """Leave one core for the UI/OS; beyond 8 the per-process setup cost outweighs the gain."""
+    return max(1, min(8, (os.cpu_count() or 2) - 1))
 
 
 DIAGNOSTIC_FILE_OPTIONS = (
@@ -588,6 +601,10 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         )
     report = generate_project(
         build.project,
+        # exclude_row: a take the decoder cannot align (silent, cut off) is listed, not fatal.
+        skip_failed_recordings=options.unmapped_alias_policy == "exclude_row",
+        alignment_workers=options.alignment_workers or default_alignment_workers(),
+        progress=options.progress,
         oto_style=options.oto_style,
         output_oto=output / "oto.ini",
         force=options.force,
@@ -627,6 +644,12 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             ),
         },
     )
+    excluded_rows = list(build.excluded_rows)
+    for failed in report.get("failed_recordings", ()):
+        excluded_rows.extend(
+            {"wav": failed["wav"], "alias": row.alias, "source_index": row.source_index, "reason": "alignment_failed",
+             "detail": failed["reason"], "written_to_oto": False}
+            for row in base_rows_by_wav.get(failed["wav"], ()))
     manifest = {
         **dict(build.manifest),
         "base_oto": str(options.base_oto.resolve()) if options.base_oto else None,
@@ -657,10 +680,10 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             "unmapped_wavs": len(wavs) - len(mapped_keys),
             "project_manifest": str(project_manifest_path) if project_manifest_path is not None else None,
             "elapsed_seconds": time.perf_counter() - started,
-            "excluded_alias_rows": len(build.excluded_rows),
+            "excluded_alias_rows": len(excluded_rows),
             "excluded_alias_samples": [
                 {"wav": row["wav"], "alias": row["alias"], "reason": row["reason"]}
-                for row in build.excluded_rows[:EXCLUDED_ALIAS_SAMPLE_LIMIT]
+                for row in excluded_rows[:EXCLUDED_ALIAS_SAMPLE_LIMIT]
             ],
             "generated_alias_wavs": generated_alias_wavs,
             "recording_tempo": tempo,
@@ -672,12 +695,12 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         "project_manifest": options.write_project_manifest,
         "unmapped_aliases_csv": options.write_unmapped_aliases_csv,
     }
-    if build.excluded_rows and options.write_unmapped_aliases_csv:
+    if excluded_rows and options.write_unmapped_aliases_csv:
         excluded_csv = output / "unmapped_aliases.csv"
         with excluded_csv.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=["wav", "alias", "source_index", "reason", "detail", "written_to_oto"])
             writer.writeheader()
-            writer.writerows(build.excluded_rows)
+            writer.writerows(excluded_rows)
         report["excluded_alias_rows_csv"] = str(excluded_csv)
     return report
 

@@ -163,3 +163,89 @@ def test_lateral_without_nasal_anchors_uses_the_period_share():
     _codas_from_rhythm(recording, adjusted, out, laterals=True, weak_nasals=False, period_ratio=0.25)
     # syllable period 500 ms -> vowel 125 ms after its start at 40 ms
     assert out[0]["applied"] and adjusted[3].start_ms == 165.0 and adjusted[2].end_ms == 165.0
+
+
+def test_vcv_takes_even_a_weak_nasal_step():
+    recording, evidence, segments = fixture(murmur_start=300.0)
+    weak = SimpleNamespace(frame_times_ms=evidence.frame_times_ms,
+                           tracks={"low_band_ratio": 0.5 + 0.01 * (evidence.tracks["low_band_ratio"] > 0.5),
+                                   "mid_band_ratio": np.full_like(evidence.frame_times_ms, 0.5)})
+    adjusted, diagnostics = _cvvc_nasal_coda_boundaries(recording, weak, segments)
+    assert diagnostics["slots"][0]["reason"] == "weak_band_balance_step"
+    vcv = RecordingSpec(recording.wav, recording.phones, (), transcript_source="original_filename_only",
+                        label_source="none", metadata={**recording.metadata, "format_hint": "vcv"})
+    adjusted, diagnostics = _cvvc_nasal_coda_boundaries(vcv, weak, segments)
+    assert diagnostics["slots"][0]["applied"] and abs(adjusted[4].start_ms - 300.0) <= 10.0
+
+
+def test_vcv_lateral_coda_uses_the_files_held_vowel_length():
+    from universal_auto_oto.alignment import _codas_from_rhythm
+    phones = ("r", "a", "r", "eo", "r", "a", "l")
+    slots = [{"start": 0, "vowel": 1, "end": 1}, {"start": 2, "vowel": 3, "end": 3}, {"start": 4, "vowel": 5, "end": 6}]
+    recording = RecordingSpec("_rareoraL.wav", phones, (), transcript_source="korean_vcv_compact_segmentation",
+                              label_source="none", metadata={"phone_slots": slots, "format_hint": "vcv"})
+    spans = [(1, "stable", "vowel_stable", 50, 450), (3, "stable", "vowel_stable", 500, 960),
+             (5, "transition", "vowel_transition", 1000, 1040), (5, "stable", "vowel_stable", 1040, 1200),
+             (6, "consonant", "consonant", 1200, 1700), (6, "transition", "transition", 1700, 1730)]
+    adjusted = [StateSegment(f"p{i}.{state}", i, state, role, float(a), float(b), 0.5, float(a), float(b))
+                for i, state, role, a, b in spans]
+    out: list = []
+    _codas_from_rhythm(recording, adjusted, out, laterals=True, weak_nasals=True, period_ratio=0.27)
+    # Held vowels of 400 and 460 ms -> 430 ms after the final vowel starts (not 27% of the period).
+    assert out[-1]["applied"] and adjusted[4].start_ms == 1430.0
+
+
+def test_vcv_vowel_after_a_held_hum_starts_at_the_murmur_to_vowel_fall():
+    from universal_auto_oto.alignment import _vcv_nasal_vowel_boundaries
+    phones = ("m", "m", "a", "m", "m", "eo")
+    slots = [{"start": 0, "vowel": 0, "end": 0}, {"start": 1, "vowel": 2, "end": 2},
+             {"start": 3, "vowel": 3, "end": 3}, {"start": 4, "vowel": 5, "end": 5}]
+    recording = RecordingSpec("M_maM_meo.wav", phones, (), transcript_source="korean_vcv_compact_segmentation",
+                              label_source="none", metadata={"phone_slots": slots, "format_hint": "vcv"})
+    # Decoded: the vowels swallowed the hums (true vowels start at 900 and 1600 ms).
+    spans = [(0, "consonant", "consonant", 400, 440), (1, "consonant", "consonant", 440, 480),
+             (2, "stable", "vowel_stable", 480, 1200), (3, "consonant", "consonant", 1200, 1220),
+             (4, "consonant", "consonant", 1220, 1250), (5, "stable", "vowel_stable", 1250, 2200)]
+    segments = [StateSegment(f"p{i}.{state}", i, state, role, float(a), float(b), 0.5, float(a), float(b))
+                for i, state, role, a, b in spans]
+    times = np.arange(0.0, 2300.0, 5.0)
+    hum = ((times >= 400) & (times < 900)) | ((times >= 1300) & (times < 1600))
+    balance = np.where(hum, 0.9, -0.3)
+    adjusted, policy = _vcv_nasal_vowel_boundaries(recording, segments, times, balance)
+    assert policy["applied_count"] == 2
+    assert abs(adjusted[2].start_ms - 900.0) <= 10.0 and abs(adjusted[5].start_ms - 1600.0) <= 10.0
+    assert abs(adjusted[3].start_ms - 1300.0) <= 10.0 and adjusted[2].end_ms == adjusted[3].start_ms
+    assert adjusted[4].end_ms == adjusted[5].start_ms and adjusted[4].end_ms - adjusted[4].start_ms <= 60.0
+
+
+def test_ending_voicing_on_searched_frames_equals_the_whole_file_reference(tmp_path):
+    import soundfile as sf
+    from universal_auto_oto.alignment import _ending_voicing_offsets, _ending_voicing_offsets_reference
+    rate = 44100
+    rng = np.random.default_rng(7)
+    for trial in range(12):
+        # Voiced/breath/voiced/... with random lengths and levels; phones end on breath, pause or the file end.
+        pieces, spans, phones, now, index = [], [], [], 0.0, 0
+        for part in range(int(rng.integers(2, 6))):
+            length = float(rng.uniform(0.15, 0.6))
+            n = int(rate * length)
+            t = np.arange(n) / rate
+            pieces.append(float(rng.uniform(0.05, 0.4)) * np.sin(2 * np.pi * float(rng.uniform(90, 500)) * t))
+            phones.append("a")
+            spans.append((index, "stable", "vowel_stable", now * 1000, (now + length) * 1000 + float(rng.uniform(-80, 80))))
+            index += 1
+            now += length
+            if rng.random() < 0.7:
+                gap = float(rng.uniform(0.05, 0.3))
+                pieces.append(float(rng.uniform(0.0, 0.05)) * rng.standard_normal(int(rate * gap)))
+                phones.append(str(rng.choice(["exh", "pau"])))
+                spans.append((index, "breath", "breath", spans[-1][4], (now + gap) * 1000))
+                index += 1
+                now += gap
+        sf.write(tmp_path / f"t{trial}.wav", np.concatenate(pieces), rate)
+        recording = RecordingSpec(f"t{trial}.wav", tuple(phones), (), transcript_source="original_filename_only",
+                                  label_source="none", metadata={})
+        segments = [StateSegment(f"p{i}.{state}", i, state, role, float(a), float(b), 0.5, float(a), float(b))
+                    for i, state, role, a, b in spans]
+        assert (_ending_voicing_offsets(recording, tmp_path / f"t{trial}.wav", segments)
+                == _ending_voicing_offsets_reference(recording, tmp_path / f"t{trial}.wav", segments))

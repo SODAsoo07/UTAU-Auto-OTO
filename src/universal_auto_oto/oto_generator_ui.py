@@ -7,13 +7,15 @@ import json
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
 from .bank_detection import FormatDetection, check_language, detect_format
 from .batch import BankFolder, discover_bank_folders, run_batch
-from .generator import DIAGNOSTIC_FILE_OPTIONS, GenerationOptions, _discover_wavs, generate_voicebank, inspect_voicebank
+from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
+                        generate_voicebank, inspect_voicebank)
 from .oto_io import parse_oto
 from .oto_style import OtoStyle, load_oto_style, save_oto_style
 
@@ -192,6 +194,7 @@ def build_generation_options(
         oto_style=oto_style,
         bpm=bpm,
         estimate_bpm=estimate_bpm,
+        alignment_workers=0,  # automatic: parallel alignment, identical rows
     )
 
 
@@ -422,10 +425,43 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
         "alias_generation_skipped": list(report.get("alias_generation_skipped", []) or [])[:EXCLUDED_ROW_LOG_SAMPLES],
         "alias_generation_skipped_count": len(report.get("alias_generation_skipped", []) or []),
         "excluded_alias_samples": list(report.get("excluded_alias_samples", []) or [])[:EXCLUDED_ROW_LOG_SAMPLES],
+        "failed_recordings": [item.get("wav", "") for item in report.get("failed_recordings", []) or []],
     }
     if oto_path.is_file():
         summary["oto_sha256"] = hashlib.sha256(oto_path.read_bytes()).hexdigest()
     return summary
+
+
+OperationCancelled = GenerationCancelled  # raised from the progress callback when 취소 is pressed
+
+
+RENDER_SHARE = 0.08  # the OTO writing stage after alignment
+
+
+def progress_fraction(stage: str, done: int, total: int) -> float:
+    """Overall 0..1 progress from a runtime stage ("align:k/n" or "render")."""
+    part = (done / total) if total else 1.0
+    if stage.startswith("align:"):
+        k, n = (int(value) for value in stage.split(":", 1)[1].split("/"))
+        return (1.0 - RENDER_SHARE) * ((k - 1) + part) / max(n, 1)
+    if stage == "render":
+        return 1.0 - RENDER_SHARE + RENDER_SHARE * part
+    return 0.0
+
+
+def progress_text(stage: str, done: int, total: int, elapsed_s: float, fraction: float, prefix: str = "") -> str:
+    if stage.startswith("align:"):
+        label = f"정렬 {stage.split(':', 1)[1]}단계 {done}/{total}"
+    elif stage == "render":
+        label = f"OTO 작성 {done}/{total}"
+    else:
+        label = stage
+    remaining = ""
+    if fraction >= 0.03 and elapsed_s >= 3.0:
+        seconds = elapsed_s * (1.0 - fraction) / fraction
+        remaining = (f" · 남은 시간 약 {max(1, round(seconds / 60))}분" if seconds >= 90
+                     else f" · 남은 시간 약 {max(1, round(seconds))}초")
+    return f"{prefix}{label}{remaining}"
 
 
 def excluded_rows_log_lines(payload: Mapping[str, object]) -> list[str]:
@@ -434,8 +470,11 @@ def excluded_rows_log_lines(payload: Mapping[str, object]) -> list[str]:
     count = int(payload.get("excluded_alias_rows", 0) or 0)
     if count <= 0:
         return []
+    failed = list(payload.get("failed_recordings") or [])
     lines = [
-        f"[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못해 oto.ini에서 뺐습니다.",
+        f"[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
+        f"녹음을 분석하지 못해 oto.ini에서 뺐습니다.",
+        *([f"  분석하지 못한 녹음 {len(failed)}개(무음·잘린 녹음일 수 있음): {', '.join(failed)}"] if failed else []),
         (f"  전체 목록: {payload['excluded_alias_rows_csv']}" if payload.get("excluded_alias_rows_csv")
          else "  전체 목록을 파일로 받으려면 고급 출력 옵션에서 unmapped_aliases.csv 저장을 켜세요."),
     ]
@@ -516,6 +555,8 @@ def launch_oto_generator_ui(
             self.configure(fg_color=PANEL_BG)
             self._events: queue.Queue[tuple[str, object]] = queue.Queue()
             self._busy = False
+            self._cancel = threading.Event()
+            self._started_at = 0.0
             self._advanced_visible = False
             self._log_lines: list[str] = []
             self.last_summary: dict[str, object] = {}
@@ -580,7 +621,10 @@ def launch_oto_generator_ui(
             self.progress = ctk_module.CTkProgressBar(bottom, mode="indeterminate", height=10)
             self.progress.set(0)
             self.progress.pack(side="left", fill="x", expand=True)
-            ctk_module.CTkLabel(bottom, textvariable=self.status_var, text_color=TEXT, width=180).pack(
+            self.cancel_button = ctk_module.CTkButton(bottom, text="취소", width=70, state="disabled",
+                                                      command=self._request_cancel)
+            self.cancel_button.pack(side="right", padx=(8, 0))
+            ctk_module.CTkLabel(bottom, textvariable=self.status_var, text_color=TEXT, width=360, anchor="e").pack(
                 side="right", padx=(12, 0)
             )
 
@@ -909,11 +953,33 @@ def launch_oto_generator_ui(
             self._busy = busy
             for button in self._buttons:
                 button.configure(state="disabled" if busy else "normal")
+            self.cancel_button.configure(state="normal" if busy else "disabled")
             if busy:
+                self._cancel.clear()
+                self._started_at = time.monotonic()
+                self.progress.configure(mode="indeterminate")
                 self.progress.start()
             else:
                 self.progress.stop()
+                self.progress.configure(mode="determinate")
                 self.progress.set(0)
+
+        def _request_cancel(self) -> None:
+            if self._busy and not self._cancel.is_set():
+                self._cancel.set()
+                self.cancel_button.configure(state="disabled")
+                self.status_var.set("취소하는 중... (진행 중인 파일을 마치고 멈춥니다)")
+                self._append_log("[취소 요청]")
+
+        def _progress_callback(self, prefix: str = "") -> Callable[[str, int, int], None]:
+            """Runs in the worker thread: forwards progress and stops the run once 취소 was pressed."""
+            events, cancel = self._events, self._cancel
+
+            def progress(stage: str, done: int, total: int) -> None:
+                if cancel.is_set():
+                    raise OperationCancelled()
+                events.put(("progress", (prefix, stage, done, total)))
+            return progress
 
         def _run(self, title: str, operation: Callable[[], Mapping[str, object]]) -> None:
             if self._busy:
@@ -925,6 +991,8 @@ def launch_oto_generator_ui(
             def worker() -> None:
                 try:
                     self._events.put(("success", UIOperationResult(title, dict(operation()))))
+                except OperationCancelled:
+                    self._events.put(("cancelled", title))
                 except Exception as error:
                     self._events.put(("error", f"{type(error).__name__}: {error}"))
 
@@ -1112,6 +1180,8 @@ def launch_oto_generator_ui(
                 if options is None:
                     return
 
+            options = replace(options, progress=self._progress_callback())
+
             def operation() -> Mapping[str, object]:
                 report = generate_voicebank(options)
                 return summarize_generation_result(report, output=options.output)
@@ -1144,6 +1214,7 @@ def launch_oto_generator_ui(
             fixed_format = FORMAT_CHOICES[self.format_var.get()]
             use_folder_oto = self.folder_oto_var.get()
             events = self._events
+            position = {"index": 0, "total": len(selected)}
 
             def generate_one(folder: BankFolder, output: Path) -> Mapping[str, object]:
                 format_hint = fixed_format or folder.format
@@ -1161,11 +1232,13 @@ def launch_oto_generator_ui(
                     generate_missing_aliases=base_oto is None,
                     allow_in_place_output=in_place,
                     force=True,
+                    progress=self._progress_callback(f"[{position['index']}/{position['total']}] "),
                 )
                 report = generate_voicebank(options)
                 return summarize_generation_result(report, output=output)
 
             def progress(index: int, total: int, folder: BankFolder) -> None:
+                position["index"] = index
                 events.put(("log", f"[일괄 {index}/{total}] {folder.relative} ({(fixed_format or folder.format or '?').upper()})"))
 
             def operation() -> Mapping[str, object]:
@@ -1259,6 +1332,22 @@ def launch_oto_generator_ui(
             try:
                 while True:
                     kind, value = self._events.get_nowait()
+                    if kind == "progress":
+                        prefix, stage, done, total = value
+                        fraction = progress_fraction(stage, done, total)
+                        if str(self.progress.cget("mode")) != "determinate":
+                            self.progress.stop()
+                            self.progress.configure(mode="determinate")
+                        self.progress.set(fraction)
+                        if not self._cancel.is_set():
+                            elapsed = time.monotonic() - self._started_at
+                            self.status_var.set(progress_text(stage, done, total, elapsed, fraction, prefix))
+                        continue
+                    if kind == "cancelled":
+                        self._set_busy(False)
+                        self.status_var.set(f"{value} 취소됨")
+                        self._append_log(f"[취소] {value}: 사용자가 중단했습니다. 출력 폴더의 이전 결과는 그대로입니다.")
+                        continue
                     if kind == "log":
                         self._append_log(str(value))
                         self.status_var.set(str(value)[:60])
@@ -1299,6 +1388,9 @@ def launch_oto_generator_ui(
 
 
 def main(argv: list[str] | None = None) -> int:
+    import multiprocessing
+
+    multiprocessing.freeze_support()  # parallel alignment workers in a frozen (exe) build
     import argparse
 
     parser = argparse.ArgumentParser(description="AutoOTO v3 desktop UI")

@@ -4,10 +4,11 @@ import hashlib
 import json
 import time
 from collections import Counter, defaultdict
+from dataclasses import replace
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
-from .alignment import AlignmentResult, align_recording
+from .alignment import AlignmentError, AlignmentResult, align_recording
 from .alias_type_symbolic import (
     DEFAULT_LABELS_FILENAME,
     DEFAULT_REPORT_FILENAME,
@@ -15,11 +16,13 @@ from .alias_type_symbolic import (
     export_symbolic_alias_types,
 )
 from .oto_io import resolve_output_encoding, write_lines_atomic
-from .oto_style import OtoStyle, apply_oto_style
+from .oto_style import OtoStyle, apply_korean_cvc_window, apply_korean_vcv_window, apply_oto_style
+from . import analysis_cache
+from .row_risk import risk_threshold, row_risks, voicing_onsets_ms
 from .audio import file_sha256
 from .domain import LandmarkTimeline, RecordingSpec, landmark_timeline_from_dict
 from .project import ProjectSpec
-from .sonorant_identity import SonorantTemplates, has_adjacent_sonorants
+from .sonorant_identity import SonorantTemplates, cepstra, has_adjacent_sonorants
 from .renderer_calibration import load_renderer_calibration
 from .alias_type_confidence import load_alias_type_confidence
 from .template_engine import load_template_set, render_project_alias
@@ -273,6 +276,131 @@ def _recording_identity_sha256(recording: RecordingSpec) -> str:
     ).hexdigest()
 
 
+def _with_row_risk(row, risk: float):
+    """Split by the fitted row risk (row_risk.py): low-risk rows become clean unless a template
+    repair was needed; the confidence becomes 1 - risk so review priority follows the risk."""
+    clean = risk <= risk_threshold() and "template_constraint_repaired" not in row.reasons
+    reasons = tuple(reason for reason in row.reasons if reason != "uncalibrated_confidence")
+    marker = "row_risk_low" if clean else "row_risk_high"
+    return replace(row, split="clean" if clean else "review", confidence=float(1.0 - risk),
+                   reasons=(*reasons, marker))
+
+
+def _align_or_error(project: ProjectSpec, recording: RecordingSpec, skip_failed: bool,
+                    **options: object) -> AlignmentResult | AlignmentError:
+    """align_recording, but return the error instead of raising when ``skip_failed``."""
+    try:
+        return align_recording(project, recording, **options)
+    except AlignmentError as exc:
+        if not skip_failed:
+            raise
+        return exc
+
+
+ProgressCallback = Callable[[str, int, int], None]
+
+
+def _align_job(job: tuple) -> tuple[AlignmentResult | AlignmentError, object, object]:
+    project, recording, skip_failed, options, with_onsets, with_cepstra = job
+    result = _align_or_error(project, recording, skip_failed, **options)
+    wav = project.wav_path(recording)
+    return (result, voicing_onsets_ms(wav) if with_onsets else None,
+            cepstra(wav) if with_cepstra and not isinstance(result, AlignmentError) else None)
+
+
+def _needs_row_risk(recording: RecordingSpec) -> bool:
+    return (recording.metadata.get("language_hint") in {"ko", "kr", "korean"}
+            and recording.metadata.get("format_hint") in {"vcv", "cvc"})
+
+
+class _Aligner:
+    """Aligns recordings one pass at a time, serially or in worker processes.
+
+    Recordings are independent within a pass, so ``workers`` > 1 changes speed, not results.
+    Each recording always goes to the same worker (one single-process pool per worker), so
+    that worker's ``analysis_cache`` reuses its acoustic analyses in the identity passes; the
+    serial path caches in this process. ``progress(stage, done, total)`` follows every recording.
+    """
+
+    def __init__(self, project: ProjectSpec, skip_failed: bool, workers: int = 1,
+                 progress: ProgressCallback | None = None) -> None:
+        self.project, self.skip_failed = project, skip_failed
+        self.workers, self.progress = max(1, int(workers)), progress
+        self._pools: list = []
+        self._shard: dict[str, int] = {}
+        self._load: list[float] = []
+        # Voicing onsets (row risk) and cepstra (sonorant templates), computed alongside
+        # the first alignment so the serial steps between passes stay short.
+        self.onsets: dict[str, object] = {}
+        self.cepstra: dict[str, object] = {}
+        analysis_cache.enable()
+        self._closed = False
+
+    def map(self, stage: str, jobs: Sequence[tuple[RecordingSpec, Mapping[str, object]]],
+            with_cepstra: bool = False) -> list[AlignmentResult | AlignmentError]:
+        total = len(jobs)
+        self._report(stage, 0, total)
+        if self.workers == 1 or total < 2:
+            results = []
+            for done, (recording, options) in enumerate(jobs, start=1):
+                results.append(_align_or_error(self.project, recording, self.skip_failed, **options))
+                self._report(stage, done, total)
+            return results  # serial: onsets are computed at render time
+        if not self._pools:
+            from concurrent.futures import ProcessPoolExecutor
+            count = min(self.workers, total)
+            self._pools = [ProcessPoolExecutor(max_workers=1, initializer=analysis_cache.enable) for _ in range(count)]
+            self._load = [0.0] * count
+        self._assign([recording for recording, _options in jobs])
+        futures = {self._pools[self._shard[recording.wav]].submit(
+                       _align_job, (self.project, recording, self.skip_failed, dict(options),
+                                    _needs_row_risk(recording) and recording.wav not in self.onsets, with_cepstra)): index
+                   for index, (recording, options) in enumerate(jobs)}
+        from concurrent.futures import as_completed
+        results: list[AlignmentResult | AlignmentError | None] = [None] * total
+        try:
+            for done, future in enumerate(as_completed(futures), start=1):
+                result, onsets, cep = future.result()
+                results[futures[future]] = result
+                recording = jobs[futures[future]][0]
+                if onsets is not None:
+                    self.onsets[recording.wav] = onsets
+                if cep is not None:
+                    self.cepstra[str(self.project.wav_path(recording))] = cep
+                self._report(stage, done, total)
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+        return results  # type: ignore[return-value]
+
+    def _assign(self, recordings: Sequence[RecordingSpec]) -> None:
+        """Longest-first onto the least-loaded worker, by WAV size; kept for later passes."""
+        new = [recording for recording in recordings if recording.wav not in self._shard]
+        sizes = {}
+        for recording in new:
+            try:
+                sizes[recording.wav] = float(self.project.wav_path(recording).stat().st_size)
+            except OSError:
+                sizes[recording.wav] = 0.0
+        for recording in sorted(new, key=lambda item: -sizes[item.wav]):
+            shard = min(range(len(self._load)), key=self._load.__getitem__)
+            self._shard[recording.wav] = shard
+            self._load[shard] += sizes[recording.wav]
+
+    def _report(self, stage: str, done: int, total: int) -> None:
+        if self.progress is not None:
+            self.progress(stage, done, total)
+
+    def close(self) -> None:
+        for pool in self._pools:
+            pool.shutdown(wait=True, cancel_futures=True)
+        self._pools = []
+        if not self._closed:
+            self._closed = True
+            analysis_cache.disable()
+
+
 def _sonorant_identity_two_pass(
     project: ProjectSpec,
     recordings: Sequence[RecordingSpec],
@@ -280,37 +408,54 @@ def _sonorant_identity_two_pass(
     weight: float,
     passes: int = 2,
     scope: str = "sonorant",
-) -> tuple[list[AlignmentResult], dict[str, object]]:
+    skip_failed: bool = False,
+    aligner: _Aligner | None = None,
+) -> tuple[list[AlignmentResult | AlignmentError], dict[str, object]]:
     """Align every recording, learn sonorant templates from those timelines, then re-align the
     multi-syllable recordings that have two adjacent sonorants with the templates' identity
     factors. A one-syllable recording has no syllable position to get wrong and keeps pass 1.
     With ``passes`` > 2 the templates are learned again from the previous identity pass and
     the same recordings are re-aligned once more per extra pass."""
 
-    first = [align_recording(project, recording, **alignment_options) for recording in recordings]
+    own_aligner = aligner is None
+    aligner = aligner or _Aligner(project, skip_failed)
+    try:
+        return _identity_passes(project, recordings, alignment_options, weight, passes, scope, aligner)
+    finally:
+        if own_aligner:
+            aligner.close()
+
+
+def _identity_passes(project, recordings, alignment_options, weight, passes, scope, aligner):
+    passes = max(2, int(passes))
+    first = aligner.map(f"align:1/{passes}", [(recording, alignment_options) for recording in recordings],
+                        with_cepstra=True)
     targets = [
         index for index, recording in enumerate(recordings)
-        if not (isinstance(recording.metadata.get("phone_slots"), Sequence)
+        if not isinstance(first[index], AlignmentError) and not (isinstance(recording.metadata.get("phone_slots"), Sequence)
                 and len(recording.metadata.get("phone_slots")) < 2)
         and has_adjacent_sonorants(recording.phones, project.inventory, scope)
     ]
     final = list(first)
     template_summaries = []
-    for _pass in range(2, max(2, int(passes)) + 1):
+    for _pass in range(2, passes + 1):
         templates = SonorantTemplates.build(
             (
                 (project.wav_path(recording), [(seg.phone_id, seg.start_ms, seg.end_ms) for seg in result.timeline.phone_segments])
                 for recording, result in zip(recordings, final)
+                if not isinstance(result, AlignmentError)
             ),
             project.inventory,
             scope=scope,
+            cepstra_cache=aligner.cepstra,
         )
         template_summaries.append(templates.summary())
         current = list(final)
-        for index in targets:
-            current[index] = align_recording(
-                project, recordings[index], **alignment_options,
-                sonorant_identity=templates, sonorant_identity_weight=weight)
+        identity_options = {**alignment_options, "sonorant_identity": templates, "sonorant_identity_weight": weight}
+        realigned_all = aligner.map(f"align:{_pass}/{passes}", [(recordings[index], identity_options) for index in targets])
+        for index, realigned in zip(targets, realigned_all):
+            # A later pass that fails keeps the earlier timeline.
+            current[index] = realigned if not isinstance(realigned, AlignmentError) else current[index]
         final = current
     return final, {
         "review_only": True,
@@ -340,8 +485,14 @@ def generate_project(
     write_row_report: bool = True,
     write_timelines: bool = True,
     oto_style: OtoStyle | None = None,
+    skip_failed_recordings: bool = False,
+    alignment_workers: int = 1,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     """Generate OTO files; the write_* flags skip diagnostic files only, never the OTO files.
+
+    With ``skip_failed_recordings`` a recording whose alignment fails (e.g. a silent take) is
+    left out and listed in the report's ``failed_recordings`` instead of stopping the bank.
 
     The symbolic AliasType export is derived from row_report.jsonl and follows it.
     """
@@ -466,13 +617,22 @@ def generate_project(
             raise FileExistsError(report_existing)
         if generated_timeline_dir is not None and generated_timeline_dir.exists() and any(generated_timeline_dir.iterdir()):
             raise FileExistsError(f"timeline 출력 폴더가 비어 있지 않습니다: {generated_timeline_dir}")
-    identity_alignments: list[AlignmentResult] | None = None
+    identity_alignments: list[AlignmentResult | AlignmentError] | None = None
     sonorant_identity_report: dict[str, object] | None = None
-    if sonorant_identity_weight > 0.0 and reused_timelines is None:
-        identity_alignments, sonorant_identity_report = _sonorant_identity_two_pass(
-            project, recordings, runtime_alignment_options, sonorant_identity_weight, sonorant_identity_passes,
-            sonorant_identity_scope)
+    aligner = _Aligner(project, skip_failed_recordings, alignment_workers, progress)
+    try:
+        if sonorant_identity_weight > 0.0 and reused_timelines is None:
+            identity_alignments, sonorant_identity_report = _sonorant_identity_two_pass(
+                project, recordings, runtime_alignment_options, sonorant_identity_weight, sonorant_identity_passes,
+                sonorant_identity_scope, skip_failed_recordings, aligner)
+        elif reused_timelines is None and manual_anchors_by_wav is None:
+            identity_alignments = aligner.map("align:1/1", [(recording, runtime_alignment_options) for recording in recordings])
+    finally:
+        aligner.close()
+    failed_recordings: list[dict[str, str]] = []
     for recording_index, recording in enumerate(recordings):
+        if progress is not None:
+            progress("render", recording_index, len(recordings))
         timeline_source_path: Path | None = None
         timeline_source_sha256: str | None = None
         if reused_timelines is None:
@@ -487,13 +647,17 @@ def generate_project(
                 actual_hash = file_sha256(project.wav_path(recording))
                 if actual_hash != expected_hash:
                     raise ValueError(f"{recording.wav}: manual occurrence anchor WAV hash mismatch")
-            aligned = identity_alignments[recording_index] if identity_alignments is not None else align_recording(
+            aligned = identity_alignments[recording_index] if identity_alignments is not None else _align_or_error(
                 project,
                 recording,
+                skip_failed_recordings,
                 **runtime_alignment_options,
                 manual_occurrence_start_anchors=recording_anchors,
                 manual_occurrence_anchor_provenance=manual_anchor_provenance if recording_anchors else None,
             )
+            if isinstance(aligned, AlignmentError):
+                failed_recordings.append({"wav": recording.wav, "reason": str(aligned)})
+                continue
             timeline = aligned.timeline
             backend_used = aligned.backend_used
         else:
@@ -529,8 +693,8 @@ def generate_project(
             _write_json(timeline_path, timeline.to_dict(), backup=timeline_path.exists())
             timeline_source_sha256 = file_sha256(timeline_path)
         target_oto = _recording_output_path(project, recording.wav, primary_output)
-        for alias_index, plan in enumerate(recording.aliases):
-            row, trace = render_project_alias(
+        rendered = [
+            (plan, *render_project_alias(
                 project,
                 recording,
                 timeline,
@@ -539,7 +703,24 @@ def generate_project(
                 template_set=template_set,
                 renderer_calibration_profile=renderer_calibration_profile,
                 alias_type_confidence_profile=alias_type_confidence_profile,
-            )
+            ))
+            for alias_index, plan in enumerate(recording.aliases)
+        ]
+        korean = recording.metadata.get("language_hint") in {"ko", "kr", "korean"}
+        format_hint = recording.metadata.get("format_hint")
+        risks: list[float] | None = None
+        if korean and format_hint in {"vcv", "cvc"} and rendered:
+            risks = row_risks(
+                [{"alias": row.alias, "role": row.role, "confidence": row.confidence, "reasons": row.reasons,
+                  "pre_abs": trace.final_anchors["pre_abs"]} for _plan, row, trace in rendered],
+                project.wav_path(recording), onsets=aligner.onsets.get(recording.wav))
+        for alias_index, (plan, row, trace) in enumerate(rendered):
+            if risks is not None:
+                row = _with_row_risk(row, risks[alias_index])
+            if korean and format_hint == "vcv":
+                row = apply_korean_vcv_window(row)
+            elif korean and format_hint == "cvc":
+                row = apply_korean_cvc_window(row)
             row = apply_oto_style(row, oto_style)
             rows_by_output[target_oto].append(row)
             row_reports.append(
@@ -726,6 +907,7 @@ def generate_project(
         "feature_backend": runtime_feature_backend,
         "timeline_reuse": {"used": timeline_reuse is not None, **(timeline_reuse or {})},
         **({"sonorant_identity": sonorant_identity_report} if sonorant_identity_report is not None else {}),
+        **({"failed_recordings": failed_recordings} if failed_recordings else {}),
         "recording_count": len(recordings),
         "generated_rows": len(row_reports),
         "clean_rows": split_counts.get("clean", 0),

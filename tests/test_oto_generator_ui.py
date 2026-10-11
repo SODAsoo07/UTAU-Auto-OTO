@@ -274,3 +274,14 @@ def test_tempo_and_alias_log_lines() -> None:
     lines = alias_generation_log_lines({"generated_alias_wavs": 3, "alias_generation_skipped_count": 1,
                                         "alias_generation_skipped": [{"wav": "x.wav", "detail": "x"}]})
     assert len(lines) == 3
+
+
+def test_progress_fraction_and_text():
+    from universal_auto_oto.oto_generator_ui import progress_fraction, progress_text
+
+    assert progress_fraction("align:1/3", 0, 10) == 0.0
+    assert abs(progress_fraction("align:3/3", 10, 10) - 0.92) < 1e-9
+    assert abs(progress_fraction("render", 5, 10) - 0.96) < 1e-9 and progress_fraction("render", 10, 10) == 1.0
+    assert progress_text("align:2/3", 312, 758, 2.0, 0.4) == "정렬 2/3단계 312/758"  # too early for an estimate
+    assert progress_text("align:2/3", 312, 758, 120.0, 0.4) == "정렬 2/3단계 312/758 · 남은 시간 약 3분"
+    assert progress_text("render", 10, 758, 400.0, 0.95, "[2/5] ") == "[2/5] OTO 작성 10/758 · 남은 시간 약 21초"

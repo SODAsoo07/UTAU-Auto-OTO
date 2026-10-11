@@ -225,3 +225,57 @@ def test_generation_aligns_once_and_reordering_base_rows_preserves_oto(tmp_path,
         assert len({r["timeline_source_sha256"] for r in reports}) == 1
     assert calls == ["a-ka-ki.wav", "a-ka-ki.wav"]
     assert rows_by_run[0] == rows_by_run[1]
+
+
+def test_korean_vcv_diphthong_left_side_binds_by_nucleus():
+    # bya'bya'bye: the second and third VCV rows are written "a bya", "a bye".
+    plans = bind("_bya'bya'bye.wav", ["- bya", "a bya", "a bye"], language="korean", format_type="vcv")
+    assert [(p.alias, p.phone_indices, p.role) for p in plans] == [
+        ("- bya", (0, 1), "cv_head"), ("a bya", (1, 2, 3), "vcv"), ("a bye", (3, 4, 5), "vcv")]
+
+
+def test_korean_vcv_tense_onset_respelling_binds_same_occurrence():
+    plans = bind("_bba'bbeo.wav", ["a ppeo", "a bbeo"], language="korean", format_type="vcv")
+    assert plans[0].phone_indices == plans[1].phone_indices == (1, 2, 3)
+
+
+def test_korean_vcv_compact_names_are_segmented_by_the_bank_aliases():
+    from universal_auto_oto.voicebank_project_adapter import _segment_korean_vcv_compact
+
+    aliases = ["- ga", "a ga", "a geo", "eo ga", "a ge", "e ga", "a go", "o ga", "a k"]
+    assert _segment_korean_vcv_compact("_gagageogagegagogaK.wav", aliases) == (
+        ("g", "a"), ("g", "a"), ("g", "eo"), ("g", "a"), ("g", "e"), ("g", "a"), ("g", "o"), ("g", "a", "k"))
+    # A diphthong is one unit when the aliases name it (ddui, not ddu+i), and a
+    # mid-file sonorant coda becomes its own syllabic slot.
+    assert _segment_korean_vcv_compact("_dduidduiddwa.wav", ["- ddui", "i ddui", "i ddwa"]) == (
+        ("dd", "ui"), ("dd", "ui"), ("dd", "wa"))
+    assert _segment_korean_vcv_compact("bbeubbweoN'bbeo.wav", ["eu bbweo", "n bbeo"]) == (
+        ("bb", "eu"), ("bb", "weo"), ("n",), ("bb", "eo"))
+    assert _segment_korean_vcv_compact("_xyz.wav", ["- ga"]) == ()
+
+
+def test_korean_vcv_coda_and_release_rows_bind_to_the_file_end():
+    from universal_auto_oto.voicebank_project_adapter import _segment_korean_vcv_compact
+
+    for name, aliases, expected in [
+        ("_nananeonaN.wav", ["- na", "a na", "a neo", "eo na", "a n"], (7, 8)),
+        ("_ggoggogguggo-.wav", ["- ggo", "o ggo", "o ggu", "u ggo", "o -"], (7,)),
+    ]:
+        _, slots = _flatten_slots(_segment_korean_vcv_compact(name, aliases))
+        rows = [SourceOtoRow(name, a, i) for i, a in enumerate(aliases)]
+        plans = _planned_aliases(rows, slots, "vcv", name, language_hint="korean")
+        assert plans[-1].phone_indices == expected
+
+
+def test_korean_cvc_glued_codas_liquid_spelling_breath_and_held_vowels():
+    plans = {p.alias: p.phone_indices for p in bind("ang'ing'ang.wav", ["ang", "ngi", "nga"], language="korean",
+                                                  format_type="cvc")}
+    assert plans == {"ang": (0, 1), "ngi": (1, 2), "nga": (3, 4)}
+    plans = {p.alias: p.phone_indices for p in bind("ral'rwal.wav", ["la", "al", "lwa"], language="korean",
+                                                  format_type="cvc")}
+    assert plans == {"la": (0, 1), "al": (1, 2), "lwa": (3, 4)}
+    assert parse_filename_phone_slots("eunR_eumR.wav", format_hint="cvc", language_hint="korean") == (
+        ("eu", "n", "exh"), ("eu", "m", "exh"))
+    assert bind("eunR_eumR.wav", ["m R"], language="korean", format_type="cvc")[0].phone_indices == (4, 5)
+    assert parse_filename_phone_slots("aLong.wav", format_hint="cvc", language_hint="korean") == (("a",), ("a",))
+    assert bind("aLong.wav", ["a a"], language="korean", format_type="cvc")[0].phone_indices == (0, 1)

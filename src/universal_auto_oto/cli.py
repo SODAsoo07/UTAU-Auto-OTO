@@ -208,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="보정되지 않은 heuristic score가 threshold를 넘은 행을 clean으로 허용합니다",
     )
     generate_parser.add_argument("--max-files", type=int)
+    generate_parser.add_argument("--workers", type=int, default=0,
+                                 help="routed_hsmm: parallel alignment processes (0 = automatic, 1 = serial)")
     generate_parser.add_argument(
         "--exclude-wav",
         action="append",
@@ -449,6 +451,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import multiprocessing
+
+    multiprocessing.freeze_support()  # parallel alignment workers in a frozen (exe) build
     _configure_console_encoding()
     args = build_parser().parse_args(argv)
     try:
@@ -611,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
                     bpm=args.bpm,
                     estimate_bpm=args.estimate_bpm,
                     oto_style=load_oto_style(args.oto_style) if args.oto_style else None,
+                    alignment_workers=args.workers,
                 )
             )
         elif args.command == "oto-ui":

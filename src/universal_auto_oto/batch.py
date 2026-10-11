@@ -122,6 +122,8 @@ def run_batch(
 ) -> dict[str, object]:
     """Run ``generate_one(folder, output)`` for every folder; failures do not stop the batch."""
 
+    from .generator import GenerationCancelled
+
     results: list[BatchItemResult] = []
     for index, folder in enumerate(folders, start=1):
         if progress is not None:
@@ -130,6 +132,8 @@ def run_batch(
         try:
             summary = dict(generate_one(folder, output))
             results.append(BatchItemResult(folder.relative, True, str(output), summary, None))
+        except GenerationCancelled:
+            raise  # the user stopped the whole batch
         except Exception as error:  # one folder must not stop the others
             results.append(BatchItemResult(folder.relative, False, str(output), None, f"{type(error).__name__}: {error}"))
     return {

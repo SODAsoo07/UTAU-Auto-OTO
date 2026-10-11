@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 import json
 import re
 from dataclasses import dataclass, replace
@@ -22,7 +23,9 @@ from .acoustic_evidence import (
     NEURAL_FEATURE_BACKEND_ID,
     extract_acoustic_evidence,
 )
+from . import analysis_cache
 from .audio import analyze_wav
+from .voicing import frame_voicing
 from .confidence import load_confidence_profile, predict_risks, runtime_confidence_features
 from .ctc_prior import CTCPrior, load_ctc_prior
 from .external_evidence import ExternalEvidenceError, fuse_external_evidence, load_external_evidence
@@ -177,7 +180,7 @@ def align_recording(
     if requested not in {"acoustic_heuristic_v1", "hsmm", "hybrid", "posterior_hsmm", "legacy_hsmm_compat"}:
         raise ValueError(f"지원하지 않는 alignment backend입니다: {requested}")
     wav_path = project.wav_path(recording)
-    evidence = extract_acoustic_evidence(
+    evidence = _cached_evidence(
         wav_path,
         internal_sample_rate=project.audio.internal_sample_rate,
         convert_to_mono=project.audio.convert_to_mono,
@@ -286,7 +289,7 @@ def align_recording_with_posterior_model(
     """
 
     model_path = posterior_model.resolve()
-    evidence = extract_acoustic_evidence(
+    evidence = _cached_evidence(
         project.wav_path(recording),
         internal_sample_rate=project.audio.internal_sample_rate,
         convert_to_mono=project.audio.convert_to_mono,
@@ -396,6 +399,7 @@ def _apply_posterior_artifact(
     return apply_posterior_model(evidence, model, model_path=model_path)
 
 
+@lru_cache(maxsize=8)  # parsed once per process instead of once per recording
 def load_alignment_profile(feature_backend: str = FEATURE_BACKEND_ID) -> AlignmentProfile:
     resource_name = PROFILE_RESOURCES.get(feature_backend)
     if resource_name is None:
@@ -864,7 +868,7 @@ def _hsmm_alignment(
         )
     if not decoded.ok:
         reason = decoded.reason or "no_valid_path"
-        raise AlignmentError(f"HSMM decode 실패: {reason}")
+        raise AlignmentError(f"HSMM decode 실패: {reason} ({recording.wav})")
     if pause_positions:
         # The pause states only order the decode; timelines keep the recording's own phones.
         dropped = set(pause_positions)
@@ -914,6 +918,12 @@ def _hsmm_alignment(
         and not use_external_evidence and ctc_prior is None and not state_duration_constraints
         and not manual_occurrence_start_anchors and not boundary_competition_strength
         and not occurrence_ranker_strength)
+    nasal_vowel_policy = None
+    if general_coda_onset and recording.metadata.get("format_hint") == "vcv":
+        state_segments, nasal_vowel_policy = _vcv_nasal_vowel_boundaries(
+            recording, state_segments, evidence.frame_times_ms,
+            _audio_band_balance(evidence.wav_path, evidence.frame_times_ms))
+        nasal_vowel_policy = nasal_vowel_policy if nasal_vowel_policy["applied_count"] else None
     coda_set = CVVC_NASAL_CODAS | ({"l"} if korean_coda_period_ratio and korean_lateral_coda_rhythm else frozenset())
     if general_coda_onset and any(
             slot["vowel"] + 1 <= slot["end"] and recording.phones[slot["vowel"] + 1] in coda_set
@@ -1056,6 +1066,7 @@ def _hsmm_alignment(
            if coda_onset_policy is not None and slot_policy is None else {}),
         **({"korean_stop_closure_policy": stop_closure_policy} if stop_closure_policy is not None else {}),
         **({"korean_ending_voicing_policy": ending_policy} if ending_policy is not None else {}),
+        **({"korean_vcv_nasal_vowel_policy": nasal_vowel_policy} if nasal_vowel_policy is not None else {}),
     }
     aligner_hash = hashlib.sha256(
         json.dumps(aligner_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1118,6 +1129,7 @@ def _hsmm_alignment(
                if coda_onset_policy is not None and slot_policy is None else {}),
             **({"korean_stop_closure_policy": stop_closure_policy} if stop_closure_policy is not None else {}),
             **({"korean_ending_voicing_policy": ending_policy} if ending_policy is not None else {}),
+            **({"korean_vcv_nasal_vowel_policy": nasal_vowel_policy} if nasal_vowel_policy is not None else {}),
             **({"sonorant_identity": identity_policy} if identity_policy is not None else {}),
             **({"syllabic_sonorant_holds": held_policy} if held_policy is not None else {}),
             **({"explicit_pause_tokens": pause_policy} if pause_policy is not None else {}),
@@ -1391,7 +1403,9 @@ def _cvvc_nasal_coda_boundaries(
         step_ms = float(times[region[candidates[best]]])
         entry["step_strength"] = steps[best]
         entry["step_ms"] = step_ms
-        if steps[best] < CVVC_CODA_STEP_MIN_STRENGTH:
+        # VCV codas only close the held final vowel, so the window holds one murmur onset;
+        # even weak steps (eu/i + n/m) land within ~60 ms of hand-made OTOs (a Korean VCV bank, 2026-10-11).
+        if steps[best] < CVVC_CODA_STEP_MIN_STRENGTH and recording.metadata.get("format_hint") != "vcv":
             entry["applied"], entry["reason"] = False, "weak_band_balance_step"
             continue
         adjusted[vowel_ids[-1]] = replace(stable, end_ms=step_ms)
@@ -1406,6 +1420,115 @@ def _cvvc_nasal_coda_boundaries(
         "min_strength": CVVC_CODA_STEP_MIN_STRENGTH, "slots": slots_out,
         "applied_count": sum(1 for item in slots_out if item.get("applied")),
     }
+
+
+VCV_NASAL_ONSETS = frozenset({"n", "m"})
+VCV_BAND_STEP_HALF_WINDOW_MS = 80.0
+# Fitted on the nasal files of two Korean VCV banks (2026-10-11): moves up to 150 ms always help; farther
+# moves only when the step is strong (held hums that the decoder let a vowel swallow).
+VCV_NASAL_FREE_SHIFT_MS = 150.0
+VCV_NASAL_FAR_STEP_MIN_STRENGTH = 0.7
+
+
+def _vcv_nasal_vowel_boundaries(recording: RecordingSpec, segments: Sequence[StateSegment], times: np.ndarray,
+                                balance: np.ndarray) -> tuple[list[StateSegment], dict[str, object]]:
+    """Development hypothesis: in Korean VCV, a vowel after nasal murmur starts at the murmur->vowel band step.
+
+    Held hums (M_maM_meo, maNmaN) are as loud as the vowels, so the decoder may let a
+    vowel swallow the murmur. For each vowel preceded by a run of nasal phones, the
+    vowel start moves to the strongest fall of low-minus-mid band balance between the
+    preceding vowel's start and this vowel's end; the run's start moves to the strongest
+    rise before it. Inner nasal boundaries (coda m | onset m) are not observable and are
+    rescaled. Only these boundaries move; no phone is added, removed or reordered.
+    """
+    adjusted = list(segments)
+    smooth = np.convolve(balance, np.ones(5) / 5.0, mode="same")
+    phones = recording.phones
+    half = VCV_BAND_STEP_HALF_WINDOW_MS
+
+    def span(index: int) -> tuple[float, float] | None:
+        items = [item for item in adjusted if item.phone_index == index]
+        return (min(item.start_ms for item in items), max(item.end_ms for item in items)) if items else None
+
+    def local_step(lo: float, hi: float, sign: float) -> tuple[float, float] | None:
+        best = None
+        for k in np.flatnonzero((times >= lo) & (times <= hi)):
+            before = smooth[(times >= times[k] - half) & (times < times[k])]
+            after = smooth[(times >= times[k]) & (times < times[k] + half)]
+            if len(before) < 3 or len(after) < 3:
+                continue
+            value = sign * float(before.mean() - after.mean())
+            if best is None or value > best[1]:
+                best = (float(times[k]), value)
+        return best
+
+    entries: list[dict[str, object]] = []
+    for vowel in range(1, len(phones)):
+        # w-glides keep murmur-like low F2 into the vowel; the step there is not the onset.
+        if (not _is_vowel_like(phones[vowel]) or phones[vowel].startswith("w")
+                or phones[vowel - 1] not in VCV_NASAL_ONSETS):
+            continue
+        first = vowel - 1
+        while first > 0 and phones[first - 1] in CVVC_NASAL_CODAS:
+            first -= 1
+        vowel_span, run_start = span(vowel), span(first)
+        left_vowel = first - 1 if first > 0 and _is_vowel_like(phones[first - 1]) else None
+        left_span = span(left_vowel) if left_vowel is not None else None
+        if vowel_span is None or run_start is None:
+            continue
+        lo = (left_span[0] + 60.0) if left_span is not None else run_start[0]
+        fall = local_step(lo + 40.0, vowel_span[1] - 60.0, 1.0)
+        entry: dict[str, object] = {"vowel_phone_index": vowel, "nasal_phone_indices": list(range(first, vowel)),
+                                    "decoded_vowel_start_ms": vowel_span[0]}
+        entries.append(entry)
+        if fall is None or fall[1] <= 0.0:
+            entry["applied"], entry["reason"] = False, "no_murmur_to_vowel_fall"
+            continue
+        if abs(fall[0] - vowel_span[0]) > VCV_NASAL_FREE_SHIFT_MS and fall[1] < VCV_NASAL_FAR_STEP_MIN_STRENGTH:
+            # A far move must be backed by a clear step, or it may land on a neighbouring syllable.
+            entry["applied"], entry["reason"], entry["fall_strength"] = False, "weak_far_step", fall[1]
+            continue
+        start = run_start[0]
+        if left_span is not None:
+            rise = local_step(lo, fall[0] - 40.0, -1.0)
+            if rise is not None and rise[1] > 0.0:
+                start = rise[0]
+        if fall[0] - start < 30.0:
+            entry["applied"], entry["reason"] = False, "murmur_too_short"
+            continue
+        if left_span is not None:
+            _respan_phone(adjusted, left_vowel, left_span[0], start)
+        count = vowel - first
+        # Inner nasal boundaries are invisible; the onset nasal keeps at most 60 ms.
+        onset_len = min(60.0, (fall[0] - start) / 2.0) if count > 1 else fall[0] - start
+        edges = [start + (fall[0] - onset_len - start) * i / (count - 1) for i in range(count)] if count > 1 else [start]
+        edges.append(fall[0])
+        for offset, phone in enumerate(range(first, vowel)):
+            _respan_phone(adjusted, phone, edges[offset], edges[offset + 1])
+        _respan_phone(adjusted, vowel, fall[0], vowel_span[1])
+        entry.update({"applied": True, "vowel_start_ms": fall[0], "fall_strength": fall[1], "murmur_start_ms": start,
+                      "shift_ms": fall[0] - vowel_span[0]})
+    return adjusted, {"review_only": True, "anchors_are_gold": False, "profile": "korean_vcv_nasal_vowel_v1",
+                      "cue": "smoothed(P<400Hz - P800-3000Hz)/P fall (murmur->vowel) and rise (vowel->murmur), 80 ms halves",
+                      "slots": entries, "applied_count": sum(1 for item in entries if item.get("applied"))}
+
+
+def _is_vowel_like(phone: str) -> bool:
+    return phone not in CVVC_NASAL_CODAS | {"l", "r"} and phone not in _NON_VOWEL_SLOT_PHONES and any(
+        ch in "aeiou" for ch in phone) and phone[0] in "aeiouwy"
+
+
+def _respan_phone(adjusted: list[StateSegment], phone: int, start: float, end: float) -> None:
+    """Linearly map one phone's states into [start, end]."""
+    ids = [i for i, item in enumerate(adjusted) if item.phone_index == phone]
+    if not ids or end <= start:
+        return
+    old_start, old_end = adjusted[ids[0]].start_ms, adjusted[ids[-1]].end_ms
+    scale = (end - start) / max(old_end - old_start, 1e-6)
+    for i in ids:
+        item = adjusted[i]
+        adjusted[i] = replace(item, start_ms=start + (item.start_ms - old_start) * scale,
+                              end_ms=start + (item.end_ms - old_start) * scale)
 
 
 def _coda_onset_profile(lateral_from_rhythm: bool, weak_nasals_from_rhythm: bool,
@@ -1437,7 +1560,12 @@ def _codas_from_rhythm(recording: RecordingSpec, adjusted: list[StateSegment],
     lengths = [float(entry["step_ms"]) - phone_start[int(entry["vowel_phone_index"])]
                for entry in slots_out if entry.get("applied")]
     fallback_ms = None
-    if period_ratio is not None and len(lengths) < 2:
+    vcv = recording.metadata.get("format_hint") == "vcv"
+    if vcv and len(lengths) < 2:
+        # VCV lists hold every vowel up to the next consonant, the final one too;
+        # the CVVC vowel share of the period would cut the final vowel to ~1/4.
+        fallback_ms = _vcv_median_vowel_ms(recording, adjusted)
+    elif period_ratio is not None and len(lengths) < 2:
         # Too few acoustic codas: use the bank's vowel share of the syllable period.
         onsets = [phone_start[slot["start"]] for slot in recording.metadata.get("phone_slots", ())
                   if slot["start"] in phone_start]
@@ -1447,7 +1575,8 @@ def _codas_from_rhythm(recording: RecordingSpec, adjusted: list[StateSegment],
         slots = {slot["vowel"]: slot for slot in recording.metadata.get("phone_slots", ())}
         for entry in [item for item in slots_out if item.get("reason") == "weak_band_balance_step"]:
             vowel = int(entry["vowel_phone_index"])
-            if slots[vowel]["start"] >= vowel:
+            # A vowel-only VCV syllable starts at the decoded vowel->vowel boundary.
+            if slots[vowel]["start"] >= vowel and not (vcv and fallback_ms is not None):
                 entry["rhythm_fallback"] = "no_consonant_onset"
                 continue
             entry["weak_step_ms"] = entry.pop("step_ms")
@@ -1465,6 +1594,21 @@ def _codas_from_rhythm(recording: RecordingSpec, adjusted: list[StateSegment],
                                     "cue": "median vowel length before nasal codas in this file"}
         slots_out.append(entry)
         _start_from_rhythm(adjusted, vowel, coda, lengths, entry, fallback_ms)
+
+
+_NON_VOWEL_SLOT_PHONES = frozenset({"n", "m", "ng", "l", "br", "breath", "exh", "vf", "pau", "sil", "sp"})
+
+
+def _vcv_median_vowel_ms(recording: RecordingSpec, adjusted: Sequence[StateSegment]) -> float | None:
+    """Median decoded length of the coda-less vowels of a VCV recording (None if fewer than two)."""
+    spans: dict[int, list[float]] = {}
+    for segment in adjusted:
+        spans.setdefault(segment.phone_index, []).extend((segment.start_ms, segment.end_ms))
+    lengths = [max(spans[slot["vowel"]]) - min(spans[slot["vowel"]])
+               for slot in recording.metadata.get("phone_slots", ())
+               if slot["vowel"] == slot["end"] and slot["vowel"] in spans
+               and recording.phones[slot["vowel"]] not in _NON_VOWEL_SLOT_PHONES]
+    return float(np.median(lengths)) if len(lengths) >= 2 else None
 
 
 def _start_from_rhythm(adjusted: list[StateSegment], vowel: int, coda: int, lengths: list[float],
@@ -1564,6 +1708,84 @@ def _ending_voicing_offsets(recording: RecordingSpec, wav_path: Path,
     70 Hz and so counts as unvoiced. The phone ends at the last voiced frame
     before 40 ms without voicing, searched from 40 ms after its start to the
     end of the following phone (or of the file).
+
+    Only the searched frames get the autocorrelation (FFT), shared per file through
+    ``voicing.frame_voicing``; the level gate uses the whole file's loudest frame, as before.
+    Equal to ``_ending_voicing_offsets_reference``.
+    """
+    adjusted = list(segments)
+    voicing = frame_voicing(wav_path)
+    times = voicing.times
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
+    for i, segment in enumerate(adjusted):
+        first.setdefault(segment.phone_index, i)
+        last[segment.phone_index] = i
+    phones = recording.phones
+    searches: list[tuple[int, int | None, float, np.ndarray]] = []
+    for p, phone in enumerate(phones):
+        if phone in CVVC_UNVOICED_ENDINGS or p not in last:
+            continue
+        following = p + 1 if p + 1 < len(phones) else None
+        if following is not None and phones[following] not in CVVC_UNVOICED_ENDINGS:
+            continue
+        if following is not None and following not in first:
+            continue
+        end_limit = adjusted[last[following]].end_ms if following is not None else float(times[-1])
+        candidates = np.flatnonzero((times >= adjusted[first[p]].start_ms + 40.0) & (times <= end_limit))
+        searches.append((p, following, end_limit, candidates))
+    needed = np.unique(np.concatenate([item[3] for item in searches])) if searches else np.zeros(0, dtype=np.int64)
+    voiced = voicing.voiced(needed)
+    endings: list[dict[str, object]] = []
+    for p, following, end_limit, candidates in searches:
+        phone = phones[p]
+        entry: dict[str, object] = {"phone_index": p, "phone": phone,
+                                    "next": phones[following] if following is not None else "file_end",
+                                    "decoded_end_ms": float(adjusted[last[p]].end_ms)}
+        endings.append(entry)
+        offset = None
+        run, previous_voiced = 0, None
+        for k in candidates:
+            if voiced[k]:
+                previous_voiced, run = k, 0
+            else:
+                run += 1
+                if run >= 8 and previous_voiced is not None:
+                    offset = float(times[previous_voiced])
+                    break
+        if offset is None:
+            entry["applied"], entry["reason"] = False, "no_voicing_offset"
+            continue
+        tail = adjusted[last[p]]
+        upper = adjusted[first[following]].end_ms - 10.0 if following is not None else end_limit
+        offset = min(max(offset, tail.start_ms + 5.0), upper)
+        if abs(offset - tail.end_ms) < 10.0:
+            entry["applied"], entry["reason"] = False, "within_10ms"
+            continue
+        adjusted[last[p]] = replace(tail, end_ms=offset)
+        if following is not None:
+            head = adjusted[first[following]]
+            adjusted[first[following]] = replace(head, start_ms=offset)
+        entry.update(applied=True, offset_ms=offset, shift_ms=offset - float(tail.end_ms))
+    return adjusted, {
+        "review_only": True, "anchors_are_gold": False,
+        "cue": "last voiced frame (autocorrelation >= 0.5, F0 70-600 Hz) before 40 ms unvoiced",
+        "endings": endings, "applied_count": sum(1 for item in endings if item.get("applied")),
+    }
+
+
+def _ending_voicing_offsets_reference(recording: RecordingSpec, wav_path: Path,
+                            segments: Sequence[StateSegment]) -> tuple[list[StateSegment], dict[str, object]]:
+    """Original whole-file version of _ending_voicing_offsets, kept as its reference.
+
+    Development hypothesis: a phrase-final vowel or coda ends where voicing stops.
+
+    Applies to a vowel or sonorant followed by breath, fry or a pause, and to
+    the last phone of the file. Voicing is a normalised autocorrelation peak of
+    at least 0.5 for F0 70-600 Hz (30 ms window, 5 ms hop); fry falls below
+    70 Hz and so counts as unvoiced. The phone ends at the last voiced frame
+    before 40 ms without voicing, searched from 40 ms after its start to the
+    end of the following phone (or of the file).
     """
     adjusted = list(segments)
     samples, rate = sf.read(str(wav_path), dtype="float64", always_2d=True)
@@ -1630,7 +1852,19 @@ def _ending_voicing_offsets(recording: RecordingSpec, wav_path: Path,
     }
 
 
+def _cached_evidence(path: Path, **options: object) -> AcousticEvidence:
+    """extract_acoustic_evidence, computed once per WAV and options during a generation run."""
+    key = tuple(sorted((name, str(value)) for name, value in options.items()))
+    return analysis_cache.cached("evidence", path, key, lambda: extract_acoustic_evidence(path, **options))
+
+
 def _audio_band_balance(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
+    times = np.asarray(times_ms, dtype=np.float64)
+    return analysis_cache.cached("band_balance", wav_path, (times.tobytes(),),
+                                 lambda: _audio_band_balance_uncached(wav_path, times))
+
+
+def _audio_band_balance_uncached(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
     """Low (<400 Hz) minus mid (800-3000 Hz) power share at each frame time.
 
     A vowel keeps F2 energy in the mid band; a nasal murmur moves almost all

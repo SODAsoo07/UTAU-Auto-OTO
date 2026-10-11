@@ -181,8 +181,11 @@ def test_korean_cvvc_dash_ending_binds_the_last_vowel():
     phones, got = bound("_a'a'i'a'u'a'e'a.wav", ["a -", "i -"], language="korean", format_type="cvvc")
     assert got["a -"][0] == (max(i for i, p in enumerate(phones) if p == "a"),)
     assert got["i -"][0] == (phones.index("i"),)       # a single occurrence stays where it is
-    # Other formats keep the first event for '-'.
+    # Korean VCV lists also close the phrase with '-' (ggo…ggo-: "o -"; 7 hand OTOs, 2026-10-11).
     phones, got = bound("_a'a'i'a'u'a'e'a.wav", ["a -"], language="korean", format_type="vcv")
+    assert got["a -"][0][0] == max(i for i, p in enumerate(phones) if p == "a")
+    # Other formats keep the first event for '-'.
+    phones, got = bound("_a'a'i'a'u'a'e'a.wav", ["a -"], language="japanese", format_type="vcv")
     assert got["a -"][0][0] == phones.index("a")
 
 
