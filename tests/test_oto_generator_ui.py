@@ -301,3 +301,30 @@ def test_preview_oto_path_prefers_last_generated_then_output_then_bank(tmp_path:
     generated = tmp_path / "gen.ini"
     generated.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
     assert preview_oto_path(last_oto=str(generated), output=output, bank=bank) == generated
+
+
+def test_app_icon_is_packaged_and_applied() -> None:
+    from universal_auto_oto.app_icon import apply_app_icon, app_icon_path
+
+    path = app_icon_path()
+    assert path is not None and path.read_bytes()[:4] == b"\x00\x00\x01\x00"  # ICO header
+
+    class Window:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.scheduled: list[tuple] = []
+
+        def iconbitmap(self, bitmap=None, default=None) -> None:
+            self.calls.append((bitmap, default))
+
+        def after(self, delay, callback) -> None:
+            self.scheduled.append((delay, callback))
+
+    window = Window()
+    apply_app_icon(window)
+    assert window.calls == [(str(path), None), (None, str(path))]
+    delayed = Window()
+    apply_app_icon(delayed, delay_ms=250)  # CTkToplevel overrides the icon at 200 ms
+    assert delayed.calls == [] and delayed.scheduled[0][0] == 250
+    delayed.scheduled[0][1]()
+    assert delayed.calls == [(str(path), None), (None, str(path))]

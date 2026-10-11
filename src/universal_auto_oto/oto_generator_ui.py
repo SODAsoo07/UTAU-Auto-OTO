@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from . import __version__
+from .app_icon import CTK_TOPLEVEL_ICON_DELAY_MS, apply_app_icon
 from .bank_detection import FormatDetection, check_language, detect_format
 from .batch import BankFolder, discover_bank_folders, run_batch
 from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
@@ -571,6 +572,7 @@ def launch_oto_generator_ui(
             self.geometry("1100x800")
             self.minsize(900, 680)
             self.configure(fg_color=PANEL_BG)
+            apply_app_icon(self)
             self._events: queue.Queue[tuple[str, object]] = queue.Queue()
             self._busy = False
             self._cancel = threading.Event()
@@ -1282,6 +1284,7 @@ def launch_oto_generator_ui(
 
         def _choose_batch_folders(self, folders: list[BankFolder]) -> list[BankFolder]:
             dialog = ctk.CTkToplevel(self)
+            apply_app_icon(dialog, delay_ms=CTK_TOPLEVEL_ICON_DELAY_MS)
             dialog.title("일괄 생성할 폴더 선택")
             dialog.geometry("820x520")
             dialog.transient(self)

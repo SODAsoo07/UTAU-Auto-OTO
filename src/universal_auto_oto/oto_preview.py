@@ -19,8 +19,9 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import stft
 
-from .waveform_view import WaveformViewport, visible_waveform_columns
+from .app_icon import apply_app_icon
 from .oto_io import oto_cutoff_end_abs, read_text_auto
+from .waveform_view import WaveformViewport, visible_waveform_columns
 
 SPECTROGRAM_MAX_HZ = 8000.0
 SPECTROGRAM_RANGE_DB = 80.0
@@ -408,6 +409,8 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
     window.geometry("1280x760")
     window.minsize(900, 520)
     apply_dark_style(window)
+    if master is None:  # a Toplevel inherits the generator's icon
+        apply_app_icon(window)
 
     state: dict[str, object] = {"audio": None, "audio_path": None, "row": None, "index": None, "viewport": None,
                                 "image": None, "pan": None, "temp": None, "oto_path": None}
