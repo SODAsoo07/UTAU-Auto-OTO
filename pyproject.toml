@@ -27,6 +27,7 @@ neural = [
 [project.scripts]
 universal-auto-oto = "universal_auto_oto.cli:main"
 universal-auto-oto-ui = "universal_auto_oto.oto_generator_ui:main"
+universal-auto-oto-preview = "universal_auto_oto.oto_preview:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

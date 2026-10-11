@@ -285,3 +285,19 @@ def test_progress_fraction_and_text():
     assert progress_text("align:2/3", 312, 758, 2.0, 0.4) == "정렬 2/3단계 312/758"  # too early for an estimate
     assert progress_text("align:2/3", 312, 758, 120.0, 0.4) == "정렬 2/3단계 312/758 · 남은 시간 약 3분"
     assert progress_text("render", 10, 758, 400.0, 0.95, "[2/5] ") == "[2/5] OTO 작성 10/758 · 남은 시간 약 21초"
+
+
+def test_preview_oto_path_prefers_last_generated_then_output_then_bank(tmp_path: Path) -> None:
+    from universal_auto_oto.oto_generator_ui import preview_oto_path
+
+    bank, output = tmp_path / "bank", tmp_path / "out"
+    bank.mkdir()
+    output.mkdir()
+    assert preview_oto_path(last_oto=None, output=output, bank=bank) is None
+    (bank / "oto.ini").write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+    assert preview_oto_path(last_oto=None, output=output, bank=bank) == bank / "oto.ini"
+    (output / "oto.ini").write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+    assert preview_oto_path(last_oto=None, output=output, bank=bank) == output / "oto.ini"
+    generated = tmp_path / "gen.ini"
+    generated.write_text("a.wav=a,0,0,0,0,0\n", encoding="utf-8")
+    assert preview_oto_path(last_oto=str(generated), output=output, bank=bank) == generated

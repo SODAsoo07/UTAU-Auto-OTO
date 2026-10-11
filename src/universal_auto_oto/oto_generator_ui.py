@@ -17,6 +17,7 @@ from .batch import BankFolder, discover_bank_folders, run_batch
 from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
                         generate_voicebank, inspect_voicebank)
 from .oto_io import parse_oto
+from .oto_preview import launch_oto_preview
 from .oto_style import OtoStyle, load_oto_style, save_oto_style
 
 
@@ -388,6 +389,14 @@ def alias_generation_log_lines(payload: Mapping[str, object]) -> list[str]:
     return lines
 
 
+def preview_oto_path(*, last_oto: object, output: Path | None, bank: Path | None) -> Path | None:
+    """The oto.ini the preview opens: the last generated one, else the output folder's, else the bank's."""
+
+    candidates = [Path(str(last_oto))] if last_oto else []
+    candidates += [folder / "oto.ini" for folder in (output, bank) if folder is not None]
+    return next((path for path in candidates if path.is_file()), None)
+
+
 def summarize_generation_result(report: Mapping[str, object], *, output: Path) -> dict[str, object]:
     """Build a compact summary while retaining the full report on disk."""
 
@@ -560,6 +569,7 @@ def launch_oto_generator_ui(
             self._advanced_visible = False
             self._log_lines: list[str] = []
             self.last_summary: dict[str, object] = {}
+            self._preview_window = None
             self.bank_var = tk.StringVar(value=str(initial_bank or ""))
             self.base_oto_var = tk.StringVar()
             self.output_var = tk.StringVar(value=str(initial_output or ""))
@@ -781,6 +791,7 @@ def launch_oto_generator_ui(
                 ("OTO 생성", self._generate),
                 ("출력 검증", self._validate_output),
                 ("출력 폴더 열기", self._open_output),
+                ("OTO 미리보기", self._open_preview),
             ):
                 button = ctk_module.CTkButton(
                     action_row,
@@ -800,6 +811,14 @@ def launch_oto_generator_ui(
                 text="review는 자동 검수 보류이며 오류 확정이 아닙니다.",
                 text_color=HINT,
             ).pack(side="left")
+            ctk_module.CTkButton(
+                toolbar,
+                text="OTO 미리보기",
+                width=120,
+                command=self._open_preview,
+                fg_color=PRIMARY,
+                hover_color=PRIMARY_HOVER,
+            ).pack(side="right", padx=(8, 0))
             ctk_module.CTkButton(
                 toolbar,
                 text="생성 보고서 열기",
@@ -1307,6 +1326,34 @@ def launch_oto_generator_ui(
                 messagebox.showwarning("출력 폴더 없음", "먼저 OTO를 생성하세요.", parent=self)
                 return
             os.startfile(str(output))
+
+        def _open_preview(self) -> None:
+            bank = self.bank_var.get().strip()
+            output = self.output_var.get().strip()
+            oto = preview_oto_path(
+                last_oto=self.last_summary.get("oto"),
+                output=Path(output).expanduser() if output else None,
+                bank=Path(bank).expanduser() if bank else None,
+            )
+            if oto is None:
+                chosen = filedialog.askopenfilename(
+                    parent=self, title="미리볼 oto.ini 선택", filetypes=[("oto.ini", "*.ini"), ("모든 파일", "*.*")]
+                )
+                if not chosen:
+                    return
+                oto = Path(chosen)
+            wav_dirs = [Path(bank).expanduser()] if bank else []
+            try:
+                window = self._preview_window
+                if window is not None and window.winfo_exists():
+                    window.load_oto(oto, wav_dirs)  # reuse: show the latest result in the open window
+                    window.deiconify()
+                    window.lift()
+                    window.focus_force()
+                else:
+                    self._preview_window = launch_oto_preview(oto, wav_dirs, master=self)
+            except Exception as error:
+                messagebox.showerror("미리보기 실패", f"{type(error).__name__}: {error}", parent=self)
 
         def _open_report(self) -> None:
             report = Path(self.output_var.get().strip()).expanduser() / "generation_report.json"
