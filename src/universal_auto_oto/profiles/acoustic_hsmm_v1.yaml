@@ -1,0 +1,40 @@
+schema_version: 1
+profile_id: acoustic_hsmm_v1
+feature_backend: numpy_spectral_hsmm_v1
+roles:
+  silence:
+    tracks: {low_energy: 0.75, spectral_stability: 0.15, aperiodic: 0.10}
+  active:
+    tracks: {energy: 0.70, periodicity: 0.15, aperiodic: 0.15}
+  closure:
+    tracks: {low_energy: 0.42, aperiodic: 0.23, spectral_stability: 0.20, consonant_like: 0.15}
+  burst:
+    tracks: {flux: 0.55, energy_rise: 0.20, aperiodic: 0.15, consonant_like: 0.10}
+  release:
+    tracks: {flux: 0.50, energy_rise: 0.25, aperiodic: 0.15, consonant_like: 0.10}
+  frication:
+    tracks: {high_band_energy: 0.42, aperiodic: 0.28, consonant_like: 0.20, energy: 0.10}
+  consonant:
+    tracks: {consonant_like: 0.50, aperiodic: 0.20, flux: 0.15, energy: 0.15}
+  consonant_like:
+    tracks: {consonant_like: 0.60, aperiodic: 0.20, flux: 0.20}
+  transition:
+    tracks: {transition: 0.45, boundary: 0.25, periodicity_rise: 0.15, energy_rise: 0.15}
+  vowel_transition:
+    tracks: {transition: 0.40, vowel_like: 0.25, periodicity_rise: 0.20, energy_rise: 0.15}
+  vowel_stable:
+    tracks: {vowel_like: 0.42, periodicity: 0.28, spectral_stability: 0.20, energy: 0.10}
+  vowel_nucleus:
+    tracks: {vowel_like: 0.45, periodicity: 0.30, spectral_stability: 0.20, energy: 0.05}
+  periodic:
+    tracks: {periodicity: 0.70, energy: 0.20, spectral_stability: 0.10}
+  aperiodic:
+    tracks: {aperiodic: 0.65, flux: 0.20, energy: 0.15}
+  breath:
+    tracks: {aperiodic: 0.35, high_band_energy: 0.25, energy: 0.20, low_energy: 0.20}
+  irregular_voicing_onset:
+    tracks: {periodicity_rise: 0.40, transition: 0.30, aperiodic: 0.20, energy_rise: 0.10}
+  irregular_periodic:
+    tracks: {periodicity: 0.45, aperiodic: 0.25, energy: 0.20, spectral_stability: 0.10}
+  other:
+    tracks: {active: 0.50, boundary: 0.20, periodicity: 0.15, aperiodic: 0.15}

@@ -1,0 +1,272 @@
+schema_version: 1
+template_set_id: builtin_oto_templates_v1
+templates:
+  v:
+    role: v
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[0].vowel_stable_start, phone[0].vowel_transition, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: max(pre_abs + 45, fallback(phone[0].vowel_stable_start, pre_abs + 55))
+      cutoff_abs: phone[0].end - 15
+  v_plain:
+    role: v
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[0].vowel_stable_start, phone[0].vowel_transition, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: max(pre_abs + 45, fallback(phone[0].vowel_stable_start, pre_abs + 55))
+      cutoff_abs: phone[0].end - 15
+  v_blend:
+    role: v_blend
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[0].vowel_stable_start, phone[0].vowel_transition, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: max(pre_abs + 45, fallback(phone[0].vowel_stable_start, pre_abs + 55))
+      cutoff_abs: phone[0].end - 15
+  v_head:
+    role: v_head
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: max(phone[0].start + 45, fallback(phone[0].vowel_transition, phone[0].start + 60))
+      overlap_abs: max(offset_abs, pre_abs - 35)
+      fixed_abs: pre_abs + 55
+      cutoff_abs: phone[0].end - 15
+  cv:
+    role: cv
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[1].vowel_transition, phone[0].vowel_transition, phone[1].start, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: fallback(phone[1].vowel_stable_start, phone[0].vowel_stable_start, pre_abs + 55)
+      cutoff_abs: fallback(phone[1].end - 15, phone[0].end - 15)
+  fry_to_sustain:
+    role: cv
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[1].vowel_stable_start, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: min(phone[1].end - 15, pre_abs + 55)
+      cutoff_abs: phone[1].end - 15
+  cv_head:
+    role: cv_head
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[1].vowel_transition, phone[0].vowel_transition, phone[1].start, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: fallback(phone[1].vowel_stable_start, phone[0].vowel_stable_start, pre_abs + 55)
+      cutoff_abs: fallback(phone[1].end - 15, phone[0].end - 15)
+  cv_hard:
+    role: cv
+    soft_constraints:
+      - {id: consonant_lead_ms, expression: "duration(overlap_abs, pre_abs)", min: 5, max: 140}
+      - {id: fixed_tail_ms, expression: "duration(pre_abs, fixed_abs)", min: 15, max: 160}
+    anchors:
+      offset_abs: phone[0].start - 12
+      overlap_abs: max(offset_abs, phone[0].start - 8)
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start)
+      fixed_abs: max(pre_abs, fallback(phone[1].vowel_stable_start + 15, pre_abs + 55))
+      cutoff_abs: fallback(phone[1].end - 20, fixed_abs + 80)
+  cv_softer_hard:
+    role: cv
+    soft_constraints:
+      - {id: consonant_lead_ms, expression: "duration(overlap_abs, pre_abs)", min: 5, max: 130}
+      - {id: fixed_tail_ms, expression: "duration(pre_abs, fixed_abs)", min: 15, max: 150}
+    anchors:
+      offset_abs: phone[0].start - 8
+      overlap_abs: max(offset_abs, phone[0].start - 5)
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start)
+      fixed_abs: max(pre_abs, fallback(phone[1].vowel_stable_start + 12, pre_abs + 50))
+      cutoff_abs: fallback(phone[1].end - 20, fixed_abs + 80)
+  cv_soft:
+    role: cv
+    soft_constraints:
+      - {id: consonant_blend_ms, expression: "duration(overlap_abs, pre_abs)", min: 5, max: 120}
+      - {id: fixed_tail_ms, expression: "duration(pre_abs, fixed_abs)", min: 15, max: 150}
+    anchors:
+      offset_abs: phone[0].start + 5
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start)
+      overlap_abs: lerp(phone[0].start, pre_abs, 0.48)
+      fixed_abs: max(pre_abs, fallback(phone[1].vowel_stable_start + 14, pre_abs + 50))
+      cutoff_abs: fallback(phone[1].end - 20, fixed_abs + 80)
+  cv_glide:
+    role: cv
+    soft_constraints:
+      - {id: glide_pre_ratio, expression: "ratio(pre_abs, phone[0].start, phone[0].end)", min: 0.42, max: 0.78}
+      - {id: glide_overlap_ratio, expression: "ratio(overlap_abs, phone[0].start, phone[0].end)", min: 0.30, max: 0.65}
+    anchors:
+      offset_abs: phone[0].start + 3
+      overlap_abs: lerp(phone[0].start, phone[0].end, 0.45)
+      pre_abs: lerp(phone[0].start, phone[0].end, 0.58)
+      fixed_abs: max(pre_abs, fallback(phone[1].vowel_stable_start + 12, pre_abs + 45))
+      cutoff_abs: fallback(phone[1].end - 20, fixed_abs + 80)
+  cv_cluster:
+    role: cv
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[1].start, phone[0].start + 60)
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: fallback(phone[2].vowel_stable_start, pre_abs + 55)
+      cutoff_abs: fallback(phone[2].end - 15, fixed_abs + 80)
+  vcv_cluster:
+    role: vcv
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[2].start, phone[1].release, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 70)
+      fixed_abs: fallback(phone[3].vowel_stable_start, phone[3].start, pre_abs + 60)
+      cutoff_abs: fallback(phone[3].end - 15, fixed_abs + 120)
+  vc:
+    role: vc
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[1].consonant_onset, phone[1].closure_start, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 50)
+      fixed_abs: fallback(phone[1].release, phone[1].end, pre_abs + 35)
+      cutoff_abs: fallback(phone[1].end + 30, fixed_abs + 30)
+  vc_semivowel:
+    role: vc
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: phone[1].start
+      overlap_abs: max(offset_abs, pre_abs - 50)
+      fixed_abs: phone[2].start
+      cutoff_abs: fallback(phone[2].vowel_stable_start, phone[2].vowel_transition, phone[2].start)
+  v_semivowel:
+    role: vc
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: phone[1].start
+      overlap_abs: max(offset_abs, pre_abs - 50)
+      fixed_abs: phone[1].start
+      cutoff_abs: fallback(phone[1].vowel_stable_start, phone[1].vowel_transition, phone[1].start)
+  consonant_semivowel:
+    role: special
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: phone[1].start
+      overlap_abs: max(offset_abs, pre_abs - 45)
+      fixed_abs: phone[1].start
+      cutoff_abs: fallback(phone[1].vowel_stable_start, phone[1].vowel_transition, phone[1].start)
+  vc_hard:
+    role: vc
+    soft_constraints:
+      - {id: vowel_lead_ms, expression: "duration(offset_abs, pre_abs)", min: 10, max: 180}
+      - {id: consonant_fixed_ms, expression: "duration(pre_abs, fixed_abs)", min: 5, max: 140}
+    anchors:
+      offset_abs: max(phone[0].start, fallback(phone[0].vowel_stable_end, phone[0].end) - 80)
+      overlap_abs: max(offset_abs, fallback(phone[0].vowel_stable_end, phone[0].end) - 35)
+      pre_abs: fallback(phone[1].closure_start, phone[1].start)
+      fixed_abs: max(pre_abs, fallback(phone[1].release, pre_abs + 45))
+      cutoff_abs: max(fixed_abs + 5, fallback(phone[1].release - 5, phone[1].end - 8))
+  vc_soft_voiced:
+    role: vc
+    soft_constraints:
+      - {id: vowel_lead_ms, expression: "duration(offset_abs, pre_abs)", min: 10, max: 180}
+      - {id: consonant_fixed_ms, expression: "duration(pre_abs, fixed_abs)", min: 5, max: 160}
+    anchors:
+      offset_abs: max(phone[0].start, fallback(phone[0].vowel_stable_end, phone[0].end) - 80)
+      overlap_abs: max(offset_abs, fallback(phone[0].vowel_stable_end, phone[0].end) - 35)
+      pre_abs: phone[1].start
+      fixed_abs: lerp(phone[1].start, phone[1].end, 0.65)
+      cutoff_abs: phone[1].end - 8
+  vc_soft_unvoiced:
+    role: vc
+    soft_constraints:
+      - {id: vowel_lead_ms, expression: "duration(offset_abs, pre_abs)", min: 10, max: 180}
+      - {id: consonant_fixed_ms, expression: "duration(pre_abs, fixed_abs)", min: 5, max: 180}
+    anchors:
+      offset_abs: max(phone[0].start, fallback(phone[0].vowel_stable_end, phone[0].end) - 80)
+      overlap_abs: max(offset_abs, fallback(phone[0].vowel_stable_end, phone[0].end) - 35)
+      pre_abs: fallback(phone[1].frication_start, phone[1].start)
+      fixed_abs: max(pre_abs, fallback(phone[1].frication_end - 10, phone[1].end - 15))
+      cutoff_abs: phone[1].end - 8
+  vcv:
+    role: vcv
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[2].vowel_transition, phone[1].release, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 70)
+      fixed_abs: fallback(phone[2].vowel_stable_start, phone[2].start, pre_abs + 60)
+      cutoff_abs: fallback(phone[2].end - 15, fixed_abs + 120)
+  vcv_plain:
+    role: vcv
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[2].vowel_transition, phone[1].release, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 70)
+      fixed_abs: fallback(phone[2].vowel_stable_start, phone[2].start, pre_abs + 60)
+      cutoff_abs: fallback(phone[2].end - 15, fixed_abs + 120)
+  vv:
+    role: vv
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 55)
+      fixed_abs: fallback(phone[1].vowel_stable_start, pre_abs + 50)
+      cutoff_abs: fallback(phone[1].end - 15, fixed_abs + 120)
+  vv_plain:
+    role: vv
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start)
+      overlap_abs: max(offset_abs, pre_abs - 55)
+      fixed_abs: fallback(phone[1].vowel_stable_start, pre_abs + 50)
+      cutoff_abs: fallback(phone[1].end - 15, fixed_abs + 120)
+  cvvc:
+    role: cvvc
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[1].vowel_transition, phone[1].start, phone[0].vowel_transition)
+      overlap_abs: max(offset_abs, pre_abs - 50)
+      fixed_abs: fallback(phone[1].vowel_stable_start, pre_abs + 60)
+      cutoff_abs: fallback(phone[1].end - 15, fixed_abs + 120)
+  release:
+    role: release
+    anchors:
+      offset_abs: max(phone[0].start, phone[0].end - 420)
+      pre_abs: max(offset_abs + 30, phone[0].end - 150)
+      overlap_abs: max(offset_abs, pre_abs - 60)
+      fixed_abs: max(pre_abs + 25, phone[0].end - 70)
+      cutoff_abs: phone[0].end - 15
+  v_end:
+    role: v_end
+    anchors:
+      offset_abs: max(phone[0].start, phone[0].end - 420)
+      pre_abs: max(offset_abs + 30, phone[0].end - 150)
+      overlap_abs: max(offset_abs, pre_abs - 60)
+      fixed_abs: max(pre_abs + 25, phone[0].end - 70)
+      cutoff_abs: phone[0].end - 15
+  ending_exhalation:
+    role: release
+    anchors:
+      offset_abs: max(phone[0].start, phone[0].end - 420)
+      pre_abs: phone[1].start
+      overlap_abs: max(offset_abs, pre_abs - 60)
+      fixed_abs: max(pre_abs + 25, phone[1].end - 70)
+      cutoff_abs: phone[1].end - 15
+  breath:
+    role: breath
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[0].breath_start, phone[0].start + 45)
+      overlap_abs: max(offset_abs, pre_abs - 35)
+      fixed_abs: fallback(phone[0].breath_end, pre_abs + 45)
+      cutoff_abs: phone[0].end - 15
+  silence:
+    role: silence
+    anchors:
+      offset_abs: fallback(phone[0].silence_start, phone[0].start)
+      overlap_abs: offset_abs
+      pre_abs: offset_abs
+      fixed_abs: fallback(phone[0].silence_end - 5, phone[0].end - 5)
+      cutoff_abs: phone[0].end - 1
+  special_generic:
+    role: special
+    anchors:
+      offset_abs: fallback(phone[0].usable_start, phone[0].activity_start, phone[0].start)
+      overlap_abs: offset_abs
+      pre_abs: fallback(phone[0].activity_start, offset_abs)
+      fixed_abs: fallback(phone[0].activity_end, phone[0].end - 10)
+      cutoff_abs: fallback(phone[0].usable_end, phone[0].end - 1)

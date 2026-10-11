@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from universal_auto_oto.alias_generation import generate_aliases, generate_bank_alias_rows
+from universal_auto_oto.voicebank_project_adapter import parse_filename_phone_slots
+
+
+def test_japanese_vcv_kana_aliases() -> None:
+    aliases = generate_aliases("_ああいあうえあ.wav", format_hint="vcv", language_hint="japanese")
+    assert aliases == ["- あ", "a あ", "a い", "i あ", "a う", "u え", "e あ", "a -"]
+
+
+def test_japanese_cvvc_uses_kana_cv_and_romaji_vc() -> None:
+    aliases = generate_aliases("_かきゃ.wav", format_hint="cvvc", language_hint="japanese")
+    assert aliases == ["- か", "か", "a ky", "きゃ", "a -"]
+
+
+def test_japanese_romaji_file_names_give_kana_aliases() -> None:
+    aliases = generate_aliases("a-ba-bi.wav", format_hint="cv", language_hint="japanese")
+    assert aliases == ["あ", "ば", "び"]
+
+
+def test_korean_cvvc_codas_and_pause_heads() -> None:
+    aliases = generate_aliases("_an'ban'_'gin.wav", format_hint="cvvc", language_hint="korean")
+    assert aliases == ["- a", "a", "a n", "n b", "ba", "a n", "- gi", "gi", "i n", "n -"]
+
+
+def test_korean_cvc_writes_codas_as_one_syllable() -> None:
+    aliases = generate_aliases("ban_gin.wav", format_hint="cvc", language_hint="korean")
+    assert "an" in aliases and "in" in aliases
+    assert "a n" not in aliases
+
+
+def test_cv_has_no_transition_aliases() -> None:
+    assert generate_aliases("ka_ki.wav", format_hint="cv", language_hint="korean") == ["ka", "ki"]
+
+
+def test_bank_rows_keep_each_alias_once_and_list_unreadable_files() -> None:
+    rows, skipped = generate_bank_alias_rows(
+        ["ka_ki.wav", "ka_ku.wav", "???.wav"], format_hint="cvvc", language_hint="korean"
+    )
+    assert [row.alias for row in rows["ka_ki.wav"]] == ["- ka", "ka", "a k", "ki", "i -"]
+    assert [row.alias for row in rows["ka_ku.wav"]] == ["ku", "u -"]
+    assert [item["wav"] for item in skipped] == ["???.wav"]
+
+
+def test_japanese_romaji_moraic_n_and_glued_breath_parse() -> None:
+    assert parse_filename_phone_slots("ga-N-ga.wav", format_hint="cvvc", language_hint="japanese") == (
+        ("g", "a"), ("n",), ("g", "a"))
+    assert parse_filename_phone_slots("aR.wav", format_hint="cv", language_hint="japanese") == (("a",), ("exh",))

@@ -1,0 +1,43 @@
+schema_version: 2
+profile_id: acoustic_hsmm_neural_v1
+feature_backends: [onnx_neural_evidence_v1]
+roles:
+  silence:
+    tracks: {neural_silence_likelihood: 1.0}
+  active:
+    tracks: {neural_active_likelihood: 1.0}
+  closure:
+    tracks: {neural_closure_likelihood: 0.72, neural_aperiodic_likelihood: 0.16, neural_active_likelihood: 0.12}
+  burst:
+    tracks: {neural_burst_likelihood: 0.58, neural_boundary_likelihood: 0.30, neural_consonant_likelihood: 0.12}
+  release:
+    tracks: {neural_boundary_likelihood: 0.50, neural_burst_likelihood: 0.30, neural_vowel_onset_likelihood: 0.20}
+  frication:
+    tracks: {neural_frication_likelihood: 0.58, neural_aperiodic_likelihood: 0.26, neural_consonant_likelihood: 0.16}
+  consonant:
+    tracks: {neural_consonant_likelihood: 0.58, neural_aperiodic_likelihood: 0.20, neural_boundary_likelihood: 0.22}
+  consonant_like:
+    tracks: {neural_consonant_likelihood: 0.68, neural_aperiodic_likelihood: 0.20, neural_boundary_likelihood: 0.12}
+  transition:
+    # PublicData phone intervals do not label internal transition spans, so
+    # neural_transition_likelihood is deliberately excluded until reviewed
+    # sub-phone transition labels support training that head.
+    tracks: {neural_vowel_onset_likelihood: 0.53, neural_boundary_likelihood: 0.47}
+  vowel_transition:
+    tracks: {neural_vowel_onset_likelihood: 0.50, neural_boundary_likelihood: 0.32, neural_periodic_likelihood: 0.18}
+  vowel_stable:
+    tracks: {neural_vowel_stable_likelihood: 0.54, neural_periodic_likelihood: 0.34, neural_active_likelihood: 0.12}
+  vowel_nucleus:
+    tracks: {neural_vowel_stable_likelihood: 0.52, neural_periodic_likelihood: 0.38, neural_active_likelihood: 0.10}
+  periodic:
+    tracks: {neural_periodic_likelihood: 0.64, neural_vowel_stable_likelihood: 0.24, neural_active_likelihood: 0.12}
+  aperiodic:
+    tracks: {neural_aperiodic_likelihood: 0.65, neural_frication_likelihood: 0.20, neural_consonant_likelihood: 0.15}
+  breath:
+    tracks: {neural_breath_likelihood: 0.66, neural_aperiodic_likelihood: 0.22, neural_active_likelihood: 0.12}
+  irregular_voicing_onset:
+    tracks: {neural_vowel_onset_likelihood: 0.43, neural_boundary_likelihood: 0.35, neural_aperiodic_likelihood: 0.22}
+  irregular_periodic:
+    tracks: {neural_periodic_likelihood: 0.46, neural_aperiodic_likelihood: 0.31, neural_vowel_stable_likelihood: 0.23}
+  other:
+    tracks: {neural_active_likelihood: 0.27, neural_boundary_likelihood: 0.25, neural_consonant_likelihood: 0.24, neural_vowel_stable_likelihood: 0.24}

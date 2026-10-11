@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sodasoo07.github.io/universal-auto-oto/project-v1.schema.json",
+  "title": "Universal Auto OTO Project v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "project",
+    "inventory",
+    "recordings",
+    "audio",
+    "alignment",
+    "generation",
+    "calibration"
+  ],
+  "properties": {
+    "format_version": {"const": 1},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "language_hint": {"type": "string", "default": "mixed"}
+      }
+    },
+    "inventory": {"type": "string", "minLength": 1},
+    "recordings": {"type": "string", "minLength": 1},
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recursive", "convert_to_mono", "internal_sample_rate", "resampler"],
+      "properties": {
+        "recursive": {"type": "boolean"},
+        "convert_to_mono": {"type": "boolean"},
+        "internal_sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000},
+        "resampler": {"type": "string", "minLength": 1}
+      }
+    },
+    "alignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "device"],
+      "properties": {
+        "model": {"type": ["string", "null"]},
+        "backend": {"enum": ["acoustic_heuristic_v1", "hsmm", "hybrid", "posterior_hsmm", "legacy_hsmm_compat"]},
+        "device": {"enum": ["cpu", "cuda", "auto"]},
+        "feature_backend": {
+          "enum": ["numpy_spectral_hsmm_v1", "numpy_multiband_pitch_v2", "numpy_multiband_pitch_v3", "world_fusion_v2", "onnx_neural_evidence_v1"],
+          "default": "numpy_multiband_pitch_v2"
+        },
+        "evidence_model": {"type": ["string", "null"]},
+        "evidence_provider": {"enum": ["cuda", "cpu", "auto"], "default": "cuda"},
+        "scorer_backend": {"enum": ["heuristic_fallback", "trained_subphone_v1"], "default": "heuristic_fallback"},
+        "scorer_model": {"type": ["string", "null"]},
+        "scorer_model_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$"},
+        "allow_heuristic_fallback": {"type": "boolean", "default": true},
+        "use_ctc_prior": {"type": "boolean", "default": false},
+        "use_hsmm": {"type": "boolean", "default": true},
+        "use_prototypes": {"const": false, "default": false}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"backend": {"const": "posterior_hsmm"}}},
+          "then": {"required": ["model"], "properties": {"model": {"type": "string", "minLength": 1}}}
+        },
+        {
+          "if": {"properties": {"backend": {"const": "acoustic_heuristic_v1"}, "use_ctc_prior": {"const": true}}, "required": ["use_ctc_prior"]},
+          "then": false
+        },
+        {
+          "if": {"properties": {"feature_backend": {"const": "onnx_neural_evidence_v1"}}, "required": ["feature_backend"]},
+          "then": {"required": ["evidence_model"], "properties": {"evidence_model": {"type": "string", "minLength": 1}}}
+        },
+        {
+          "if": {"properties": {"scorer_backend": {"const": "trained_subphone_v1"}}, "required": ["scorer_backend"]},
+          "then": {
+            "required": ["scorer_model", "scorer_model_sha256"],
+            "properties": {
+              "scorer_model": {"type": "string", "minLength": 1},
+              "scorer_model_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+            }
+          }
+        }
+      ]
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["templates", "output", "output_layout", "output_encoding", "atomic_write", "backup_existing"],
+      "properties": {
+        "templates": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "output": {"type": "string", "minLength": 1},
+        "output_layout": {"enum": ["preserve_source_directories", "single_root"]},
+        "output_encoding": {"enum": ["preserve", "utf-8", "cp932", "shift_jis", "cp949", "euc-kr"]},
+        "atomic_write": {"type": "boolean"},
+        "backup_existing": {"type": "boolean"},
+        "write_debug_timeline": {"type": "boolean", "default": true},
+        "write_textgrid": {"type": "boolean", "default": false},
+        "split_review": {"type": "boolean", "default": true}
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "profile": {"type": "string"},
+        "renderer_enabled": {"type": "boolean", "default": false},
+        "renderer_profile": {"type": "string"},
+        "alias_type_enabled": {"type": "boolean", "default": false},
+        "alias_type_profile": {"type": "string"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"renderer_enabled": {"const": true}}, "required": ["renderer_enabled"]},
+          "then": {"required": ["renderer_profile"]}
+        },
+        {
+          "if": {"properties": {"alias_type_enabled": {"const": true}}, "required": ["alias_type_enabled"]},
+          "then": {"required": ["alias_type_profile"]}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,40 @@
+schema_version: 2
+profile_id: acoustic_hsmm_v3_pitch_confidence_local_contrast
+feature_backends: [numpy_multiband_pitch_v3]
+roles:
+  silence:
+    tracks: {low_energy: 0.52, closure_likelihood: 0.18, spectral_stability: 0.14, aperiodic: 0.10, active: 0.06}
+  active:
+    tracks: {active: 0.46, energy: 0.22, voicing: 0.16, aperiodic: 0.16}
+  closure:
+    tracks: {closure_likelihood: 0.48, low_energy: 0.18, energy_fall: 0.13, spectral_stability: 0.11, consonant_like: 0.10}
+  burst:
+    tracks: {burst_likelihood: 0.29, burst_local_contrast: 0.27, onset_strength: 0.16, flux: 0.11, high_band_energy: 0.09, energy_rise: 0.08}
+  release:
+    tracks: {burst_local_contrast: 0.26, boundary_local_contrast: 0.22, burst_likelihood: 0.20, onset_strength: 0.13, flux: 0.11, energy_rise: 0.08}
+  frication:
+    tracks: {high_band_energy: 0.29, breath_likelihood: 0.22, aperiodic: 0.20, consonant_like: 0.18, spectral_entropy: 0.11}
+  consonant:
+    tracks: {consonant_like: 0.39, aperiodic: 0.18, onset_strength: 0.14, boundary: 0.11, active: 0.10, sonorant_boundary_likelihood: 0.08}
+  consonant_like:
+    tracks: {consonant_like: 0.52, aperiodic: 0.18, boundary: 0.12, onset_strength: 0.10, sonorant_boundary_likelihood: 0.08}
+  transition:
+    tracks: {vowel_onset_likelihood: 0.29, transition: 0.22, boundary_local_contrast: 0.17, vowel_boundary_likelihood: 0.15, voicing_rise_local: 0.10, energy_rise_local: 0.07}
+  vowel_transition:
+    tracks: {vowel_onset_likelihood: 0.34, boundary_local_contrast: 0.20, transition: 0.18, vowel_boundary_likelihood: 0.13, pitch_confidence_rise_local: 0.09, periodicity_rise_local: 0.06}
+  vowel_stable:
+    tracks: {vowel_like: 0.24, nucleus_likelihood: 0.20, pitch_confidence: 0.18, voicing: 0.12, spectral_stability: 0.11, hnr: 0.08, f0_stability: 0.07}
+  vowel_nucleus:
+    tracks: {nucleus_likelihood: 0.34, vowel_like: 0.20, pitch_confidence: 0.17, voicing: 0.10, spectral_stability: 0.08, hnr: 0.06, f0_stability: 0.05}
+  periodic:
+    tracks: {pitch_confidence: 0.31, voicing: 0.20, hnr: 0.17, f0_stability: 0.12, spectral_stability: 0.11, energy: 0.09}
+  aperiodic:
+    tracks: {aperiodic: 0.42, spectral_entropy: 0.19, high_band_energy: 0.14, consonant_like: 0.12, flux: 0.08, active: 0.05}
+  breath:
+    tracks: {breath_likelihood: 0.48, aperiodic: 0.18, high_band_energy: 0.13, spectral_entropy: 0.10, active: 0.07, low_energy: 0.04}
+  irregular_voicing_onset:
+    tracks: {vowel_onset_likelihood: 0.27, voicing_rise_local: 0.22, transition: 0.18, aperiodic: 0.12, pitch_confidence_rise_local: 0.11, onset_strength: 0.10}
+  irregular_periodic:
+    tracks: {pitch_confidence: 0.24, periodicity: 0.21, voicing: 0.19, aperiodic: 0.16, hnr: 0.11, spectral_stability: 0.09}
+  other:
+    tracks: {active: 0.25, boundary_local_contrast: 0.20, boundary: 0.14, consonant_like: 0.13, vowel_like: 0.13, pitch_confidence: 0.08, aperiodic: 0.07}

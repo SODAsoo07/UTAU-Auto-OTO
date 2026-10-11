@@ -1,0 +1,63 @@
+schema_version: 1
+rule_set_id: builtin_alias_type_rules_v1
+rules:
+  - id: cv_glide
+    priority: 100
+    structural_roles: [CV]
+    when: {glide_like: true}
+    result: {subtype: glide, template: "builtin:cv_glide", transition_type: glide}
+  - id: cv_transition_dominant_approximant
+    priority: 99
+    structural_roles: [CV]
+    when: {approximant_like: true, transition_dominant: true}
+    result: {subtype: glide, template: "builtin:cv_glide", transition_type: glide}
+  - id: cv_softer_hard
+    priority: 90
+    structural_roles: [CV]
+    when: {stop_like: true, voiced: true}
+    result: {subtype: softer_hard, template: "builtin:cv_softer_hard", transition_type: plain}
+  - id: cv_softer_hard_affricate
+    priority: 90
+    structural_roles: [CV]
+    when: {affricate_like: true, voiced: true}
+    result: {subtype: softer_hard, template: "builtin:cv_softer_hard", transition_type: plain}
+  - id: cv_hard
+    priority: 85
+    structural_roles: [CV]
+    when: {stop_like: true, voiced: false}
+    result: {subtype: hard, template: "builtin:cv_hard", transition_type: plain}
+  - id: cv_hard_affricate
+    priority: 85
+    structural_roles: [CV]
+    when: {affricate_like: true, voiced: false}
+    result: {subtype: hard, template: "builtin:cv_hard", transition_type: plain}
+  - id: cv_soft_unvoiced
+    priority: 80
+    structural_roles: [CV]
+    when: {fricative_like: true, voiced: false}
+    result: {subtype: soft_unvoiced, template: "builtin:cv_soft", transition_type: plain}
+  - id: cv_soft_voiced
+    priority: 80
+    structural_roles: [CV]
+    when: {sonorant: true, voiced: true, glide_like: false}
+    result: {subtype: soft_voiced, template: "builtin:cv_soft", transition_type: plain}
+  - id: vc_hard
+    priority: 90
+    structural_roles: [VC]
+    when: {stop_like: true}
+    result: {subtype: hard, template: "builtin:vc_hard", transition_type: plain}
+  - id: vc_hard_affricate
+    priority: 90
+    structural_roles: [VC]
+    when: {affricate_like: true}
+    result: {subtype: hard, template: "builtin:vc_hard", transition_type: plain}
+  - id: vc_soft_unvoiced
+    priority: 80
+    structural_roles: [VC]
+    when: {fricative_like: true, voiced: false}
+    result: {subtype: soft_unvoiced, template: "builtin:vc_soft_unvoiced", transition_type: plain}
+  - id: vc_soft_voiced
+    priority: 80
+    structural_roles: [VC]
+    when: {sonorant: true, voiced: true, glide_like: false}
+    result: {subtype: soft_voiced, template: "builtin:vc_soft_voiced", transition_type: plain}
