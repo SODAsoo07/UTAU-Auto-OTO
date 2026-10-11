@@ -155,3 +155,34 @@ def _descendants(widget):
     for child in widget.winfo_children():
         yield child
         yield from _descendants(child)
+
+
+def test_all_review_without_risk_model_is_unrated(tmp_path: Path) -> None:
+    from universal_auto_oto.oto_preview import status_summary
+
+    oto = _write(tmp_path / "oto.ini", OTO)
+    _write(tmp_path / "oto.clean.ini", "\n")
+    _write(tmp_path / "oto.review.ini", OTO)
+    statuses = load_row_statuses(oto, parse_oto_rows(oto))
+    assert {status.split for status in statuses} == {"unrated"}
+    assert {status.label for status in statuses} == {"미판정"}
+    assert "모두 미판정" in status_summary(statuses)
+    review = tmp_path / "oto.review.ini"  # opening the review file itself says the same
+    assert {status.split for status in load_row_statuses(review, parse_oto_rows(review))} == {"unrated"}
+
+
+def test_row_report_marks_uncalibrated_rows_unrated(tmp_path: Path) -> None:
+    oto = _write(tmp_path / "oto.ini", OTO)
+    lines = OTO.splitlines(keepends=True)
+    _write(tmp_path / "oto.clean.ini", lines[0])
+    _write(tmp_path / "oto.review.ini", "".join(lines[1:]))
+    report = [
+        {"wav": "a.wav", "alias": "- ka", "split": "clean", "confidence": 0.9, "reasons": ["row_risk_low"]},
+        {"wav": "a.wav", "alias": "a ki", "split": "review", "confidence": 0.5,
+         "reasons": ["uncalibrated_confidence"]},
+        {"wav": "b.wav", "alias": "- ka", "split": "review", "confidence": 0.4, "reasons": ["row_risk_high"]},
+        {"wav": "b.wav", "alias": "- ka", "split": "review", "confidence": 0.5, "reasons": ["low_confidence"]},
+    ]
+    _write(tmp_path / "row_report.jsonl", "\n".join(json.dumps(item) for item in report))
+    splits = [status.split for status in load_row_statuses(oto, parse_oto_rows(oto))]
+    assert splits == ["clean", "unrated", "review", "review"]

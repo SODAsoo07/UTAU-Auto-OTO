@@ -38,8 +38,13 @@ PARAM_COLORS = {
     "offset": "#90caf9",
     "cutoff": "#90caf9",
 }
-SPLIT_COLORS = {"clean": "#2e7d32", "review": "#ef6c00", "high_risk": "#c62828", "unknown": "#546e7a"}
-SPLIT_TEXT_COLORS = {"clean": "#81c784", "review": "#ffb74d", "high_risk": "#ff6e6e", "unknown": "#90a4ae"}
+SPLIT_COLORS = {"clean": "#2e7d32", "review": "#ef6c00", "high_risk": "#c62828", "unrated": "#4a525e",
+                "unknown": "#546e7a"}
+SPLIT_TEXT_COLORS = {"clean": "#81c784", "review": "#ffb74d", "high_risk": "#ff6e6e", "unrated": "#a7b0bc",
+                     "unknown": "#90a4ae"}
+# Rows of formats without a fitted risk model (only Korean VCV/CVC have one, row_risk.py) are all
+# written to the review file; that means "not judged", not "risky", so they get their own state.
+UNRATED_NOTE = "위험도 모델이 없는 형식(한국어 VCV·CVC 외)이라 자동 판정하지 않았습니다"
 # The generator UI's dark palette (oto_generator_ui.PANEL_BG etc.).
 DARK = {
     "bg": "#1F232B",
@@ -81,7 +86,7 @@ class OtoPreviewRow:
 
 @dataclass(frozen=True)
 class RowStatus:
-    split: str  # clean / review / unknown
+    split: str  # clean / review / unrated / unknown
     risk: float | None = None  # P(|pre error| > 80 ms) when the row went through row_risk.py
     confidence: float | None = None
     reasons: tuple[str, ...] = ()
@@ -94,7 +99,7 @@ class RowStatus:
 
     @property
     def label(self) -> str:
-        names = {"clean": "clean", "review": "review", "high_risk": "review!", "unknown": "-"}
+        names = {"clean": "clean", "review": "review", "high_risk": "review!", "unrated": "미판정", "unknown": "-"}
         return names[self.color_key]
 
 
@@ -149,7 +154,10 @@ def load_row_statuses(oto_path: Path, rows: Sequence[OtoPreviewRow]) -> list[Row
         split = {key: part for key in keys}
     else:
         part, base_path = "", oto_path
-    clean_path, review_path = _companion(oto_path, "clean"), _companion(oto_path, "review")
+    clean_path, review_path = _companion(base_path, "clean"), _companion(base_path, "review")
+    # Nothing clean at all: the bank's format has no risk model, so "review" carries no judgement.
+    all_review = clean_path.is_file() and review_path.is_file() and not _has_rows(clean_path) \
+        and _has_rows(review_path)
     if not part and clean_path.is_file() and review_path.is_file():
         for name, path in (("clean", clean_path), ("review", review_path)):
             try:
@@ -193,8 +201,18 @@ def load_row_statuses(oto_path: Path, rows: Sequence[OtoPreviewRow]) -> list[Row
         risked = any(reason.startswith("row_risk_") for reason in reasons)
         risk = 1.0 - confidence if risked and confidence is not None else None
         row_split = split.get(key) or str(entry.get("split") or "unknown")
+        unrated = "uncalibrated_confidence" in reasons if entry else all_review
+        if row_split == "review" and unrated and not risked:
+            row_split = "unrated"
         statuses.append(RowStatus(row_split, risk, confidence, reasons))
     return statuses
+
+
+def _has_rows(path: Path) -> bool:
+    try:
+        return bool(parse_oto_rows(path))
+    except (OSError, ValueError, UnicodeError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -331,8 +349,12 @@ def status_summary(statuses: Sequence[RowStatus]) -> str:
     counts: dict[str, int] = defaultdict(int)
     for status in statuses:
         counts[status.color_key] += 1
+    if statuses and counts["unrated"] == len(statuses):
+        return f"{len(statuses)}행 모두 미판정  |  {UNRATED_NOTE}"
     summary = (f"{len(statuses)}행  clean {counts['clean']}  review {counts['review'] + counts['high_risk']}"
                f" (그중 risk>{HIGH_RISK:.1f} {counts['high_risk']})")
+    if counts["unrated"]:
+        summary += f"  미판정 {counts['unrated']}"
     if statuses and counts["unknown"] == len(statuses):
         summary += "  |  clean/review 파일이 없어 위험도 표시 없음"
     return summary

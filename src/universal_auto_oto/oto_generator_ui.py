@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
+from . import __version__
 from .bank_detection import FormatDetection, check_language, detect_format
 from .batch import BankFolder, discover_bank_folders, run_batch
 from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
@@ -20,6 +21,8 @@ from .oto_io import parse_oto
 from .oto_preview import launch_oto_preview
 from .oto_style import OtoStyle, load_oto_style, save_oto_style
 
+
+APP_NAME = f"AutoOTO v{__version__}"
 
 LANGUAGE_CHOICES: Mapping[str, str | None] = {
     "한국어": "korean",
@@ -115,6 +118,12 @@ PRIMARY_HOVER = ("#8DA6B8", "#286C9D")
 TEXT = ("#2B2D2E", "#FFFFFF")
 HINT = ("#4E5866", "#DCE9F8")
 HEADER = ("#394045", "#EAF4FF")
+# The main action (OTO 생성) gets its own color; the other run buttons are muted.
+GENERATE = ("#3C8D5A", "#2E9E5B")
+GENERATE_HOVER = ("#337A4D", "#26864D")
+SECONDARY = ("#D7DEE5", "#2B313D")
+SECONDARY_HOVER = ("#CAD4DE", "#3A4251")
+SECONDARY_TEXT = ("#334151", "#DCE9F8")
 
 
 @dataclass(frozen=True)
@@ -558,7 +567,7 @@ def launch_oto_generator_ui(
     class OtoGeneratorApp(ctk.CTk):
         def __init__(self) -> None:
             super().__init__()
-            self.title("AutoOTO v3")
+            self.title(APP_NAME)
             self.geometry("1100x800")
             self.minsize(900, 680)
             self.configure(fg_color=PANEL_BG)
@@ -599,7 +608,7 @@ def launch_oto_generator_ui(
             header = ctk_module.CTkFrame(self, fg_color="transparent")
             header.pack(fill="x", padx=18, pady=(14, 8))
             ctk_module.CTkLabel(
-                header, text="AutoOTO v3", font=("", 22, "bold"), text_color=HEADER
+                header, text=APP_NAME, font=("", 22, "bold"), text_color=HEADER
             ).pack(side="left")
             ctk_module.CTkLabel(
                 header, text="WAV를 분석해 새 oto.ini를 생성합니다.", text_color=HINT
@@ -639,6 +648,7 @@ def launch_oto_generator_ui(
             )
 
         def _build_generate_tab(self, ctk_module, tab) -> None:
+            self._build_action_bar(ctk_module, tab)  # packed first so the scroll area cannot squeeze it
             scroll = ctk_module.CTkScrollableFrame(tab, fg_color="transparent")
             scroll.pack(fill="both", expand=True, padx=8, pady=8)
             paths = self._section(
@@ -780,28 +790,30 @@ def launch_oto_generator_ui(
                 ).pack(anchor="w", padx=24, pady=2)
             ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent", height=10).pack()
 
-            actions = self._section(
-                ctk_module, scroll, "실행", "생성 백엔드는 routed_hsmm으로 고정됩니다."
-            )
-            self.actions_frame = actions
-            action_row = ctk_module.CTkFrame(actions, fg_color="transparent")
-            action_row.pack(fill="x", padx=12, pady=(0, 12))
+        def _build_action_bar(self, ctk_module, tab) -> None:
+            """Run buttons pinned under the scrolling settings, so they stay visible however far
+            the settings (or the opened advanced section) extend. OTO 생성 is the main action."""
+
+            bar = ctk_module.CTkFrame(tab, fg_color=PANEL_BG, border_width=1, border_color=PANEL_BORDER)
+            bar.pack(side="bottom", fill="x", padx=18, pady=(0, 8))
             for label, command in (
                 ("입력 검사", self._inspect),
-                ("OTO 생성", self._generate),
                 ("출력 검증", self._validate_output),
                 ("출력 폴더 열기", self._open_output),
                 ("OTO 미리보기", self._open_preview),
             ):
                 button = ctk_module.CTkButton(
-                    action_row,
-                    text=label,
-                    command=command,
-                    fg_color=PRIMARY,
-                    hover_color=PRIMARY_HOVER,
+                    bar, text=label, width=110, height=32, command=command,
+                    fg_color=SECONDARY, hover_color=SECONDARY_HOVER, text_color=SECONDARY_TEXT,
                 )
-                button.pack(side="left", padx=(0, 8))
+                button.pack(side="left", padx=(10, 0), pady=10)
                 self._buttons.append(button)
+            generate = ctk_module.CTkButton(
+                bar, text="OTO 생성", width=200, height=44, font=("", 16, "bold"), command=self._generate,
+                fg_color=GENERATE, hover_color=GENERATE_HOVER, text_color="#FFFFFF",
+            )
+            generate.pack(side="right", padx=10, pady=10)
+            self._buttons.append(generate)
 
         def _build_result_tab(self, ctk_module, tab) -> None:
             toolbar = ctk_module.CTkFrame(tab, fg_color="transparent")
@@ -921,7 +933,7 @@ def launch_oto_generator_ui(
         def _toggle_advanced(self) -> None:
             self._advanced_visible = not self._advanced_visible
             if self._advanced_visible:
-                self.advanced_frame.pack(fill="x", padx=10, pady=6, before=self.actions_frame)
+                self.advanced_frame.pack(fill="x", padx=10, pady=6)
                 self.advanced_toggle_btn.configure(text="▼ 고급 설정")
             else:
                 self.advanced_frame.pack_forget()
@@ -1440,7 +1452,7 @@ def main(argv: list[str] | None = None) -> int:
     multiprocessing.freeze_support()  # parallel alignment workers in a frozen (exe) build
     import argparse
 
-    parser = argparse.ArgumentParser(description="AutoOTO v3 desktop UI")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} desktop UI")
     parser.add_argument("--bank", type=Path, help="Pre-fill the voicebank folder")
     parser.add_argument("--output", type=Path, help="Pre-fill the output folder")
     args = parser.parse_args(argv)
