@@ -7,7 +7,7 @@ import platform
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -17,7 +17,8 @@ from .alias_generation import generate_bank_alias_rows
 from .audio import analyze_wav, file_sha256
 from .domain import RenderedOtoRow
 from .evaluation import WavDirectoryIndex
-from .oto_io import parse_oto, resolve_output_encoding, write_lines_atomic
+from .i18n import t
+from .oto_io import normalize_alias_suffix, parse_oto, resolve_output_encoding, with_alias_suffix, write_lines_atomic
 from .oto_style import OtoStyle
 from .planning import (
     fallback_source_rows,
@@ -201,6 +202,8 @@ class GenerationOptions:
     generate_missing_aliases: bool = False
     # Advanced settings: overlap ratios, preutterance shifts, fixed/cutoff margins (oto_style.py).
     oto_style: OtoStyle | None = None
+    # Appended to every generated alias as "_<suffix>" ("C4" -> "か_C4"), like the previous AutoOTO.
+    alias_suffix: str = ""
     # Recording tempo. A BPM given by the user wins; otherwise estimate_bpm measures
     # it from steady list files. Either becomes a syllable-grid prior in the decoder
     # (alignment bpm_grid_v1), skipped per file when the pace does not follow it.
@@ -266,6 +269,7 @@ def inspect_voicebank(bank: Path, base_oto: Path | None = None, recursive: bool 
 
 
 def generate_voicebank(options: GenerationOptions) -> dict[str, Any]:
+    normalize_alias_suffix(options.alias_suffix)  # reject ',', '=' before any alignment work
     backend = options.backend.strip().casefold()
     if options.development_alignment_profile and backend != "routed_hsmm":
         raise ValueError("development alignment profiles require backend=routed_hsmm")
@@ -291,10 +295,10 @@ def _generate_voicebank_legacy(options: GenerationOptions) -> dict[str, Any]:
     bank = options.bank.resolve()
     output = options.output.resolve()
     if not bank.is_dir():
-        raise FileNotFoundError(f"보이스뱅크 폴더가 없습니다: {bank}")
+        raise FileNotFoundError(t("보이스뱅크 폴더가 없습니다: {path}", path=bank))
     _validate_output_location(bank, output, allow_in_place=options.allow_in_place_output)
     if output.exists() and any(output.iterdir()) and not options.force:
-        raise FileExistsError(f"출력 폴더가 비어 있지 않습니다. --force가 필요합니다: {output}")
+        raise FileExistsError(t("출력 폴더가 비어 있지 않습니다. --force가 필요합니다: {path}", path=output))
     output.mkdir(parents=True, exist_ok=True)
     timing_profiles, timing_profile_sha256 = load_timing_profile(
         options.timing_profile,
@@ -302,7 +306,7 @@ def _generate_voicebank_legacy(options: GenerationOptions) -> dict[str, Any]:
     )
     wavs, excluded_wavs = _selected_wavs(bank, options)
     if not wavs:
-        raise ValueError(f"WAV를 찾지 못했습니다: {bank}")
+        raise ValueError(t("WAV를 찾지 못했습니다: {path}", path=bank))
     wav_index = WavDirectoryIndex(bank, recursive=options.recursive)
 
     base_rows = []
@@ -365,6 +369,8 @@ def _generate_voicebank_legacy(options: GenerationOptions) -> dict[str, Any]:
                 row = force_review(row, "filename_fallback_alias_plan")
             if not options.allow_heuristic_clean:
                 row = force_review(row, "uncalibrated_acoustic_heuristic")
+            if options.alias_suffix:
+                row = replace(row, alias=with_alias_suffix(row.alias, options.alias_suffix))
             all_rows.append(row)
             row_timing_sources.append(
                 "audio_plus_dataset_timing_profile" if profile_entry else "audio_only_no_base_oto_timing"
@@ -606,6 +612,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         alignment_workers=options.alignment_workers or default_alignment_workers(),
         progress=options.progress,
         oto_style=options.oto_style,
+        alias_suffix=options.alias_suffix,
         output_oto=output / "oto.ini",
         force=options.force,
         source_encoding=source_encoding,
@@ -637,6 +644,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             "vc_end_policy": options.vc_end_policy,
             "release_pre_policy": options.release_pre_policy,
             "oto_style": options.oto_style.to_dict() if options.oto_style is not None else None,
+            "alias_suffix": normalize_alias_suffix(options.alias_suffix) or None,
             "recording_tempo": tempo,
             "excluded_alias_rows": len(build.excluded_rows),
             "manual_occurrence_override": (
@@ -752,10 +760,10 @@ def filename_syllable_count(wav_name: str, format_hint: str | None, language_hin
 def _validate_output_location(bank: Path, output: Path, *, allow_in_place: bool) -> None:
     if output == bank:
         if not allow_in_place:
-            raise ValueError("원본 보호를 위해 보이스뱅크 직접 저장 허용이 필요합니다")
+            raise ValueError(t("원본 보호를 위해 보이스뱅크 직접 저장 허용이 필요합니다"))
         return
     if output.is_relative_to(bank):
-        raise ValueError("원본 보호를 위해 output은 보이스뱅크 하위 폴더가 될 수 없습니다")
+        raise ValueError(t("원본 보호를 위해 output은 보이스뱅크 하위 폴더가 될 수 없습니다"))
 
 
 def _validate_occurrence_ranker_options(options: GenerationOptions, *, backend: str) -> None:

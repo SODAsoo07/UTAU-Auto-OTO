@@ -16,9 +16,10 @@ from . import __version__
 from .app_icon import CTK_TOPLEVEL_ICON_DELAY_MS, apply_app_icon
 from .bank_detection import FormatDetection, check_language, detect_format
 from .batch import BankFolder, discover_bank_folders, run_batch
+from .i18n import LANGUAGE_NAMES, get_language, load_ui_language, machine_translation_notice, save_ui_language, t, translate
 from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
                         generate_voicebank, inspect_voicebank)
-from .oto_io import parse_oto
+from .oto_io import apply_alias_suffix_to_oto, normalize_alias_suffix, parse_oto, with_alias_suffix, write_lines_atomic
 from .oto_preview import launch_oto_preview
 from .oto_style import OtoStyle, load_oto_style, save_oto_style
 
@@ -157,6 +158,7 @@ def build_generation_options(
     oto_style: OtoStyle | None = None,
     bpm: float | None = None,
     estimate_bpm: bool = False,
+    alias_suffix: str = "",
 ) -> GenerationOptions:
     """Convert UI values into the same options object used by the CLI.
 
@@ -166,19 +168,19 @@ def build_generation_options(
     bank_text = str(bank).strip()
     output_text = str(output).strip()
     if not bank_text:
-        raise ValueError("WAV 보이스뱅크 폴더를 지정하세요.")
+        raise ValueError(t("WAV 보이스뱅크 폴더를 지정하세요."))
     if not output_text:
-        raise ValueError("출력 폴더를 지정하세요.")
+        raise ValueError(t("출력 폴더를 지정하세요."))
     threshold = float(review_threshold)
     if not 0.0 <= threshold <= 1.0:
-        raise ValueError("검수 임계값은 0.0~1.0 범위여야 합니다.")
+        raise ValueError(t("검수 임계값은 0.0~1.0 범위여야 합니다."))
     parsed_max_files: int | None
     if max_files is None or not str(max_files).strip():
         parsed_max_files = None
     else:
         parsed_max_files = int(str(max_files).strip())
         if parsed_max_files < 1:
-            raise ValueError("최대 WAV 수는 1 이상이어야 합니다.")
+            raise ValueError(t("최대 WAV 수는 1 이상이어야 합니다."))
     base_path = None
     if base_oto is not None and str(base_oto).strip():
         base_path = Path(str(base_oto).strip()).expanduser()
@@ -205,6 +207,7 @@ def build_generation_options(
         oto_style=oto_style,
         bpm=bpm,
         estimate_bpm=estimate_bpm,
+        alias_suffix=parse_alias_suffix(alias_suffix),
         alignment_workers=0,  # automatic: parallel alignment, identical rows
     )
 
@@ -213,7 +216,7 @@ def _diagnostic_file_flags(choices: Mapping[str, bool] | None, *, default: bool)
     choices = dict(choices or {})
     unknown = set(choices) - set(DIAGNOSTIC_FILE_OPTIONS)
     if unknown:
-        raise ValueError(f"알 수 없는 진단 파일 옵션입니다: {', '.join(sorted(unknown))}")
+        raise ValueError(t("알 수 없는 진단 파일 옵션입니다: {names}", names=", ".join(sorted(unknown))))
     return {name: bool(choices.get(name, default)) for name in DIAGNOSTIC_FILE_OPTIONS}
 
 
@@ -235,6 +238,7 @@ def build_product_generation_options(
     oto_style: OtoStyle | None = None,
     vc_end_choice: str | None = None,
     release_pre_choice: str | None = None,
+    alias_suffix: str = "",
 ) -> GenerationOptions:
     """Build the safe production options exposed by the product UI.
 
@@ -242,18 +246,18 @@ def build_product_generation_options(
     """
 
     if language_choice not in LANGUAGE_CHOICES:
-        raise ValueError(f"지원하지 않는 언어 선택입니다: {language_choice}")
+        raise ValueError(t("지원하지 않는 언어 선택입니다: {choice}", choice=language_choice))
     if format_choice not in FORMAT_CHOICES:
-        raise ValueError(f"지원하지 않는 형식 선택입니다: {format_choice}")
+        raise ValueError(t("지원하지 않는 형식 선택입니다: {choice}", choice=format_choice))
     format_hint = FORMAT_CHOICES[format_choice] or detected_format
     if not format_hint:
-        raise ValueError("형식을 자동으로 알아내지 못했습니다. 포맷을 직접 선택하세요.")
+        raise ValueError(t("형식을 자동으로 알아내지 못했습니다. 포맷을 직접 선택하세요."))
     vc_end_policy = VC_END_CHOICES[vc_end_choice] if vc_end_choice else RECOMMENDED_VC_END_POLICY
     release_pre_policy = (RELEASE_PRE_CHOICES[release_pre_choice] if release_pre_choice
                           else RECOMMENDED_RELEASE_PRE_POLICY)
     has_base_oto = base_oto is not None and bool(str(base_oto).strip())
     if output_encoding not in ENCODING_CHOICES:
-        raise ValueError(f"지원하지 않는 출력 인코딩입니다: {output_encoding}")
+        raise ValueError(t("지원하지 않는 출력 인코딩입니다: {encoding}", encoding=output_encoding))
     return build_generation_options(
         bank=bank,
         output=output,
@@ -277,6 +281,7 @@ def build_product_generation_options(
         oto_style=None if oto_style is None or oto_style.is_default else oto_style,
         bpm=parse_bpm(bpm),
         estimate_bpm=bool(estimate_bpm),
+        alias_suffix=alias_suffix,
     )
 
 
@@ -288,10 +293,47 @@ def parse_bpm(value: str | float | None) -> float | None:
     try:
         bpm = float(str(value).strip())
     except ValueError as error:
-        raise ValueError("BPM은 숫자로 입력하세요 (예: 120).") from error
+        raise ValueError(t("BPM은 숫자로 입력하세요 (예: 120).")) from error
     if not 60.0 <= bpm <= 240.0:
-        raise ValueError("BPM은 60~240 범위로 입력하세요 (보통 100~160).")
+        raise ValueError(t("BPM은 60~240 범위로 입력하세요 (보통 100~160)."))
     return bpm
+
+
+def parse_alias_suffix(value: str | None) -> str:
+    """Suffix entry -> the text after '_' ("C4" and "_C4" -> "C4"); blank means none."""
+
+    try:
+        return normalize_alias_suffix(value)
+    except ValueError as error:
+        raise ValueError(t("접미사에는 쉼표(,), = 기호, 줄바꿈을 쓸 수 없습니다.")) from error
+
+
+def apply_suffix_to_output(oto: Path, suffix: str | None) -> dict[str, object]:
+    """Add the suffix to an already generated oto.ini, its clean/review files and row_report.jsonl.
+
+    Aliases that already end with the suffix are kept, so applying it twice changes nothing.
+    """
+
+    normalized = parse_alias_suffix(suffix)
+    if not normalized:
+        raise ValueError(t("적용할 접미사를 입력하세요."))
+    if not oto.is_file():
+        raise FileNotFoundError(t("생성된 oto.ini가 없습니다: {path}", path=oto))
+    files: dict[str, list[int]] = {}
+    changed, total = apply_alias_suffix_to_oto(oto, normalized)
+    files[oto.name] = [changed, total]
+    for companion in (oto.with_name(f"{oto.stem}.clean{oto.suffix}"), oto.with_name(f"{oto.stem}.review{oto.suffix}")):
+        if companion.is_file():
+            files[companion.name] = list(apply_alias_suffix_to_oto(companion, normalized, backup_existing=False))
+    report = oto.with_name("row_report.jsonl")
+    if report.is_file():  # the preview matches rows to their risk by alias
+        entries = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for entry in entries:
+            entry["alias"] = with_alias_suffix(str(entry.get("alias", "")), normalized)
+        write_lines_atomic(report, (json.dumps(entry, ensure_ascii=False, sort_keys=True) for entry in entries),
+                           encoding="utf-8", newline="\n", backup_existing=False)
+    return {"alias_suffix": f"_{normalized}", "suffixed_oto": str(oto), "changed_aliases": changed, "aliases": total,
+            "files": files}
 
 
 def build_oto_style(values: Mapping[str, str]) -> OtoStyle:
@@ -305,11 +347,11 @@ def build_oto_style(values: Mapping[str, str]) -> OtoStyle:
         try:
             payload[name] = float(text)
         except ValueError as error:
-            raise ValueError(f"{label}: 숫자를 입력하세요.") from error
+            raise ValueError(t("{label}: 숫자를 입력하세요.", label=t(label))) from error
     try:
         return OtoStyle.from_dict(payload)
     except ValueError as error:
-        raise ValueError(f"고급 설정 값이 범위를 벗어났습니다: {error}") from error
+        raise ValueError(t("고급 설정 값이 범위를 벗어났습니다: {error}", error=error)) from error
 
 
 def style_entry_values(style: OtoStyle) -> dict[str, str]:
@@ -365,11 +407,15 @@ def bank_language_warning(
 
 
 def format_detection_text(detection: FormatDetection) -> str:
+    return t("형식 감지: {detail}", detail=format_detection_detail(detection))
+
+
+def format_detection_detail(detection: FormatDetection) -> str:
     if detection.format is None:
-        return "형식 감지: 알 수 없음 - 포맷을 직접 선택하세요."
-    return (f"형식 감지: {detection.format.upper()} "
-            f"(확신 {CONFIDENCE_LABELS.get(detection.confidence, detection.confidence)}, "
-            f"근거: {DETECTION_SOURCE_LABELS.get(detection.source, detection.source)})")
+        return t("알 수 없음 - 포맷을 직접 선택하세요.")
+    return t("{format} (확신 {confidence}, 근거: {source})", format=detection.format.upper(),
+             confidence=t(CONFIDENCE_LABELS.get(detection.confidence, detection.confidence)),
+             source=t(DETECTION_SOURCE_LABELS.get(detection.source, detection.source)))
 
 
 def tempo_log_lines(payload: Mapping[str, object]) -> list[str]:
@@ -378,11 +424,12 @@ def tempo_log_lines(payload: Mapping[str, object]) -> list[str]:
         return []
     estimate = tempo.get("estimate") if isinstance(tempo.get("estimate"), Mapping) else None
     if tempo.get("source") == "user_bpm":
-        return [f"[BPM] 입력한 {float(tempo['user_bpm']):g} BPM 사용 (음절 간격 {float(tempo['syllable_period_ms']):.0f} ms)"]
+        return [t("[BPM] 입력한 {bpm:g} BPM 사용 (음절 간격 {period:.0f} ms)", bpm=float(tempo["user_bpm"]),
+                  period=float(tempo["syllable_period_ms"]))]
     if tempo.get("source") == "estimated" and estimate:
-        return [f"[BPM] 자동 추정 {estimate.get('bpm')} BPM 사용 ({estimate.get('reason')})"]
+        return [t("[BPM] 자동 추정 {bpm} BPM 사용 ({reason})", bpm=estimate.get("bpm"), reason=estimate.get("reason"))]
     if tempo.get("estimate_enabled") and estimate:
-        return [f"[BPM] 추정 안 함: {estimate.get('reason')} BPM 없이 생성했습니다."]
+        return [t("[BPM] 추정 안 함: {reason} BPM 없이 생성했습니다.", reason=estimate.get("reason"))]
     return []
 
 
@@ -390,10 +437,10 @@ def alias_generation_log_lines(payload: Mapping[str, object]) -> list[str]:
     count = int(payload.get("generated_alias_wavs", 0) or 0)
     if count <= 0:
         return []
-    lines = [f"[별칭 생성] 기존 oto.ini 없이 WAV {count}개의 파일 이름에서 형식에 맞는 별칭을 만들었습니다."]
+    lines = [t("[별칭 생성] 기존 oto.ini 없이 WAV {count}개의 파일 이름에서 형식에 맞는 별칭을 만들었습니다.", count=count)]
     skipped = int(payload.get("alias_generation_skipped_count", 0) or 0)
     if skipped:
-        lines.append(f"[주의] 이름을 읽지 못한 WAV {skipped}개는 빠졌습니다.")
+        lines.append(t("[주의] 이름을 읽지 못한 WAV {count}개는 빠졌습니다.", count=skipped))
         for item in payload.get("alias_generation_skipped") or []:
             lines.append(f"  - {item.get('wav', '')} ({item.get('detail', '')})")
     return lines
@@ -431,7 +478,7 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
                             if written.get("row_report", True) else None),
         "clean_path": str((output / "oto.clean.ini").resolve()),
         "review_path": str((output / "oto.review.ini").resolve()),
-        "review_notice": "review 행은 자동 검수 보류이며 오류 확정이 아닙니다.",
+        "review_notice": t("review 행은 자동 검수 보류이며 오류 확정이 아닙니다."),
         "generation_settings": {
             key: (report.get("provenance") or {}).get(key)
             for key in ("development_alignment_profile", "vc_end_policy", "release_pre_policy")
@@ -470,16 +517,16 @@ def progress_fraction(stage: str, done: int, total: int) -> float:
 
 def progress_text(stage: str, done: int, total: int, elapsed_s: float, fraction: float, prefix: str = "") -> str:
     if stage.startswith("align:"):
-        label = f"정렬 {stage.split(':', 1)[1]}단계 {done}/{total}"
+        label = t("정렬 {step}단계 {done}/{total}", step=stage.split(":", 1)[1], done=done, total=total)
     elif stage == "render":
-        label = f"OTO 작성 {done}/{total}"
+        label = t("OTO 작성 {done}/{total}", done=done, total=total)
     else:
         label = stage
     remaining = ""
     if fraction >= 0.03 and elapsed_s >= 3.0:
         seconds = elapsed_s * (1.0 - fraction) / fraction
-        remaining = (f" · 남은 시간 약 {max(1, round(seconds / 60))}분" if seconds >= 90
-                     else f" · 남은 시간 약 {max(1, round(seconds))}초")
+        remaining = (t(" · 남은 시간 약 {minutes}분", minutes=max(1, round(seconds / 60))) if seconds >= 90
+                     else t(" · 남은 시간 약 {seconds}초", seconds=max(1, round(seconds))))
     return f"{prefix}{label}{remaining}"
 
 
@@ -491,17 +538,18 @@ def excluded_rows_log_lines(payload: Mapping[str, object]) -> list[str]:
         return []
     failed = list(payload.get("failed_recordings") or [])
     lines = [
-        f"[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
-        f"녹음을 분석하지 못해 oto.ini에서 뺐습니다.",
-        *([f"  분석하지 못한 녹음 {len(failed)}개(무음·잘린 녹음일 수 있음): {', '.join(failed)}"] if failed else []),
-        (f"  전체 목록: {payload['excluded_alias_rows_csv']}" if payload.get("excluded_alias_rows_csv")
-         else "  전체 목록을 파일로 받으려면 고급 출력 옵션에서 unmapped_aliases.csv 저장을 켜세요."),
+        t("[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
+          "녹음을 분석하지 못해 oto.ini에서 뺐습니다.", count=count),
+        *([t("  분석하지 못한 녹음 {count}개(무음·잘린 녹음일 수 있음): {names}", count=len(failed),
+             names=", ".join(failed))] if failed else []),
+        (t("  전체 목록: {path}", path=payload["excluded_alias_rows_csv"]) if payload.get("excluded_alias_rows_csv")
+         else t("  전체 목록을 파일로 받으려면 고급 출력 옵션에서 unmapped_aliases.csv 저장을 켜세요.")),
     ]
     samples = payload.get("excluded_alias_samples") or []
     for sample in samples:
         lines.append(f"  - {sample.get('wav', '')} = {sample.get('alias', '')}")
     if count > len(samples):
-        lines.append(f"  … 외 {count - len(samples)}개")
+        lines.append(t("  … 외 {count}개", count=count - len(samples)))
     return lines
 
 
@@ -513,9 +561,9 @@ def format_result_text(title: str, payload: Mapping[str, object]) -> str:
         lines.extend(
             [
                 f"WAV: {payload.get('wav_count', 0)}",
-                f"생성 행: {payload.get('generated_rows', 0)}",
-                f"자동 clean: {payload.get('clean_rows', 0)}",
-                f"검수 보류: {payload.get('review_rows', 0)}",
+                t("생성 행: {count}", count=payload.get("generated_rows", 0)),
+                t("자동 clean: {count}", count=payload.get("clean_rows", 0)),
+                t("검수 보류: {count}", count=payload.get("review_rows", 0)),
                 str(payload.get("review_notice", "")),
             ]
         )
@@ -526,23 +574,27 @@ def format_result_text(title: str, payload: Mapping[str, object]) -> str:
         usage = payload.get("usage_review")
         if isinstance(usage, Mapping) and usage.get("csv"):
             counts = usage.get("category_counts", {})
-            lines.extend(("", f"먼저 확인: {counts.get('inspect_first', 0)}행",
-                f"연결 확인: {counts.get('connection_check', 0)}행",
-                f"표본 확인: {counts.get('spot_check', 0)}행", f"검수 순서: {usage['csv']}"))
+            lines.extend(("", t("먼저 확인: {count}행", count=counts.get("inspect_first", 0)),
+                t("연결 확인: {count}행", count=counts.get("connection_check", 0)),
+                t("표본 확인: {count}행", count=counts.get("spot_check", 0)), t("검수 순서: {path}", path=usage["csv"])))
         if isinstance(reasons, Mapping) and reasons:
-            lines.extend(("", "주요 검수 사유"))
+            lines.extend(("", t("주요 검수 사유")))
             for reason, count in sorted(reasons.items(), key=lambda item: (-int(item[1]), str(item[0])))[:8]:
                 lines.append(f"- {reason}: {count}")
+    elif "changed_aliases" in payload:
+        lines.append(t("접미사 {suffix}: 별칭 {changed}/{total}개에 붙였습니다 (이미 붙은 별칭은 그대로).",
+                       suffix=payload.get("alias_suffix"), changed=payload.get("changed_aliases", 0),
+                       total=payload.get("aliases", 0)))
     elif "valid" in payload:
-        lines.append(f"구조 검증: {'통과' if payload.get('valid') else '실패'}")
-        lines.append(f"OTO 행: {payload.get('rows', 0)}")
-        lines.append(f"오류: {len(payload.get('errors', []) or [])}")
+        lines.append(t("구조 검증: {state}", state=t("통과") if payload.get("valid") else t("실패")))
+        lines.append(t("OTO 행: {count}", count=payload.get("rows", 0)))
+        lines.append(t("오류: {count}", count=len(payload.get("errors", []) or [])))
     elif "wav_count" in payload:
-        lines.append(f"발견한 WAV: {payload.get('wav_count', 0)}")
+        lines.append(t("발견한 WAV: {count}", count=payload.get("wav_count", 0)))
         if "mapped_wavs" in payload:
-            lines.append(f"기존 OTO 매핑: {payload.get('mapped_wavs', 0)}")
-            lines.append(f"미매핑 WAV: {payload.get('unmapped_wavs', 0)}")
-    lines.extend(("", "상세", json.dumps(dict(payload), ensure_ascii=False, indent=2, default=str)))
+            lines.append(t("기존 OTO 매핑: {count}", count=payload.get("mapped_wavs", 0)))
+            lines.append(t("미매핑 WAV: {count}", count=payload.get("unmapped_wavs", 0)))
+    lines.extend(("", t("상세"), json.dumps(dict(payload), ensure_ascii=False, indent=2, default=str)))
     return "\n".join(line for line in lines if line is not None)
 
 
@@ -553,13 +605,14 @@ def launch_oto_generator_ui(
 ) -> dict[str, object]:
     """Launch the AutoOTO product UI and return its last operation result."""
 
+    load_ui_language()
     try:
         import customtkinter as ctk
         import tkinter as tk
         from tkinter import filedialog, messagebox
     except ImportError as error:  # pragma: no cover - platform packaging issue
         raise RuntimeError(
-            "이 UI에는 Tkinter와 customtkinter가 필요합니다. 프로젝트를 다시 설치하세요."
+            t("이 UI에는 Tkinter와 customtkinter가 필요합니다. 프로젝트를 다시 설치하세요.")
         ) from error
 
     ctk.set_default_color_theme("blue")
@@ -589,10 +642,11 @@ def launch_oto_generator_ui(
             self.folder_oto_var = tk.BooleanVar(value=True)
             self.bpm_var = tk.StringVar()
             self.estimate_bpm_var = tk.BooleanVar(value=False)
+            self.alias_suffix_var = tk.StringVar()
             self.vc_end_var = tk.StringVar(value=next(iter(VC_END_CHOICES)))
             self.release_pre_var = tk.StringVar(value=next(iter(RELEASE_PRE_CHOICES)))
             self.style_vars = {name: tk.StringVar() for name, _, _ in STYLE_FIELDS}
-            self.detection_var = tk.StringVar(value="형식 감지: 보이스뱅크 폴더를 고르면 표시됩니다.")
+            self.detection_var = tk.StringVar(value=t("형식 감지: 보이스뱅크 폴더를 고르면 표시됩니다."))
             self._detection: FormatDetection | None = None
             self._language_acknowledged: set[tuple[str, str]] = set()
             self.overwrite_oto_var = tk.BooleanVar(value=False)
@@ -601,27 +655,41 @@ def launch_oto_generator_ui(
             self.format_var = tk.StringVar(value=AUTO_FORMAT_CHOICE)
             self.diagnostic_vars = {name: tk.BooleanVar(value=False) for name in DIAGNOSTIC_FILE_LABELS}
             self.theme_var = tk.StringVar(value="다크 모드")
-            self.status_var = tk.StringVar(value="대기 중")
+            self.status_var = tk.StringVar(value=t("대기 중"))
+            self.ui_language_var = tk.StringVar(value=LANGUAGE_NAMES[get_language()])
+            self.ui_language_hint_var = tk.StringVar()
             self._buttons: list[object] = []
             self._build_ui(ctk)
             self.after(100, self._poll_events)
 
         def _build_ui(self, ctk_module) -> None:
+            notice = machine_translation_notice()
+            if notice:  # English / Japanese: say the UI text is machine-translated
+                ctk_module.CTkLabel(
+                    self, text=f"⚠ {notice}", font=("", 11), text_color=HINT, anchor="w"
+                ).pack(fill="x", padx=18, pady=(6, 0))
             header = ctk_module.CTkFrame(self, fg_color="transparent")
-            header.pack(fill="x", padx=18, pady=(14, 8))
+            header.pack(fill="x", padx=18, pady=(4 if notice else 14, 8))
             ctk_module.CTkLabel(
                 header, text=APP_NAME, font=("", 22, "bold"), text_color=HEADER
             ).pack(side="left")
             ctk_module.CTkLabel(
-                header, text="WAV를 분석해 새 oto.ini를 생성합니다.", text_color=HINT
+                header, text=t("WAV를 분석해 새 oto.ini를 생성합니다."), text_color=HINT
             ).pack(side="left", padx=14)
+            self._choice_menu(
+                ctk_module, header, self.theme_var, ("다크 모드", "라이트 모드"), command=self._set_theme, width=120,
+            ).pack(side="right")
             ctk_module.CTkOptionMenu(
                 header,
-                values=["다크 모드", "라이트 모드"],
-                variable=self.theme_var,
-                command=self._set_theme,
-                width=120,
-            ).pack(side="right")
+                values=list(LANGUAGE_NAMES.values()),
+                variable=self.ui_language_var,
+                command=self._set_ui_language,
+                width=100,
+            ).pack(side="right", padx=(0, 8))
+            ctk_module.CTkLabel(header, text=t("UI 언어"), text_color=HINT).pack(side="right", padx=(0, 6))
+            ctk_module.CTkLabel(header, textvariable=self.ui_language_hint_var, text_color=HINT).pack(
+                side="right", padx=(0, 10)
+            )
 
             self.tabview = ctk_module.CTkTabview(
                 self,
@@ -631,18 +699,18 @@ def launch_oto_generator_ui(
             )
             self.tabview.pack(fill="both", expand=True, padx=16, pady=(0, 10))
             for name in ("생성", "결과", "로그", "크레딧"):
-                self.tabview.add(name)
-            self._build_generate_tab(ctk_module, self.tabview.tab("생성"))
-            self._build_result_tab(ctk_module, self.tabview.tab("결과"))
-            self._build_log_tab(ctk_module, self.tabview.tab("로그"))
-            self._build_credits_tab(ctk_module, self.tabview.tab("크레딧"))
+                self.tabview.add(t(name))
+            self._build_generate_tab(ctk_module, self.tabview.tab(t("생성")))
+            self._build_result_tab(ctk_module, self.tabview.tab(t("결과")))
+            self._build_log_tab(ctk_module, self.tabview.tab(t("로그")))
+            self._build_credits_tab(ctk_module, self.tabview.tab(t("크레딧")))
 
             bottom = ctk_module.CTkFrame(self, fg_color="transparent")
             bottom.pack(fill="x", padx=18, pady=(0, 14))
             self.progress = ctk_module.CTkProgressBar(bottom, mode="indeterminate", height=10)
             self.progress.set(0)
             self.progress.pack(side="left", fill="x", expand=True)
-            self.cancel_button = ctk_module.CTkButton(bottom, text="취소", width=70, state="disabled",
+            self.cancel_button = ctk_module.CTkButton(bottom, text=t("취소"), width=70, state="disabled",
                                                       command=self._request_cancel)
             self.cancel_button.pack(side="right", padx=(8, 0))
             ctk_module.CTkLabel(bottom, textvariable=self.status_var, text_color=TEXT, width=360, anchor="e").pack(
@@ -665,8 +733,8 @@ def launch_oto_generator_ui(
             )
             ctk_module.CTkLabel(
                 paths,
-                text=("기존 OTO는 에일리어스·인코딩 참고용이며 timing을 정답으로 재사용하지 않습니다.\n"
-                      "없으면 형식에 맞는 별칭(CV·VC·VCV)을 WAV 파일 이름에서 만듭니다."),
+                text=t("기존 OTO는 에일리어스·인코딩 참고용이며 timing을 정답으로 재사용하지 않습니다.\n"
+                       "없으면 형식에 맞는 별칭(CV·VC·VCV)을 WAV 파일 이름에서 만듭니다."),
                 text_color=HINT,
                 anchor="w",
                 justify="left",
@@ -674,25 +742,25 @@ def launch_oto_generator_ui(
             self._path_row(ctk_module, paths, "출력 폴더", self.output_var, self._choose_output)
             ctk_module.CTkCheckBox(
                 paths,
-                text="기존 oto.ini 덮어쓰기 허용 (보이스뱅크 폴더 직접 저장)",
+                text=t("기존 oto.ini 덮어쓰기 허용 (보이스뱅크 폴더 직접 저장)"),
                 variable=self.overwrite_oto_var,
             ).pack(anchor="w", padx=132, pady=(4, 2))
             ctk_module.CTkLabel(
                 paths,
-                text="켜면 기존 oto.ini는 타임스탬프 .bak으로 백업된 뒤 교체됩니다.",
+                text=t("켜면 기존 oto.ini는 타임스탬프 .bak으로 백업된 뒤 교체됩니다."),
                 text_color=HINT,
                 anchor="w",
             ).pack(fill="x", padx=132, pady=(0, 4))
             ctk_module.CTkCheckBox(
-                paths, text="하위 폴더 포함 (한 번에 처리)", variable=self.recursive_var,
+                paths, text=t("하위 폴더 포함 (한 번에 처리)"), variable=self.recursive_var,
                 command=lambda: self._exclusive_folder_mode("recursive"),
             ).pack(anchor="w", padx=132, pady=(4, 2))
             ctk_module.CTkCheckBox(
-                paths, text="하위 폴더별 일괄 생성 (WAV가 있는 폴더마다 oto.ini를 따로 만듦)",
+                paths, text=t("하위 폴더별 일괄 생성 (WAV가 있는 폴더마다 oto.ini를 따로 만듦)"),
                 variable=self.batch_var, command=lambda: self._exclusive_folder_mode("batch"),
             ).pack(anchor="w", padx=132, pady=2)
             ctk_module.CTkCheckBox(
-                paths, text="일괄 생성 때 각 폴더의 oto.ini를 별칭 참고용으로 사용", variable=self.folder_oto_var
+                paths, text=t("일괄 생성 때 각 폴더의 oto.ini를 별칭 참고용으로 사용"), variable=self.folder_oto_var
             ).pack(anchor="w", padx=158, pady=(2, 10))
 
             profile = self._section(
@@ -704,28 +772,47 @@ def launch_oto_generator_ui(
             profile_row = ctk_module.CTkFrame(profile, fg_color="transparent")
             profile_row.pack(fill="x", padx=12, pady=(0, 4))
             self.language_menu = self._option_menu(
-                ctk_module, profile_row, "언어", self.language_var, tuple(LANGUAGE_CHOICES)
+                ctk_module, profile_row, "언어", self.language_var, tuple(LANGUAGE_CHOICES), translated=True
             )
             self.format_menu = self._option_menu(
-                ctk_module, profile_row, "포맷", self.format_var, tuple(FORMAT_CHOICES)
+                ctk_module, profile_row, "포맷", self.format_var, tuple(FORMAT_CHOICES), translated=True
             )
             ctk_module.CTkLabel(profile, textvariable=self.detection_var, text_color=HINT, anchor="w").pack(
                 fill="x", padx=12, pady=(2, 8)
             )
             tempo_row = ctk_module.CTkFrame(profile, fg_color="transparent")
             tempo_row.pack(fill="x", padx=12, pady=(0, 2))
-            ctk_module.CTkLabel(tempo_row, text="녹음 BPM (선택, 실험적)", anchor="w").pack(side="left")
-            ctk_module.CTkEntry(tempo_row, textvariable=self.bpm_var, width=80, placeholder_text="예: 120").pack(
+            ctk_module.CTkLabel(tempo_row, text=t("녹음 BPM (선택, 실험적)"), anchor="w").pack(side="left")
+            ctk_module.CTkEntry(tempo_row, textvariable=self.bpm_var, width=80, placeholder_text=t("예: 120")).pack(
                 side="left", padx=(10, 16)
             )
             ctk_module.CTkCheckBox(
-                tempo_row, text="BPM 자동 추정", variable=self.estimate_bpm_var
+                tempo_row, text=t("BPM 자동 추정"), variable=self.estimate_bpm_var
             ).pack(side="left")
             ctk_module.CTkLabel(
                 profile,
-                text=("BPM을 넣으면 음절 위치를 박자 격자 쪽으로 당깁니다. 비우면 사용하지 않습니다(기본).\n"
-                      "뱅크에 따라 좋아지기도 나빠지기도 하니 결과를 들어 보고 쓰세요. 쉼 표기 파일과 박자가 안 맞는 파일은 자동 제외합니다.\n"
-                      "자동 추정은 박자가 일정한 파일이 충분할 때만 값을 내며, 가이드 없이 녹음했다면 끄세요."),
+                text=t("BPM을 넣으면 음절 위치를 박자 격자 쪽으로 당깁니다. 비우면 사용하지 않습니다(기본).\n"
+                       "뱅크에 따라 좋아지기도 나빠지기도 하니 결과를 들어 보고 쓰세요. 쉼 표기 파일과 박자가 안 맞는 파일은 자동 제외합니다.\n"
+                       "자동 추정은 박자가 일정한 파일이 충분할 때만 값을 내며, 가이드 없이 녹음했다면 끄세요."),
+                text_color=HINT,
+                anchor="w",
+                justify="left",
+            ).pack(fill="x", padx=12, pady=(2, 8))
+            suffix_row = ctk_module.CTkFrame(profile, fg_color="transparent")
+            suffix_row.pack(fill="x", padx=12, pady=(0, 2))
+            ctk_module.CTkLabel(suffix_row, text=t("별칭 접미사 (선택)"), anchor="w").pack(side="left")
+            ctk_module.CTkEntry(suffix_row, textvariable=self.alias_suffix_var, width=110,
+                                placeholder_text=t("예: C4")).pack(side="left", padx=(10, 10))
+            suffix_button = ctk_module.CTkButton(
+                suffix_row, text=t("생성된 oto에 적용"), width=140, command=self._apply_suffix,
+                fg_color=PRIMARY, hover_color=PRIMARY_HOVER,
+            )
+            suffix_button.pack(side="left")
+            self._buttons.append(suffix_button)
+            ctk_module.CTkLabel(
+                profile,
+                text=t("모든 별칭 끝에 _C4 형태로 붙입니다. 생성할 때 적용되고, 이미 만든 oto.ini에는 버튼으로 붙일 수 있습니다.\n"
+                       "이미 같은 접미사로 끝나는 별칭은 그대로 둡니다."),
                 text_color=HINT,
                 anchor="w",
                 justify="left",
@@ -733,7 +820,7 @@ def launch_oto_generator_ui(
 
             self.advanced_toggle_btn = ctk_module.CTkButton(
                 scroll,
-                text="▶ 고급 설정",
+                text=t("▶ 고급 설정"),
                 width=180,
                 fg_color=("#D7DEE5", "#2B313D"),
                 hover_color=("#CAD4DE", "#3A4251"),
@@ -753,20 +840,22 @@ def launch_oto_generator_ui(
             self.encoding_menu = self._option_menu(
                 ctk_module, option_row, "인코딩", self.encoding_var, ENCODING_CHOICES
             )
-            self._option_menu(ctk_module, option_row, "VC 끝 위치", self.vc_end_var, tuple(VC_END_CHOICES))
+            self._option_menu(ctk_module, option_row, "VC 끝 위치", self.vc_end_var, tuple(VC_END_CHOICES),
+                              translated=True)
             self._option_menu(
-                ctk_module, option_row, "'-' 선행발성", self.release_pre_var, tuple(RELEASE_PRE_CHOICES)
+                ctk_module, option_row, "'-' 선행발성", self.release_pre_var, tuple(RELEASE_PRE_CHOICES),
+                translated=True,
             )
             style_grid = ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent")
             style_grid.pack(fill="x", padx=12, pady=(0, 4))
             for index, (name, label, hint) in enumerate(STYLE_FIELDS):
                 row, column = divmod(index, 2)
-                ctk_module.CTkLabel(style_grid, text=label, anchor="w", width=130).grid(
+                ctk_module.CTkLabel(style_grid, text=t(label), anchor="w", width=130).grid(
                     row=row, column=column * 3, sticky="w", padx=(0, 6), pady=2
                 )
                 ctk_module.CTkEntry(style_grid, textvariable=self.style_vars[name], width=80,
-                                    placeholder_text="자동").grid(row=row, column=column * 3 + 1, pady=2)
-                ctk_module.CTkLabel(style_grid, text=hint, text_color=HINT, anchor="w").grid(
+                                    placeholder_text=t("자동")).grid(row=row, column=column * 3 + 1, pady=2)
+                ctk_module.CTkLabel(style_grid, text=t(hint), text_color=HINT, anchor="w").grid(
                     row=row, column=column * 3 + 2, sticky="w", padx=(6, 18), pady=2
                 )
             preset_row = ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent")
@@ -777,18 +866,18 @@ def launch_oto_generator_ui(
                 ("기본값으로", self._reset_advanced),
             ):
                 ctk_module.CTkButton(
-                    preset_row, text=label, width=120, command=command,
+                    preset_row, text=t(label), width=120, command=command,
                     fg_color=PRIMARY, hover_color=PRIMARY_HOVER,
                 ).pack(side="left", padx=(0, 8))
             ctk_module.CTkLabel(
                 self.advanced_frame,
-                text="진단 파일 저장 (기본 꺼짐, 켜도 oto.ini 결과는 같습니다)",
+                text=t("진단 파일 저장 (기본 꺼짐, 켜도 oto.ini 결과는 같습니다)"),
                 text_color=HINT,
                 anchor="w",
             ).pack(fill="x", padx=12, pady=(0, 2))
             for name, label in DIAGNOSTIC_FILE_LABELS.items():
                 ctk_module.CTkCheckBox(
-                    self.advanced_frame, text=label, variable=self.diagnostic_vars[name]
+                    self.advanced_frame, text=t(label), variable=self.diagnostic_vars[name]
                 ).pack(anchor="w", padx=24, pady=2)
             ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent", height=10).pack()
 
@@ -805,13 +894,13 @@ def launch_oto_generator_ui(
                 ("OTO 미리보기", self._open_preview),
             ):
                 button = ctk_module.CTkButton(
-                    bar, text=label, width=110, height=32, command=command,
+                    bar, text=t(label), width=110, height=32, command=command,
                     fg_color=SECONDARY, hover_color=SECONDARY_HOVER, text_color=SECONDARY_TEXT,
                 )
                 button.pack(side="left", padx=(10, 0), pady=10)
                 self._buttons.append(button)
             generate = ctk_module.CTkButton(
-                bar, text="OTO 생성", width=200, height=44, font=("", 16, "bold"), command=self._generate,
+                bar, text=t("OTO 생성"), width=200, height=44, font=("", 16, "bold"), command=self._generate,
                 fg_color=GENERATE, hover_color=GENERATE_HOVER, text_color="#FFFFFF",
             )
             generate.pack(side="right", padx=10, pady=10)
@@ -822,12 +911,12 @@ def launch_oto_generator_ui(
             toolbar.pack(fill="x", padx=8, pady=(8, 4))
             ctk_module.CTkLabel(
                 toolbar,
-                text="review는 자동 검수 보류이며 오류 확정이 아닙니다.",
+                text=t("review는 자동 검수 보류이며 오류 확정이 아닙니다."),
                 text_color=HINT,
             ).pack(side="left")
             ctk_module.CTkButton(
                 toolbar,
-                text="OTO 미리보기",
+                text=t("OTO 미리보기"),
                 width=120,
                 command=self._open_preview,
                 fg_color=PRIMARY,
@@ -835,7 +924,7 @@ def launch_oto_generator_ui(
             ).pack(side="right", padx=(8, 0))
             ctk_module.CTkButton(
                 toolbar,
-                text="생성 보고서 열기",
+                text=t("생성 보고서 열기"),
                 width=140,
                 command=self._open_report,
                 fg_color=PRIMARY,
@@ -843,7 +932,7 @@ def launch_oto_generator_ui(
             ).pack(side="right")
             self.result_text = ctk_module.CTkTextbox(tab, wrap="word")
             self.result_text.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-            self.result_text.insert("1.0", "아직 실행 결과가 없습니다.")
+            self.result_text.insert("1.0", t("아직 실행 결과가 없습니다."))
             self.result_text.configure(state="disabled")
 
         def _build_log_tab(self, ctk_module, tab) -> None:
@@ -851,7 +940,7 @@ def launch_oto_generator_ui(
             toolbar.pack(fill="x", padx=8, pady=(8, 4))
             ctk_module.CTkButton(
                 toolbar,
-                text="로그 복사",
+                text=t("로그 복사"),
                 width=110,
                 command=self._copy_log,
                 fg_color=PRIMARY,
@@ -866,7 +955,7 @@ def launch_oto_generator_ui(
             scroll.pack(fill="both", expand=True, padx=12, pady=12)
             ctk_module.CTkLabel(
                 scroll,
-                text="보정 모델 데이터 제공에 도움 주신 분들",
+                text=t("보정 모델 데이터 제공에 도움 주신 분들"),
                 font=("", 16, "bold"),
                 text_color=HEADER,
                 anchor="w",
@@ -877,7 +966,7 @@ def launch_oto_generator_ui(
                 )
             ctk_module.CTkLabel(
                 scroll,
-                text="감사합니다!",
+                text=t("감사합니다!"),
                 font=("", 14, "bold"),
                 text_color=HEADER,
                 anchor="w",
@@ -894,14 +983,14 @@ def launch_oto_generator_ui(
                 frame.pack(fill="x", padx=10, pady=6)
             ctk_module.CTkLabel(
                 frame,
-                text=title,
+                text=t(title),
                 font=("", 14, "bold"),
                 text_color=HEADER,
                 anchor="w",
             ).pack(fill="x", padx=12, pady=(10, 2))
             ctk_module.CTkLabel(
                 frame,
-                text=subtitle,
+                text=t(subtitle),
                 text_color=HINT,
                 anchor="w",
                 justify="left",
@@ -911,41 +1000,67 @@ def launch_oto_generator_ui(
         def _path_row(self, ctk_module, parent, label: str, variable, command) -> None:
             row = ctk_module.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", padx=12, pady=4)
-            ctk_module.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
+            ctk_module.CTkLabel(row, text=t(label), width=110, anchor="w").pack(side="left")
             ctk_module.CTkEntry(row, textvariable=variable).pack(
                 side="left", fill="x", expand=True, padx=(10, 8)
             )
             ctk_module.CTkButton(
                 row,
-                text="찾아보기",
+                text=t("찾아보기"),
                 width=90,
                 command=command,
                 fg_color=PRIMARY,
                 hover_color=PRIMARY_HOVER,
             ).pack(side="right")
 
-        def _option_menu(self, ctk_module, parent, label: str, variable, values):
+        def _option_menu(self, ctk_module, parent, label: str, variable, values, *, translated: bool = False):
             group = ctk_module.CTkFrame(parent, fg_color="transparent")
             group.pack(side="left", fill="x", expand=True, padx=(0, 10))
-            ctk_module.CTkLabel(group, text=label, anchor="w").pack(anchor="w")
-            menu = ctk_module.CTkOptionMenu(group, variable=variable, values=list(values))
+            ctk_module.CTkLabel(group, text=t(label), anchor="w").pack(anchor="w")
+            menu = (self._choice_menu(ctk_module, group, variable, values) if translated
+                    else ctk_module.CTkOptionMenu(group, variable=variable, values=list(values)))
             menu.pack(fill="x", pady=(2, 0))
             return menu
+
+        def _choice_menu(self, ctk_module, parent, variable, keys, *, command=None, **kwargs):
+            """Option menu showing translated labels while `variable` keeps the Korean key."""
+
+            by_label = {t(key): key for key in keys}
+            shown = tk.StringVar(value=t(variable.get()))
+            variable.trace_add("write", lambda *_: shown.set(t(variable.get())))
+
+            def chosen(label: str) -> None:
+                variable.set(by_label.get(label, label))
+                if command is not None:
+                    command(variable.get())
+
+            return ctk_module.CTkOptionMenu(parent, variable=shown, values=list(by_label), command=chosen, **kwargs)
+
+        def _set_ui_language(self, choice: str) -> None:
+            language = next(code for code, name in LANGUAGE_NAMES.items() if name == choice)
+            try:
+                save_ui_language(language)
+            except OSError as error:
+                messagebox.showerror(t("오류"), str(error), parent=self)
+                return
+            self.ui_language_hint_var.set(
+                "" if language == get_language() else translate("재시작 후 적용됩니다.", language)
+            )
 
         def _toggle_advanced(self) -> None:
             self._advanced_visible = not self._advanced_visible
             if self._advanced_visible:
                 self.advanced_frame.pack(fill="x", padx=10, pady=6)
-                self.advanced_toggle_btn.configure(text="▼ 고급 설정")
+                self.advanced_toggle_btn.configure(text=t("▼ 고급 설정"))
             else:
                 self.advanced_frame.pack_forget()
-                self.advanced_toggle_btn.configure(text="▶ 고급 설정")
+                self.advanced_toggle_btn.configure(text=t("▶ 고급 설정"))
 
         def _set_theme(self, choice: str) -> None:
             ctk.set_appearance_mode("light" if choice == "라이트 모드" else "dark")
 
         def _choose_bank(self) -> None:
-            selected = filedialog.askdirectory(title="WAV 보이스뱅크 폴더 선택")
+            selected = filedialog.askdirectory(title=t("WAV 보이스뱅크 폴더 선택"))
             if selected:
                 self.bank_var.set(selected)
                 if not self.output_var.get().strip():
@@ -955,7 +1070,7 @@ def launch_oto_generator_ui(
 
         def _choose_base_oto(self) -> None:
             selected = filedialog.askopenfilename(
-                title="기존 oto.ini 선택",
+                title=t("기존 oto.ini 선택"),
                 filetypes=(("OTO files", "*.ini"), ("All files", "*.*")),
             )
             if selected:
@@ -963,7 +1078,7 @@ def launch_oto_generator_ui(
                 self._refresh_detection()
 
         def _choose_output(self) -> None:
-            selected = filedialog.askdirectory(title="출력 폴더 선택", mustexist=False)
+            selected = filedialog.askdirectory(title=t("출력 폴더 선택"), mustexist=False)
             if selected:
                 self.output_var.set(selected)
 
@@ -980,7 +1095,7 @@ def launch_oto_generator_ui(
             self.result_text.delete("1.0", "end")
             self.result_text.insert("1.0", format_result_text(title, payload))
             self.result_text.configure(state="disabled")
-            self.tabview.set("결과")
+            self.tabview.set(t("결과"))
 
         def _set_busy(self, busy: bool) -> None:
             self._busy = busy
@@ -1001,8 +1116,8 @@ def launch_oto_generator_ui(
             if self._busy and not self._cancel.is_set():
                 self._cancel.set()
                 self.cancel_button.configure(state="disabled")
-                self.status_var.set("취소하는 중... (진행 중인 파일을 마치고 멈춥니다)")
-                self._append_log("[취소 요청]")
+                self.status_var.set(t("취소하는 중... (진행 중인 파일을 마치고 멈춥니다)"))
+                self._append_log(t("[취소 요청]"))
 
         def _progress_callback(self, prefix: str = "") -> Callable[[str, int, int], None]:
             """Runs in the worker thread: forwards progress and stops the run once 취소 was pressed."""
@@ -1018,8 +1133,8 @@ def launch_oto_generator_ui(
             if self._busy:
                 return
             self._set_busy(True)
-            self.status_var.set(f"{title} 실행 중...")
-            self._append_log(f"[시작] {title}")
+            self.status_var.set(t("{title} 실행 중...", title=title))
+            self._append_log(t("[시작] {title}", title=title))
 
             def worker() -> None:
                 try:
@@ -1042,31 +1157,31 @@ def launch_oto_generator_ui(
 
         def _load_style_preset(self) -> None:
             selected = filedialog.askopenfilename(
-                title="고급 설정 프리셋 불러오기", filetypes=(("JSON", "*.json"), ("All files", "*.*"))
+                title=t("고급 설정 프리셋 불러오기"), filetypes=(("JSON", "*.json"), ("All files", "*.*"))
             )
             if not selected:
                 return
             try:
                 style = load_oto_style(Path(selected))
             except Exception as error:
-                messagebox.showerror("프리셋 오류", str(error), parent=self)
+                messagebox.showerror(t("프리셋 오류"), str(error), parent=self)
                 return
             for name, value in style_entry_values(style).items():
                 self.style_vars[name].set(value)
-            self._append_log(f"[고급 설정] 프리셋을 불러왔습니다: {selected}")
+            self._append_log(t("[고급 설정] 프리셋을 불러왔습니다: {path}", path=selected))
 
         def _save_style_preset(self) -> None:
             try:
                 style = self._style()
             except ValueError as error:
-                messagebox.showerror("입력 오류", str(error), parent=self)
+                messagebox.showerror(t("입력 오류"), str(error), parent=self)
                 return
             selected = filedialog.asksaveasfilename(
-                title="고급 설정 프리셋 저장", defaultextension=".json", filetypes=(("JSON", "*.json"),)
+                title=t("고급 설정 프리셋 저장"), defaultextension=".json", filetypes=(("JSON", "*.json"),)
             )
             if selected:
                 save_oto_style(Path(selected), style)
-                self._append_log(f"[고급 설정] 프리셋을 저장했습니다: {selected}")
+                self._append_log(t("[고급 설정] 프리셋을 저장했습니다: {path}", path=selected))
 
         def _reset_advanced(self) -> None:
             for var in self.style_vars.values():
@@ -1081,13 +1196,13 @@ def launch_oto_generator_ui(
                 return None
             try:
                 if self.batch_var.get():
-                    self.detection_var.set("형식 감지: 일괄 생성은 폴더마다 따로 감지합니다.")
+                    self.detection_var.set(t("형식 감지: 일괄 생성은 폴더마다 따로 감지합니다."))
                     return None
                 detection = detect_bank_format(
                     bank, self.base_oto_var.get(), self.language_var.get(), recursive=self.recursive_var.get()
                 )
             except Exception as error:
-                self.detection_var.set(f"형식 감지 실패: {error}")
+                self.detection_var.set(t("형식 감지 실패: {error}", error=error))
                 return None
             self._detection = detection
             self.detection_var.set(format_detection_text(detection))
@@ -1108,8 +1223,9 @@ def launch_oto_generator_ui(
                 return True
             if warning is None:
                 return True
-            self._append_log(f"[언어 확인] {warning}")
-            if not messagebox.askyesno("언어 확인", f"{warning}\n\n이 언어로 계속할까요?", parent=self):
+            self._append_log(t("[언어 확인] {warning}", warning=warning))
+            if not messagebox.askyesno(t("언어 확인"), t("{warning}\n\n이 언어로 계속할까요?", warning=warning),
+                                       parent=self):
                 return False
             self._language_acknowledged.add(key)
             return True
@@ -1143,20 +1259,21 @@ def launch_oto_generator_ui(
                 oto_style=self._style(),
                 vc_end_choice=self.vc_end_var.get(),
                 release_pre_choice=self.release_pre_var.get(),
+                alias_suffix=self.alias_suffix_var.get(),
             )
 
         def _read_options(self, *, force: bool = False, detected_format: str | None = None) -> GenerationOptions | None:
             try:
                 return self._generation_options(force=force, detected_format=detected_format)
             except Exception as error:
-                messagebox.showerror("입력 오류", str(error), parent=self)
-                self._append_log(f"[입력 오류] {type(error).__name__}: {error}")
+                messagebox.showerror(t("입력 오류"), str(error), parent=self)
+                self._append_log(t("[입력 오류] {error}", error=f"{type(error).__name__}: {error}"))
                 return None
 
         def _inspect(self) -> None:
             bank = self.bank_var.get().strip()
             if not bank:
-                messagebox.showerror("입력 오류", "WAV 보이스뱅크 폴더를 지정하세요.", parent=self)
+                messagebox.showerror(t("입력 오류"), t("WAV 보이스뱅크 폴더를 지정하세요."), parent=self)
                 return
             if self.batch_var.get():
                 language = LANGUAGE_CHOICES[self.language_var.get()]
@@ -1166,7 +1283,7 @@ def launch_oto_generator_ui(
                     folders = discover_bank_folders(Path(bank).expanduser(), language=language, use_folder_oto=use_folder_oto)
                     return {"batch_folders": [folder.to_dict() for folder in folders], "folder_count": len(folders)}
 
-                self._run("입력 검사 (일괄)", batch_inspect)
+                self._run(t("입력 검사 (일괄)"), batch_inspect)
                 return
             detection = self._refresh_detection()
             self._confirm_language(bank, self.base_oto_var.get())
@@ -1180,7 +1297,7 @@ def launch_oto_generator_ui(
                     payload["format_detection"] = detection.to_dict()
                 return payload
 
-            self._run("입력 검사", operation)
+            self._run(t("입력 검사"), operation)
 
         def _generate(self) -> None:
             bank = self.bank_var.get().strip()
@@ -1195,16 +1312,16 @@ def launch_oto_generator_ui(
                 return
             if options.output.resolve() == options.bank.resolve() and not options.allow_in_place_output:
                 messagebox.showerror(
-                    "직접 저장 차단",
-                    "출력 폴더가 보이스뱅크와 같습니다. 기존 oto.ini 덮어쓰기 허용 토글을 켜세요.",
+                    t("직접 저장 차단"),
+                    t("출력 폴더가 보이스뱅크와 같습니다. 기존 oto.ini 덮어쓰기 허용 토글을 켜세요."),
                     parent=self,
                 )
                 return
             output_has_files = options.output.exists() and any(options.output.iterdir())
             if output_has_files and not options.allow_in_place_output:
                 confirmed = messagebox.askyesno(
-                    "출력 폴더 확인",
-                    "출력 폴더가 비어 있지 않습니다. 기존 생성 산출물은 백업 후 교체될 수 있습니다. 계속할까요?",
+                    t("출력 폴더 확인"),
+                    t("출력 폴더가 비어 있지 않습니다. 기존 생성 산출물은 백업 후 교체될 수 있습니다. 계속할까요?"),
                     parent=self,
                 )
                 if not confirmed:
@@ -1219,14 +1336,14 @@ def launch_oto_generator_ui(
                 report = generate_voicebank(options)
                 return summarize_generation_result(report, output=options.output)
 
-            self._run("OTO 생성", operation)
+            self._run(t("OTO 생성"), operation)
 
         def _generate_batch(self) -> None:
             root = Path(self.bank_var.get().strip()).expanduser()
             output_root = Path(self.output_var.get().strip()).expanduser() if self.output_var.get().strip() else None
             in_place = self.overwrite_oto_var.get()
             if output_root is None and not in_place:
-                messagebox.showerror("입력 오류", "출력 폴더를 지정하세요.", parent=self)
+                messagebox.showerror(t("입력 오류"), t("출력 폴더를 지정하세요."), parent=self)
                 return
             if output_root is None:
                 self.output_var.set(str(root))
@@ -1236,10 +1353,10 @@ def launch_oto_generator_ui(
                     root, language=LANGUAGE_CHOICES[self.language_var.get()], use_folder_oto=self.folder_oto_var.get()
                 )
             except Exception as error:
-                messagebox.showerror("입력 오류", str(error), parent=self)
+                messagebox.showerror(t("입력 오류"), str(error), parent=self)
                 return
             if not folders:
-                messagebox.showerror("입력 오류", "WAV가 있는 폴더를 찾지 못했습니다.", parent=self)
+                messagebox.showerror(t("입력 오류"), t("WAV가 있는 폴더를 찾지 못했습니다."), parent=self)
                 return
             selected = self._choose_batch_folders(folders)
             if not selected:
@@ -1252,7 +1369,7 @@ def launch_oto_generator_ui(
             def generate_one(folder: BankFolder, output: Path) -> Mapping[str, object]:
                 format_hint = fixed_format or folder.format
                 if not format_hint:
-                    raise ValueError("형식을 알 수 없습니다. 포맷을 직접 고르고 다시 실행하세요.")
+                    raise ValueError(t("형식을 알 수 없습니다. 포맷을 직접 고르고 다시 실행하세요."))
                 folder_oto = folder.path / "oto.ini"
                 base_oto = folder_oto if use_folder_oto and folder_oto.is_file() else None
                 options = replace(
@@ -1272,7 +1389,8 @@ def launch_oto_generator_ui(
 
             def progress(index: int, total: int, folder: BankFolder) -> None:
                 position["index"] = index
-                events.put(("log", f"[일괄 {index}/{total}] {folder.relative} ({(fixed_format or folder.format or '?').upper()})"))
+                events.put(("log", t("[일괄 {index}/{total}] {folder} ({format})", index=index, total=total,
+                                     folder=folder.relative, format=(fixed_format or folder.format or "?").upper())))
 
             def operation() -> Mapping[str, object]:
                 return run_batch(
@@ -1280,18 +1398,18 @@ def launch_oto_generator_ui(
                     generate_one=generate_one, progress=progress,
                 )
 
-            self._run("일괄 OTO 생성", operation)
+            self._run(t("일괄 OTO 생성"), operation)
 
         def _choose_batch_folders(self, folders: list[BankFolder]) -> list[BankFolder]:
             dialog = ctk.CTkToplevel(self)
             apply_app_icon(dialog, delay_ms=CTK_TOPLEVEL_ICON_DELAY_MS)
-            dialog.title("일괄 생성할 폴더 선택")
+            dialog.title(t("일괄 생성할 폴더 선택"))
             dialog.geometry("820x520")
             dialog.transient(self)
             dialog.grab_set()
             ctk.CTkLabel(
                 dialog,
-                text="폴더마다 따로 oto.ini를 만듭니다. 형식을 알 수 없는 폴더는 기본으로 꺼져 있습니다.",
+                text=t("폴더마다 따로 oto.ini를 만듭니다. 형식을 알 수 없는 폴더는 기본으로 꺼져 있습니다."),
                 text_color=HINT, anchor="w",
             ).pack(fill="x", padx=14, pady=(12, 6))
             frame = ctk.CTkScrollableFrame(dialog)
@@ -1302,9 +1420,9 @@ def launch_oto_generator_ui(
                 var = tk.BooleanVar(value=bool(fixed or folder.format))
                 variables.append(var)
                 fmt = (fixed or folder.format or "?").upper()
-                note = "직접 선택" if fixed else format_detection_text(folder.detection).replace("형식 감지: ", "")
+                note = t("직접 선택") if fixed else format_detection_detail(folder.detection)
                 text = (f"{folder.relative}   WAV {folder.wav_count}   "
-                        f"{'oto.ini 있음' if folder.has_oto else 'oto.ini 없음'}   → {fmt}   ({note})")
+                        f"{t('oto.ini 있음') if folder.has_oto else t('oto.ini 없음')}   → {fmt}   ({note})")
                 ctk.CTkCheckBox(frame, text=text, variable=var).pack(anchor="w", pady=2)
             chosen: list[BankFolder] = []
 
@@ -1314,8 +1432,8 @@ def launch_oto_generator_ui(
 
             buttons = ctk.CTkFrame(dialog, fg_color="transparent")
             buttons.pack(fill="x", padx=12, pady=(6, 12))
-            ctk.CTkButton(buttons, text="취소", width=100, command=dialog.destroy).pack(side="right")
-            ctk.CTkButton(buttons, text="생성", width=100, command=accept,
+            ctk.CTkButton(buttons, text=t("취소"), width=100, command=dialog.destroy).pack(side="right")
+            ctk.CTkButton(buttons, text=t("생성"), width=100, command=accept,
                           fg_color=PRIMARY, hover_color=PRIMARY_HOVER).pack(side="right", padx=8)
             self.wait_window(dialog)
             return chosen
@@ -1330,15 +1448,31 @@ def launch_oto_generator_ui(
 
                 oto_path = options.output / "oto.ini"
                 if not oto_path.is_file():
-                    raise FileNotFoundError(f"생성된 oto.ini가 없습니다: {oto_path}")
+                    raise FileNotFoundError(t("생성된 oto.ini가 없습니다: {path}", path=oto_path))
                 return validate_oto(oto_path, options.bank)
 
-            self._run("출력 검증", operation)
+            self._run(t("출력 검증"), operation)
+
+        def _apply_suffix(self) -> None:
+            output = self.output_var.get().strip()
+            oto = Path(str(self.last_summary.get("oto"))) if self.last_summary.get("oto") else None
+            if oto is None or not oto.is_file():
+                oto = Path(output).expanduser() / "oto.ini" if output else None
+            if oto is None or not oto.is_file():
+                messagebox.showwarning(t("출력 폴더 없음"), t("먼저 OTO를 생성하세요."), parent=self)
+                return
+            suffix = self.alias_suffix_var.get()
+            try:
+                parse_alias_suffix(suffix)
+            except ValueError as error:
+                messagebox.showerror(t("입력 오류"), str(error), parent=self)
+                return
+            self._run(t("접미사 적용"), lambda: apply_suffix_to_output(oto, suffix))
 
         def _open_output(self) -> None:
             output = Path(self.output_var.get().strip()).expanduser()
             if not output.exists():
-                messagebox.showwarning("출력 폴더 없음", "먼저 OTO를 생성하세요.", parent=self)
+                messagebox.showwarning(t("출력 폴더 없음"), t("먼저 OTO를 생성하세요."), parent=self)
                 return
             os.startfile(str(output))
 
@@ -1352,7 +1486,7 @@ def launch_oto_generator_ui(
             )
             if oto is None:
                 chosen = filedialog.askopenfilename(
-                    parent=self, title="미리볼 oto.ini 선택", filetypes=[("oto.ini", "*.ini"), ("모든 파일", "*.*")]
+                    parent=self, title=t("미리볼 oto.ini 선택"), filetypes=[("oto.ini", "*.ini"), (t("모든 파일"), "*.*")]
                 )
                 if not chosen:
                     return
@@ -1368,19 +1502,19 @@ def launch_oto_generator_ui(
                 else:
                     self._preview_window = launch_oto_preview(oto, wav_dirs, master=self)
             except Exception as error:
-                messagebox.showerror("미리보기 실패", f"{type(error).__name__}: {error}", parent=self)
+                messagebox.showerror(t("미리보기 실패"), f"{type(error).__name__}: {error}", parent=self)
 
         def _open_report(self) -> None:
             report = Path(self.output_var.get().strip()).expanduser() / "generation_report.json"
             if self.last_summary.get("oto") and self.last_summary.get("report_path") is None:
                 messagebox.showwarning(
-                    "보고서 없음",
-                    "생성 보고서 저장이 꺼져 있었습니다. 고급 출력 옵션에서 켜고 다시 생성하세요.",
+                    t("보고서 없음"),
+                    t("생성 보고서 저장이 꺼져 있었습니다. 고급 출력 옵션에서 켜고 다시 생성하세요."),
                     parent=self,
                 )
                 return
             if not report.is_file():
-                messagebox.showwarning("보고서 없음", "먼저 OTO를 생성하세요.", parent=self)
+                messagebox.showwarning(t("보고서 없음"), t("먼저 OTO를 생성하세요."), parent=self)
                 return
             os.startfile(str(report))
 
@@ -1388,7 +1522,7 @@ def launch_oto_generator_ui(
             text = "\n".join(self._log_lines)
             self.clipboard_clear()
             self.clipboard_append(text)
-            self.status_var.set("로그 복사 완료")
+            self.status_var.set(t("로그 복사 완료"))
 
         def _poll_events(self) -> None:
             try:
@@ -1407,8 +1541,9 @@ def launch_oto_generator_ui(
                         continue
                     if kind == "cancelled":
                         self._set_busy(False)
-                        self.status_var.set(f"{value} 취소됨")
-                        self._append_log(f"[취소] {value}: 사용자가 중단했습니다. 출력 폴더의 이전 결과는 그대로입니다.")
+                        self.status_var.set(t("{title} 취소됨", title=value))
+                        self._append_log(t("[취소] {title}: 사용자가 중단했습니다. 출력 폴더의 이전 결과는 그대로입니다.",
+                                           title=value))
                         continue
                     if kind == "log":
                         self._append_log(str(value))
@@ -1419,27 +1554,28 @@ def launch_oto_generator_ui(
                         result = value
                         assert isinstance(result, UIOperationResult)
                         self.last_summary = dict(result.payload)
-                        self.status_var.set(f"{result.title} 완료")
+                        self.status_var.set(t("{title} 완료", title=result.title))
                         self._append_log(
                             json.dumps(dict(result.payload), ensure_ascii=False, indent=2, default=str)
                         )
                         for line in (*tempo_log_lines(result.payload), *alias_generation_log_lines(result.payload)):
                             self._append_log(line)
                         for item in result.payload.get("results", []) or []:
-                            state = "완료" if item.get("ok") else f"실패: {item.get('error')}"
-                            self._append_log(f"[일괄] {item.get('folder')}: {state}")
+                            state = t("완료") if item.get("ok") else t("실패: {error}", error=item.get("error"))
+                            self._append_log(t("[일괄] {folder}: {state}", folder=item.get("folder"), state=state))
                         excluded = excluded_rows_log_lines(result.payload)
                         for line in excluded:
                             self._append_log(line)
                         if excluded:
                             self.status_var.set(
-                                f"{result.title} 완료 (생성되지 않은 행 {result.payload.get('excluded_alias_rows')}개, 로그 참고)")
+                                t("{title} 완료 (생성되지 않은 행 {count}개, 로그 참고)", title=result.title,
+                                  count=result.payload.get("excluded_alias_rows")))
                         self._show_result(result.title, result.payload)
                     else:
-                        self.status_var.set("오류")
-                        self._append_log(f"[오류] {value}")
-                        self.tabview.set("로그")
-                        messagebox.showerror("작업 실패", str(value), parent=self)
+                        self.status_var.set(t("오류"))
+                        self._append_log(t("[오류] {error}", error=value))
+                        self.tabview.set(t("로그"))
+                        messagebox.showerror(t("작업 실패"), str(value), parent=self)
             except queue.Empty:
                 pass
             self.after(100, self._poll_events)

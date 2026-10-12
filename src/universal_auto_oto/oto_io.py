@@ -129,6 +129,51 @@ def write_lines_atomic(
     return backup
 
 
+def normalize_alias_suffix(suffix: str | None) -> str:
+    """User suffix text -> the part after '_' ("C4" and "_C4" both give "C4"); blank means none."""
+
+    text = str(suffix or "").strip()
+    text = text[1:].strip() if text.startswith("_") else text
+    if any(character in text for character in ",=\r\n"):
+        raise ValueError(f"alias suffix cannot contain ',', '=' or a line break: {suffix!r}")
+    return text
+
+
+def with_alias_suffix(alias: str, suffix: str | None) -> str:
+    """alias + "_" + suffix, as the previous AutoOTO did; an alias that already has it is kept."""
+
+    normalized = normalize_alias_suffix(suffix)
+    if not normalized or not alias or alias.endswith(f"_{normalized}"):
+        return alias
+    return f"{alias}_{normalized}"
+
+
+def apply_alias_suffix_to_oto(path: Path, suffix: str | None, *, backup_existing: bool = True) -> tuple[int, int]:
+    """Add the suffix to every alias of an existing oto file, keeping its encoding and line ends.
+
+    Returns (changed aliases, aliases). Running it again changes nothing.
+    """
+
+    text, encoding, newline = read_text_auto(path)
+    lines, changed, total = [], 0, 0
+    for raw in text.splitlines():
+        if "=" not in raw or raw.lstrip().startswith("#"):
+            lines.append(raw)
+            continue
+        wav, payload = raw.split("=", 1)
+        alias, separator, rest = payload.partition(",")
+        if wav.strip() and alias.strip():
+            total += 1
+            suffixed = with_alias_suffix(alias.strip(), suffix)
+            if suffixed != alias.strip():
+                changed += 1
+                payload = f"{suffixed}{separator}{rest}"
+        lines.append(f"{wav}={payload}")
+    if changed:
+        write_lines_atomic(path, lines, encoding=encoding, newline=newline, backup_existing=backup_existing)
+    return changed, total
+
+
 def validate_oto_line_values(
     *,
     duration_ms: float,

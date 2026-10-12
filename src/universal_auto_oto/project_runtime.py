@@ -15,7 +15,7 @@ from .alias_type_symbolic import (
     DEFAULT_REVIEW_QUEUE_FILENAME,
     export_symbolic_alias_types,
 )
-from .oto_io import resolve_output_encoding, write_lines_atomic
+from .oto_io import resolve_output_encoding, with_alias_suffix, write_lines_atomic
 from .oto_style import OtoStyle, apply_korean_cvc_window, apply_korean_vcv_window, apply_oto_style
 from . import analysis_cache
 from .row_risk import risk_threshold, row_risks, voicing_onsets_ms
@@ -485,6 +485,7 @@ def generate_project(
     write_row_report: bool = True,
     write_timelines: bool = True,
     oto_style: OtoStyle | None = None,
+    alias_suffix: str = "",
     skip_failed_recordings: bool = False,
     alignment_workers: int = 1,
     progress: ProgressCallback | None = None,
@@ -722,6 +723,8 @@ def generate_project(
             elif korean and format_hint == "cvc":
                 row = apply_korean_cvc_window(row)
             row = apply_oto_style(row, oto_style)
+            if alias_suffix:  # every output (oto, clean/review, row report) carries the suffixed alias
+                row = replace(row, alias=with_alias_suffix(row.alias, alias_suffix))
             rows_by_output[target_oto].append(row)
             row_reports.append(
                 {

@@ -26,6 +26,8 @@ _BASE_PHONES: dict[str, tuple[str, ...]] = {
 }
 _SMALL_VOWELS = {"\u3041": "a", "\u3043": "i", "\u3045": "u", "\u3047": "e", "\u3049": "o"}
 _SMALL_YOON = {"\u3083": "a", "\u3085": "u", "\u3087": "o"}
+# Palatal onsets already carry the glide: \u3061\u3083/\u3057\u3083/\u3058\u3083 are written cha/sha/ja, not chya.
+_PALATAL_ONSETS = {"ch", "sh", "j"}
 
 
 def parse_kana_slots(text: str) -> list[tuple[str, ...]]:
@@ -53,7 +55,10 @@ def parse_kana_slots(text: str) -> list[tuple[str, ...]]:
                 return []
             if slots[-1] and slots[-1][-1] in {"i", "e"}:
                 slots[-1].pop()
-            slots[-1].extend(("y", _SMALL_YOON[character]))
+            if slots[-1] and slots[-1][-1] in _PALATAL_ONSETS:
+                slots[-1].append(_SMALL_YOON[character])
+            else:
+                slots[-1].extend(("y", _SMALL_YOON[character]))
             seen_kana = True
             continue
         if character in _SMALL_VOWELS:
@@ -79,13 +84,15 @@ def _apply_small_vowel(slots: list[list[str]], vowel: str) -> None:
     slot = slots[-1]
     last = slot[-1]
     previous = slot[-2] if len(slot) >= 2 else ""
-    if last == "i":
+    if last == "i" and previous in _PALATAL_ONSETS:  # ちぇ, しぇ, じぇ
+        slot[-1] = vowel
+    elif last == "i":
         slot.pop()
         slot.extend(("y", vowel))
     elif last == "u" and previous in {"k", "g"}:
         slot.pop()
         slot.extend(("w", vowel))
-    elif last == "u" and previous and previous not in {"f", "v", "ts"}:
+    elif last == "u" and previous and previous not in {"f", "v", "ts", "s", "z"}:  # すぃ, ずぃ = si, zi
         slot.pop()
         slot.extend(("w", vowel))
     elif last == "u" and (not previous or previous in _VOWELS):

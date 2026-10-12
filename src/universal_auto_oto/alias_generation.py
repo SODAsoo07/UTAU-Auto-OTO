@@ -224,12 +224,34 @@ def _romaji_to_kana() -> dict[str, str]:
     candidates = [kana for kana in base if kana not in small_set]
     candidates += [kana + small for kana in candidates for small in smalls]
     table: dict[str, str] = {}
+    best: dict[str, int] = {}
     for kana in candidates:
         slots = parse_kana_slots(kana)
         if len(slots) != 1:
             continue
-        table.setdefault("".join(slots[0]), kana)
+        key, rank = "".join(slots[0]), _kana_spelling_rank(kana)
+        if rank < best.get(key, len(_KANA_SPELLING_RANKS)):
+            table[key], best[key] = kana, rank
     return table
+
+
+# Several kana spell one romaji syllable; the usual one wins (si = すぃ not さぃ, ti = てぃ, tu = とぅ,
+# wi = うぃ not ゐ).
+_KANA_SPELLING_RANKS = ("plain", "i/u base", "matching e/o base", "other e/o base", "a base", "archaic")
+
+
+def _kana_spelling_rank(kana: str) -> int:
+    if kana in {"ゐ", "ゑ"}:
+        return _KANA_SPELLING_RANKS.index("archaic")
+    if len(kana) == 1:
+        return _KANA_SPELLING_RANKS.index("plain")
+    base_vowel = parse_kana_slots(kana[0])[0][-1]
+    if base_vowel in {"i", "u"}:
+        return _KANA_SPELLING_RANKS.index("i/u base")
+    if base_vowel in {"e", "o"}:  # てぃ/でぃ take the e column, とぅ/どぅ the o column
+        matching = (kana[1] == "ぅ") == (base_vowel == "o")
+        return _KANA_SPELLING_RANKS.index("matching e/o base" if matching else "other e/o base")
+    return _KANA_SPELLING_RANKS.index("a base")
 
 
 def _left(syllable: _Syllable, format_type: str) -> str:

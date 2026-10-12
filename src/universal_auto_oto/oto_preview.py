@@ -20,6 +20,7 @@ import soundfile as sf
 from scipy.signal import stft
 
 from .app_icon import apply_app_icon
+from .i18n import get_language, load_ui_language, machine_translation_notice, t
 from .oto_io import oto_cutoff_end_abs, read_text_auto
 from .waveform_view import WaveformViewport, visible_waveform_columns
 
@@ -100,7 +101,7 @@ class RowStatus:
 
     @property
     def label(self) -> str:
-        names = {"clean": "clean", "review": "review", "high_risk": "review!", "unrated": "미판정", "unknown": "-"}
+        names = {"clean": "clean", "review": "review", "high_risk": "review!", "unrated": t("미판정"), "unknown": "-"}
         return names[self.color_key]
 
 
@@ -328,21 +329,22 @@ def resolve_wav(row: OtoPreviewRow, wav_dirs: Sequence[Path]) -> Path | None:
 
 def format_row_details(row: OtoPreviewRow, status: RowStatus, markers: OtoMarkers | None) -> str:
     parts = [
-        f"{row.alias}  ({row.wav}, {row.line_number}행)",
-        f"offset {row.offset:.1f}  고정 {row.consonant:.1f}  cutoff {row.cutoff:.1f}  "
-        f"선행발성 {row.preutterance:.1f}  오버랩 {row.overlap:.1f}",
+        t("{alias}  ({wav}, {line}행)", alias=row.alias, wav=row.wav, line=row.line_number),
+        f"offset {row.offset:.1f}  {t('고정')} {row.consonant:.1f}  cutoff {row.cutoff:.1f}  "
+        f"{t('선행발성')} {row.preutterance:.1f}  {t('오버랩')} {row.overlap:.1f}",
     ]
-    state = f"상태 {status.label}"
+    state = t("상태 {label}", label=status.label)
     if status.risk is not None:
         state += f"  risk {status.risk:.2f}"
     elif status.confidence is not None:
         state += f"  confidence {status.confidence:.2f}"
     if markers is not None:
-        state += f"  |  절대 위치: 선행발성 {markers.preutterance:.1f} ms, 끝 {markers.cutoff_end:.1f} ms"
+        state += t("  |  절대 위치: 선행발성 {pre:.1f} ms, 끝 {end:.1f} ms", pre=markers.preutterance,
+                   end=markers.cutoff_end)
     parts.append(state)
     shown = [reason for reason in status.reasons if not reason.startswith("row_risk_")]
     if shown:
-        parts.append("근거: " + ", ".join(shown))
+        parts.append(t("근거: {reasons}", reasons=", ".join(shown)))
     return "\n".join(parts)
 
 
@@ -351,13 +353,14 @@ def status_summary(statuses: Sequence[RowStatus]) -> str:
     for status in statuses:
         counts[status.color_key] += 1
     if statuses and counts["unrated"] == len(statuses):
-        return f"{len(statuses)}행 모두 미판정  |  {UNRATED_NOTE}"
-    summary = (f"{len(statuses)}행  clean {counts['clean']}  review {counts['review'] + counts['high_risk']}"
-               f" (그중 risk>{HIGH_RISK:.1f} {counts['high_risk']})")
+        return t("{count}행 모두 미판정  |  {note}", count=len(statuses), note=t(UNRATED_NOTE))
+    summary = t("{count}행  clean {clean}  review {review} (그중 risk>{threshold:.1f} {high})", count=len(statuses),
+                clean=counts["clean"], review=counts["review"] + counts["high_risk"], threshold=HIGH_RISK,
+                high=counts["high_risk"])
     if counts["unrated"]:
-        summary += f"  미판정 {counts['unrated']}"
+        summary += t("  미판정 {count}", count=counts["unrated"])
     if statuses and counts["unknown"] == len(statuses):
-        summary += "  |  clean/review 파일이 없어 위험도 표시 없음"
+        summary += t("  |  clean/review 파일이 없어 위험도 표시 없음")
     return summary
 
 
@@ -416,11 +419,16 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
                                 "image": None, "pan": None, "temp": None, "oto_path": None}
     cache: dict[Path, PreviewAudio] = {}
 
-    filter_var = tk.StringVar(value="전체")
+    filter_modes = {t("전체"): None, t("review만"): "review", t("clean만"): "clean"}
+    filter_var = tk.StringVar(value=next(iter(filter_modes)))
     search_var = tk.StringVar()
     sort_risk_var = tk.BooleanVar(value=False)
-    details_var = tk.StringVar(value="행을 선택하세요.")
+    details_var = tk.StringVar(value=t("행을 선택하세요."))
     summary_var = tk.StringVar()
+
+    notice = machine_translation_notice()
+    if notice:  # English / Japanese: say the UI text is machine-translated
+        ttk.Label(window, text=f"⚠ {notice}", style="Hint.TLabel", font=("", 9), padding=(8, 4, 8, 0)).pack(fill="x")
 
     paned = ttk.PanedWindow(window, orient="horizontal")
     paned.pack(fill="both", expand=True)
@@ -432,17 +440,17 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
     controls = ttk.Frame(left)
     controls.pack(fill="x")
     ttk.Combobox(controls, textvariable=filter_var, state="readonly", width=10,
-                 values=("전체", "review만", "clean만")).pack(side="left")
+                 values=tuple(filter_modes)).pack(side="left")
     ttk.Entry(controls, textvariable=search_var, width=16).pack(side="left", padx=4, fill="x", expand=True)
-    ttk.Checkbutton(controls, text="위험도순", variable=sort_risk_var).pack(side="left")
+    ttk.Checkbutton(controls, text=t("위험도순"), variable=sort_risk_var).pack(side="left")
     ttk.Label(left, textvariable=summary_var, style="Hint.TLabel", wraplength=360).pack(fill="x", pady=(4, 4))
 
     tree_frame = ttk.Frame(left)
     tree_frame.pack(fill="both", expand=True)
     tree = ttk.Treeview(tree_frame, columns=("line", "alias", "wav", "state", "risk"), show="headings",
                         selectmode="browse")
-    for column, title, width, anchor in (("line", "#", 44, "e"), ("alias", "별칭", 90, "w"), ("wav", "WAV", 150, "w"),
-                                         ("state", "상태", 64, "center"), ("risk", "risk", 50, "e")):
+    for column, title, width, anchor in (("line", "#", 44, "e"), ("alias", t("별칭"), 90, "w"), ("wav", "WAV", 150, "w"),
+                                         ("state", t("상태"), 64, "center"), ("risk", "risk", 50, "e")):
         tree.heading(column, text=title)
         tree.column(column, width=width, anchor=anchor, stretch=column in ("alias", "wav"))
     for key, color in SPLIT_TEXT_COLORS.items():
@@ -454,6 +462,10 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
 
     toolbar = ttk.Frame(right)
     toolbar.pack(fill="x")
+    legend_row = toolbar  # the translated button labels are longer: give the legend its own row
+    if get_language() != "ko":
+        legend_row = ttk.Frame(right)
+        legend_row.pack(fill="x", pady=(2, 0))
     canvas = tk.Canvas(right, background=DARK["canvas"], highlightthickness=0)
     ttk.Label(right, textvariable=details_var, justify="left", font=("Consolas", 10)).pack(fill="x", side="bottom",
                                                                                           pady=(6, 0))
@@ -463,12 +475,10 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
 
     def visible_indices() -> list[int]:
         query = search_var.get().strip().casefold()
-        mode = filter_var.get()
+        mode = filter_modes.get(filter_var.get())
         indices = []
         for index, (row, status) in enumerate(zip(rows, statuses)):
-            if mode == "review만" and status.split != "review":
-                continue
-            if mode == "clean만" and status.split != "clean":
+            if mode is not None and status.split != mode:
                 continue
             if query and query not in row.alias.casefold() and query not in row.wav.casefold():
                 continue
@@ -501,7 +511,7 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
         audio, row, viewport = current_audio(), state["row"], state["viewport"]
         width, height = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
         if audio is None or not isinstance(row, OtoPreviewRow) or not isinstance(viewport, WaveformViewport):
-            canvas.create_text(width / 2, height / 2, text=str(state.get("message") or "행을 선택하세요."),
+            canvas.create_text(width / 2, height / 2, text=str(state.get("message") or t("행을 선택하세요.")),
                                fill="#bac6cc")
             return
         axis = 20
@@ -529,8 +539,8 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
         for name, time_ms, label, dash in (
             ("offset", markers.offset, "offset", (3, 3)),
             ("cutoff", markers.cutoff_end, "cutoff", (3, 3)),
-            ("overlap", markers.overlap, "오버랩", ()),
-            ("preutterance", markers.preutterance, "선행발성", ()),
+            ("overlap", markers.overlap, t("오버랩"), ()),
+            ("preutterance", markers.preutterance, t("선행발성"), ()),
         ):
             x = x_of(time_ms)
             if -2 <= x <= width + 2:
@@ -563,7 +573,7 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
         path = resolve_wav(row, search_dirs)
         state.update(row=row, index=index)
         if path is None:
-            state.update(audio=None, audio_path=None, message=f"WAV를 찾을 수 없습니다: {row.wav}")
+            state.update(audio=None, audio_path=None, message=t("WAV를 찾을 수 없습니다: {wav}", wav=row.wav))
             details_var.set(format_row_details(row, statuses[index], None))
             draw()
             return
@@ -573,7 +583,7 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
                     cache.clear()
                 cache[path] = load_preview_audio(path)
         except Exception as error:  # unreadable WAV: show it, keep the window usable
-            state.update(audio=None, audio_path=None, message=f"WAV를 읽을 수 없습니다: {error}")
+            state.update(audio=None, audio_path=None, message=t("WAV를 읽을 수 없습니다: {error}", error=error))
             draw()
             return
         audio = cache[path]
@@ -653,7 +663,7 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
                 sf.write(str(target), audio.samples[start:end], audio.sample_rate, subtype="PCM_16")
             winsound.PlaySound(str(target), winsound.SND_FILENAME | winsound.SND_ASYNC)
         except Exception as error:
-            messagebox.showerror("재생 실패", str(error), parent=window)
+            messagebox.showerror(t("재생 실패"), str(error), parent=window)
 
     def stop() -> None:
         try:
@@ -673,12 +683,12 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
     for label, command in (("행 재생 (Space)", play), ("전체 재생", lambda: play(True)), ("정지", stop),
                            ("행에 맞춤 (F)", fit_row), ("전체 보기", fit_all),
                            ("확대 +", lambda: zoom_by(1.5)), ("축소 -", lambda: zoom_by(1 / 1.5))):
-        ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=(0, 4))
-    legend = ttk.Frame(toolbar)
+        ttk.Button(toolbar, text=t(label), command=command).pack(side="left", padx=(0, 4))
+    legend = ttk.Frame(legend_row)
     legend.pack(side="right")
     for name, label in (("preutterance", "선행발성"), ("overlap", "오버랩"), ("fixed", "고정"), ("blank", "블랭크")):
         tk.Label(legend, text="■", fg=PARAM_COLORS[name], bg=DARK["bg"]).pack(side="left")
-        ttk.Label(legend, text=label).pack(side="left", padx=(0, 6))
+        ttk.Label(legend, text=t(label)).pack(side="left", padx=(0, 6))
 
     hscroll.configure(command=scroll)
     tree.bind("<<TreeviewSelect>>", select_row)
@@ -707,9 +717,9 @@ def launch_oto_preview(oto_path: Path, wav_dirs: Sequence[Path] = (), *, master=
         search_dirs[:] = [Path(item).resolve() for item in dirs] + [path.parent]
         cache.clear()  # a regenerated bank may have new or rewritten WAVs (alias generation)
         state.update(oto_path=path, audio=None, audio_path=None, row=None, index=None, viewport=None, message=None)
-        window.title(f"OTO 미리보기 - {path}")
+        window.title(t("OTO 미리보기 - {path}", path=path))
         summary_var.set(status_summary(statuses))
-        details_var.set("행을 선택하세요.")
+        details_var.set(t("행을 선택하세요."))
         tree.selection_set(())
         populate()
         children = tree.get_children()
@@ -742,6 +752,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wav-dir", type=Path, action="append", default=[],
                         help="Folder with the WAVs (default: the oto.ini folder); repeatable")
     args = parser.parse_args(argv)
+    load_ui_language()
     try:
         launch_oto_preview(args.oto, args.wav_dir)
     except Exception as error:

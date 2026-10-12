@@ -102,12 +102,32 @@ def bound(filename, aliases, *, language, format_type):
 
 def test_japanese_yoon_binds_the_whole_consonant_glide_vowel_cluster():
     phones, got = bound("_あきゃしゃ.wav", ["きゃG4", "a kyG4", "a きゃ", "- あ"], language="japanese", format_type="cvvc")
-    assert phones == ("a", "k", "y", "a", "sh", "y", "a")
+    assert phones == ("a", "k", "y", "a", "sh", "a")  # しゃ = sha: the palatal onset carries the glide
     assert got["きゃG4"] == ((1, 2, 3), "builtin:cv_cluster")
     assert got["a kyG4"] == ((0, 1, 2), "builtin:vc_semivowel")
     assert got["a きゃ"] == ((0, 1, 2, 3), "builtin:vcv_cluster")
     _, got = bound("きぇ.wav", ["きぇD4", "- きぇD4"], language="japanese", format_type="cv")
     assert got["きぇD4"][0] == got["- きぇD4"][0] == (0, 1, 2)
+
+
+def test_japanese_romaji_cvvc_binds_palatal_yoon_heads_and_glides():
+    # A Japanese romaji CVVC bank dropped these rows: ちゃ vs "cha", すぃ vs "si", "- ch" and "a w" had no candidate.
+    phones, got = bound("cha-chi-chu-che-cho-cha-N-chi.wav", ["- ch", "a ch", "ち", "ちゅ", "ちぇ", "ちょ", "ちゃ"],
+                        language="japanese", format_type="cvvc")
+    assert phones[:4] == ("ch", "a", "ch", "i")
+    assert got["- ch"] == ((0,), "builtin:special_generic")
+    assert got["ちゃ"][0] == (0, 1) and got["ちぇ"][0] == (6, 7) and got["ちょ"][0] == (8, 9)
+    _, got = bound("sha-ja.wav", ["しゃ", "じゃ", "- sh"], language="japanese", format_type="cvvc")
+    assert got["しゃ"][0] == (0, 1) and got["じゃ"][0] == (2, 3) and got["- sh"][0] == (0,)
+    _, got = bound("sa-si-su.wav", ["すぃ", "- s"], language="japanese", format_type="cvvc")
+    assert got["すぃ"][0] == (2, 3) and got["- s"][0] == (0,)
+    phones, got = bound("wa-wi-ya-yu.wav", ["- w", "a w", "i y", "わ", "うぃ", "ゆ"], language="japanese",
+                        format_type="cvvc")
+    assert phones == ("w", "a", "w", "i", "y", "a", "y", "u")
+    assert got["- w"][0] == (0,) and got["a w"][0] == (1, 2) and got["i y"][0] == (3, 4)
+    assert got["わ"][0] == (0, 1) and got["うぃ"][0] == (2, 3) and got["ゆ"][0] == (6, 7)
+    _, got = bound("kya-kyu.wav", ["- ky", "きゅ"], language="japanese", format_type="cvvc")
+    assert got["- ky"] == ((0, 1), "builtin:consonant_semivowel") and got["きゅ"][0] == (2, 3)
 
 
 def test_japanese_wo_and_ky_before_i_are_fallbacks_only():

@@ -239,6 +239,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="JSON preset of advanced OTO style settings (overlap ratios, preutterance shifts, margins).",
     )
+    generate_parser.add_argument(
+        "--alias-suffix",
+        default="",
+        help="Append _<suffix> to every generated alias (C4 -> ka_C4); aliases that already end with it are kept.",
+    )
     generate_parser.add_argument("--bpm", type=float, help="routed_hsmm: recording tempo; syllables follow this beat grid.")
     generate_parser.add_argument(
         "--estimate-bpm",
@@ -616,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
                     bpm=args.bpm,
                     estimate_bpm=args.estimate_bpm,
                     oto_style=load_oto_style(args.oto_style) if args.oto_style else None,
+                    alias_suffix=args.alias_suffix,
                     alignment_workers=args.workers,
                 )
             )

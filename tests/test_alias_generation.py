@@ -19,6 +19,11 @@ def test_japanese_romaji_file_names_give_kana_aliases() -> None:
     assert aliases == ["あ", "ば", "び"]
 
 
+def test_japanese_romaji_uses_the_usual_kana_spelling() -> None:
+    aliases = generate_aliases("cha-si-ti-tu-wi.wav", format_hint="cv", language_hint="japanese")
+    assert aliases == ["ちゃ", "すぃ", "てぃ", "とぅ", "うぃ"]
+
+
 def test_korean_cvvc_codas_and_pause_heads() -> None:
     aliases = generate_aliases("_an'ban'_'gin.wav", format_hint="cvvc", language_hint="korean")
     assert aliases == ["- a", "a", "a n", "n b", "ba", "a n", "- gi", "gi", "i n", "n -"]

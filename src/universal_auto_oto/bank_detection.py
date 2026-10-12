@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from .i18n import t
 from .kana import parse_kana_slots
 from .planning import recording_tokens
 
@@ -146,27 +147,29 @@ def detect_format_from_aliases(aliases: Sequence[str], *, language: str | None =
     cv, vcv, vc, vc_syllable = counts["cv"], counts["vcv"], counts["vc"], counts["vc_syllable"]
     core = cv + vcv + vc + vc_syllable
     evidence = [
-        f"별칭 {len(stripped)}개 분석" + (f" (접미사 '{suffix.strip()}' 제외)" if suffix.strip() else ""),
-        f"CV {cv} · VCV {vcv} · VC {vc} · 받침 음절(예: ang) {vc_syllable} · 머리(- CV) {counts['head']}",
+        t("별칭 {count}개 분석", count=len(stripped))
+        + (t(" (접미사 '{suffix}' 제외)", suffix=suffix.strip()) if suffix.strip() else ""),
+        t("CV {cv} · VCV {vcv} · VC {vc} · 받침 음절(예: ang) {vc_syllable} · 머리(- CV) {head}", cv=cv, vcv=vcv,
+          vc=vc, vc_syllable=vc_syllable, head=counts["head"]),
     ]
     if core < 8:
-        return FormatDetection(None, "none", "base_oto", (*evidence, "판정에 쓸 별칭이 너무 적습니다."), dict(counts))
+        return FormatDetection(None, "none", "base_oto", (*evidence, t("판정에 쓸 별칭이 너무 적습니다.")), dict(counts))
     korean = (language or "").casefold() in {"korean", "ko", "kr"}
     if vcv >= 0.3 * core and vcv > cv:
         confidence = "high" if vcv >= 0.6 * core else "medium"
-        return FormatDetection("vcv", confidence, "base_oto", (*evidence, "모음+CV 별칭(a ka)이 대부분입니다."), dict(counts))
+        return FormatDetection("vcv", confidence, "base_oto", (*evidence, t("모음+CV 별칭(a ka)이 대부분입니다.")), dict(counts))
     if vc >= 0.08 * core:
         if korean and vc_syllable >= 0.05 * core:
             return FormatDetection(
                 "cvc", "medium", "base_oto",
-                (*evidence, "VC 별칭과 받침 음절 별칭(ang, ot)이 함께 있습니다."), dict(counts),
+                (*evidence, t("VC 별칭과 받침 음절 별칭(ang, ot)이 함께 있습니다.")), dict(counts),
             )
         confidence = "high" if cv >= 0.25 * core else "medium"
-        return FormatDetection("cvvc", confidence, "base_oto", (*evidence, "CV와 VC(a k) 별칭이 함께 있습니다."), dict(counts))
+        return FormatDetection("cvvc", confidence, "base_oto", (*evidence, t("CV와 VC(a k) 별칭이 함께 있습니다.")), dict(counts))
     if cv >= 0.5 * core:
         return FormatDetection("cv", "high" if vc == 0 else "medium", "base_oto",
-                               (*evidence, "단독 CV 별칭이 대부분입니다."), dict(counts))
-    return FormatDetection(None, "low", "base_oto", (*evidence, "별칭 패턴이 어느 형식과도 뚜렷하게 맞지 않습니다."), dict(counts))
+                               (*evidence, t("단독 CV 별칭이 대부분입니다.")), dict(counts))
+    return FormatDetection(None, "low", "base_oto", (*evidence, t("별칭 패턴이 어느 형식과도 뚜렷하게 맞지 않습니다.")), dict(counts))
 
 
 def detect_format_from_folder_name(bank: Path) -> FormatDetection | None:
@@ -179,7 +182,7 @@ def detect_format_from_folder_name(bank: Path) -> FormatDetection | None:
         }
         if len(found) == 1:
             value = found.pop()
-            return FormatDetection(value, "medium", "folder_name", (f"폴더 이름 '{name}'에 {value.upper()}가 들어 있습니다.",))
+            return FormatDetection(value, "medium", "folder_name", (t("폴더 이름 '{name}'에 {format}가 들어 있습니다.", name=name, format=value.upper()),))
     return None
 
 
@@ -205,12 +208,13 @@ def detect_format_from_filenames(wav_names: Sequence[str]) -> FormatDetection | 
     if single >= 0.8:
         return FormatDetection(
             "cv", "medium", "filenames",
-            (f"WAV {len(counts)}개 중 {single:.0%}가 한 음절 파일입니다.",),
+            (t("WAV {count}개 중 {share:.0%}가 한 음절 파일입니다.", count=len(counts), share=single),),
             {"single_syllable_files": sum(1 for count in counts if count <= 1)},
         )
     return FormatDetection(
         None, "none", "filenames",
-        (f"여러 음절 목록 파일입니다(중앙값 {median:g}음절). 파일 이름만으로는 CVVC/VCV/CVC를 구분할 수 없습니다.",),
+        (t("여러 음절 목록 파일입니다(중앙값 {median:g}음절). 파일 이름만으로는 CVVC/VCV/CVC를 구분할 수 없습니다.",
+    median=median),),
     )
 
 
@@ -233,13 +237,13 @@ def detect_format(
                 return FormatDetection(
                     folder.format, "medium", "base_oto+folder_name",
                     (*from_oto.evidence, *folder.evidence,
-                     f"여러 형식 별칭이 섞인 OTO라 폴더 이름의 {folder.format.upper()}를 따릅니다."),
+                     t("여러 형식 별칭이 섞인 OTO라 폴더 이름의 {format}를 따릅니다.", format=folder.format.upper())),
                     from_oto.counts,
                 )
             if folder is not None and folder.format != from_oto.format:
                 return FormatDetection(
                     from_oto.format, "low", from_oto.source,
-                    (*from_oto.evidence, f"폴더 이름은 {folder.format.upper()}를 가리켜 결과가 엇갈립니다. 형식을 확인하세요."),
+                    (*from_oto.evidence, t("폴더 이름은 {format}를 가리켜 결과가 엇갈립니다. 형식을 확인하세요.", format=folder.format.upper())),
                     from_oto.counts,
                 )
             return from_oto
@@ -256,7 +260,7 @@ def detect_format(
         notes += detect_format_from_aliases(base_aliases, language=language).evidence
     if from_files is not None:
         notes += from_files.evidence
-    return FormatDetection(None, "none", "none", (*notes, "형식을 직접 선택하세요."))
+    return FormatDetection(None, "none", "none", (*notes, t("형식을 직접 선택하세요.")))
 
 
 def check_language(
@@ -276,14 +280,14 @@ def check_language(
     normalized = language.casefold()
     warning = None
     if normalized in {"korean", "ko", "kr"} and kana >= 0.2:
-        warning = (f"언어를 한국어로 골랐지만 파일 이름/별칭의 {kana:.0%}에 일본어 가나가 있습니다. "
-                   "일본어 보이스뱅크가 아닌지 확인하세요.")
+        warning = t("언어를 한국어로 골랐지만 파일 이름/별칭의 {share:.0%}에 일본어 가나가 있습니다. "
+                    "일본어 보이스뱅크가 아닌지 확인하세요.", share=kana)
     elif normalized in {"japanese", "ja", "jp"} and hangul >= 0.1:
-        warning = (f"언어를 일본어로 골랐지만 파일 이름/별칭의 {hangul:.0%}에 한글이 있습니다. "
-                   "한국어 보이스뱅크가 아닌지 확인하세요.")
+        warning = t("언어를 일본어로 골랐지만 파일 이름/별칭의 {share:.0%}에 한글이 있습니다. "
+                    "한국어 보이스뱅크가 아닌지 확인하세요.", share=hangul)
     elif normalized in {"japanese", "ja", "jp"} and kana < 0.05 and len(roman_texts) >= 5 and korean_roman >= 0.25:
-        warning = (f"언어를 일본어로 골랐지만 로마자 이름의 {korean_roman:.0%}에 한국어 표기(eo, eu, ng, ss 등)가 있습니다. "
-                   "한국어 보이스뱅크가 아닌지 확인하세요.")
+        warning = t("언어를 일본어로 골랐지만 로마자 이름의 {share:.0%}에 한국어 표기(eo, eu, ng, ss 등)가 있습니다. "
+                    "한국어 보이스뱅크가 아닌지 확인하세요.", share=korean_roman)
     return LanguageCheck(language, warning, kana, hangul, korean_roman)
 
 

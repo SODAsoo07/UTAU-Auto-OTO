@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .bank_detection import FormatDetection, detect_format
+from .i18n import t
 from .oto_io import parse_oto
 
 
@@ -84,7 +85,7 @@ def _share_detected_format(folders: list[BankFolder]) -> list[BankFolder]:
     result = []
     for folder in folders:
         if folder.format is None:
-            note = f"다른 폴더 {votes}개가 {shared.upper()}로 감지되어 같은 형식을 씁니다."
+            note = t("다른 폴더 {votes}개가 {format}로 감지되어 같은 형식을 씁니다.", votes=votes, format=shared.upper())
             folder = replace(
                 folder,
                 detection=FormatDetection(shared, "low", "sibling_folders", (*folder.detection.evidence, note)),

@@ -19,6 +19,8 @@ from typing import Callable, Sequence
 import numpy as np
 import soundfile as sf
 
+from .i18n import t
+
 
 MIN_BPM = 60.0
 MAX_BPM = 240.0
@@ -130,7 +132,7 @@ def estimate_tempo(
         if count is not None and count >= 3:
             usable.append((wav, count))
     if not usable:
-        return TempoEstimate(None, None, None, 0, 0, None, "여러 음절 목록 파일이 없어 BPM을 추정할 수 없습니다.")
+        return TempoEstimate(None, None, None, 0, 0, None, t("여러 음절 목록 파일이 없어 BPM을 추정할 수 없습니다."))
     step = max(1, len(usable) // max_files)
     sample = usable[::step][:max_files]
     periods: dict[str, float] = {}
@@ -145,7 +147,7 @@ def estimate_tempo(
     if len(values) < MIN_STEADY_FILES:
         return TempoEstimate(
             None, None, None, len(values), len(sample), None,
-            f"박자가 일정한 파일이 {len(values)}개뿐이라 BPM을 추정하지 않았습니다(가이드 없이 녹음한 경우 정상).",
+            t("박자가 일정한 파일이 {count}개뿐이라 BPM을 추정하지 않았습니다(가이드 없이 녹음한 경우 정상).", count=len(values)),
             periods,
         )
     median = statistics.median(values)
@@ -154,16 +156,16 @@ def estimate_tempo(
     if spread > MAX_PERIOD_SPREAD:
         return TempoEstimate(
             None, None, None, len(values), len(sample), spread,
-            f"파일마다 박자가 달라(편차 {spread:.0%}) BPM을 추정하지 않았습니다.",
+            t("파일마다 박자가 달라(편차 {spread:.0%}) BPM을 추정하지 않았습니다.", spread=spread),
             periods,
         )
     bpm, per_beat = period_to_bpm(median)
     if not MIN_BPM <= bpm <= MAX_BPM:
         return TempoEstimate(None, None, None, len(values), len(sample), spread,
-                             f"추정 BPM {bpm:.0f}이 범위를 벗어났습니다.", periods)
+                             t("추정 BPM {bpm:.0f}이 범위를 벗어났습니다.", bpm=bpm), periods)
     return TempoEstimate(
         bpm, median, per_beat, len(values), len(sample), spread,
-        f"박자가 일정한 파일 {len(values)}/{len(sample)}개에서 추정했습니다.",
+        t("박자가 일정한 파일 {count}/{total}개에서 추정했습니다.", count=len(values), total=len(sample)),
         periods,
     )
 

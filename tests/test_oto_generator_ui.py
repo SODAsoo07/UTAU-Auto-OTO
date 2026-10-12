@@ -328,3 +328,55 @@ def test_app_icon_is_packaged_and_applied() -> None:
     assert delayed.calls == [] and delayed.scheduled[0][0] == 250
     delayed.scheduled[0][1]()
     assert delayed.calls == [(str(path), None), (None, str(path))]
+
+
+def test_alias_suffix_is_added_once_and_keeps_the_file_encoding(tmp_path: Path) -> None:
+    from universal_auto_oto.oto_io import apply_alias_suffix_to_oto, normalize_alias_suffix, with_alias_suffix
+
+    assert normalize_alias_suffix("C4") == normalize_alias_suffix(" _C4 ") == "C4"
+    assert with_alias_suffix("か", "C4") == "か_C4" and with_alias_suffix("か_C4", "_C4") == "か_C4"
+    assert with_alias_suffix("か", "") == "か"
+    with pytest.raises(ValueError):
+        normalize_alias_suffix("C4,x")
+    oto = tmp_path / "oto.ini"
+    oto.write_bytes("ka.wav=か,1,2,3,4,5\r\nka.wav=a k,6,7,8,9,10\r\n".encode("cp932"))
+    assert apply_alias_suffix_to_oto(oto, "C4", backup_existing=False) == (2, 2)
+    assert oto.read_bytes().decode("cp932") == "ka.wav=か_C4,1,2,3,4,5\r\nka.wav=a k_C4,6,7,8,9,10\r\n"
+    assert apply_alias_suffix_to_oto(oto, "C4", backup_existing=False) == (0, 2)
+
+
+def test_suffix_applied_after_generation_updates_split_files_and_row_report(tmp_path: Path) -> None:
+    import json
+
+    from universal_auto_oto.oto_generator_ui import apply_suffix_to_output
+
+    (tmp_path / "oto.ini").write_text("ka.wav=ka,0,1,2,3,4\nki.wav=ki,0,1,2,3,4\n", encoding="utf-8")
+    (tmp_path / "oto.clean.ini").write_text("ka.wav=ka,0,1,2,3,4\n", encoding="utf-8")
+    (tmp_path / "oto.review.ini").write_text("ki.wav=ki,0,1,2,3,4\n", encoding="utf-8")
+    (tmp_path / "row_report.jsonl").write_text('{"alias": "ka", "wav": "ka.wav"}\n{"alias": "ki", "wav": "ki.wav"}\n',
+                                               encoding="utf-8")
+    payload = apply_suffix_to_output(tmp_path / "oto.ini", "_B3")
+    assert payload["changed_aliases"] == 2 and payload["alias_suffix"] == "_B3"
+    assert (tmp_path / "oto.clean.ini").read_text(encoding="utf-8") == "ka.wav=ka_B3,0,1,2,3,4\n"
+    assert (tmp_path / "oto.review.ini").read_text(encoding="utf-8") == "ki.wav=ki_B3,0,1,2,3,4\n"
+    report = [json.loads(line) for line in (tmp_path / "row_report.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [entry["alias"] for entry in report] == ["ka_B3", "ki_B3"]
+    assert "2/2" in format_result_text("접미사 적용", payload)
+    assert apply_suffix_to_output(tmp_path / "oto.ini", "B3")["changed_aliases"] == 0
+    with pytest.raises(ValueError):
+        apply_suffix_to_output(tmp_path / "oto.ini", "  ")
+
+
+def test_generation_writes_the_alias_suffix(tmp_path: Path) -> None:
+    from universal_auto_oto.generator import generate_voicebank
+    from universal_auto_oto.oto_io import parse_oto
+
+    bank = _one_wav_bank(tmp_path)
+    options = build_product_generation_options(bank=bank, output=tmp_path / "out", base_oto=bank / "oto.ini",
+                                               format_choice="CV", alias_suffix="_C4")
+    assert options.alias_suffix == "C4"
+    generate_voicebank(options)
+    for name in ("oto.ini", "oto.review.ini"):
+        assert [row.alias for row in parse_oto(tmp_path / "out" / name)[0]] == ["ka_C4"]
+    with pytest.raises(ValueError):
+        build_product_generation_options(bank=bank, output=tmp_path / "out2", format_choice="CV", alias_suffix="a=b")

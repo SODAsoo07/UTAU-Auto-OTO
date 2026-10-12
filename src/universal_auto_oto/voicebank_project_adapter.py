@@ -681,6 +681,10 @@ def _parse_roman_slot(token: str, *, format_type: str, language_hint: str | None
     start, vowel = min(candidates, key=lambda item: (item[0], -len(item[1]), item[1]))
     onset = token[:start]
     coda = token[start + len(vowel) :]
+    if (_is_japanese(language_hint) and not onset and len(vowel) == 2 and vowel[0] in "wy"
+            and vowel[1] in "aiueo"):
+        # Japanese wa/ya are glide + vowel like kana わ/や, so "a w" and "- y" have a consonant to bind.
+        onset, vowel = vowel[0], vowel[1]
     standalone_korean_vc = (
         format_type == "cv" and not onset and coda in _KOREAN_CODAS
         and (language_hint or "").casefold() in {"ko", "kr", "korean"}
@@ -1198,6 +1202,15 @@ def _planned_aliases(
             head_role = "cv_head" if cv_role == "cv" else cv_role
             add(("-", cv_key), cv_indices, head_role,
                 "builtin:cv_head" if head_role == "cv_head" else cv_template)
+            if japanese and slot.vowel > slot.start and not _is_vowel_id(phones[slot.start]):
+                # Japanese CVVC heads name the onset alone ("- ch", "- s") or with its glide ("- ky").
+                onset = phones[slot.start]
+                add(("-", onset), (slot.start,), "special", "builtin:special_generic")
+                if slot.vowel - slot.start == 2 and phones[slot.start + 1] in {"y", "w"}:
+                    add(("-", onset + phones[slot.start + 1]), (slot.start, slot.start + 1), "special",
+                        "builtin:consonant_semivowel")
+                elif len(vowel) == 2 and vowel[0] in "yw" and vowel[1] in "aiueo":  # romaji kya -> k + ya
+                    add(("-", onset + vowel[0]), (slot.start, slot.vowel), "special", "builtin:consonant_semivowel")
         if len(slots) == 1 and slot.phones[0] in _BREATH_PHONES:
             add((), (slot.start,), "breath")
         if japanese and slot.vowel - slot.start == 2 and phones[slot.start + 1] in {"y", "w"}:
