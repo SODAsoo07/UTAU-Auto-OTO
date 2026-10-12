@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "universal-auto-oto"
-version = "5.0.0"
+version = "5.1.0"
 description = "Inventory-driven, acoustic-first OTO generator for UTAU/OpenUtau voicebanks"
 requires-python = ">=3.10,<3.14"
 dependencies = [
