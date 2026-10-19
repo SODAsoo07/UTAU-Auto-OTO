@@ -18,14 +18,15 @@ from .audio import analyze_wav, file_sha256
 from .domain import RenderedOtoRow
 from .evaluation import WavDirectoryIndex
 from .i18n import t
-from .oto_io import normalize_alias_suffix, parse_oto, resolve_output_encoding, with_alias_suffix, write_lines_atomic
+from .oto_io import (normalize_alias_suffix, parse_oto, read_text_auto, resolve_output_encoding, with_alias_suffix,
+                     write_lines_atomic)
 from .oto_style import OtoStyle
 from .planning import (
     fallback_source_rows,
     infer_slot_count,
     plan_aliases,
 )
-from .project_runtime import generate_project
+from .project_runtime import _recording_output_path, generate_project
 from .renderer import force_review, render_alias
 from .timing_profile import BUILTIN_PROFILE_ID, load_timing_profile, select_timing_profile
 from .tempo import MAX_BPM, MIN_BPM, TempoEstimate, beats_for_period, bpm_to_period_ms, estimate_tempo
@@ -192,6 +193,9 @@ class GenerationOptions:
     # "exclude_row" leaves unbindable base-OTO rows out of oto.ini and lists
     # them in unmapped_aliases.csv instead of stopping the whole bank.
     unmapped_alias_policy: str = "fail"
+    # With exclude_row: "exclude" leaves those rows out; "keep_base" writes them with the base
+    # oto.ini values unchanged (review split), so an in-place run never loses a row.
+    unmapped_row_output: str = "exclude"
     # "consonant" ends VC rows inside the next consonant (listening-validated
     # vc_consonant_end); "template" keeps the template expressions.
     vc_end_policy: str = "template"
@@ -230,6 +234,7 @@ def default_alignment_workers() -> int:
     return max(1, min(8, (os.cpu_count() or 2) - 1))
 
 
+UNMAPPED_ROW_OUTPUTS = ("exclude", "keep_base")
 DIAGNOSTIC_FILE_OPTIONS = (
     "write_generation_report",
     "write_row_report",
@@ -270,6 +275,8 @@ def inspect_voicebank(bank: Path, base_oto: Path | None = None, recursive: bool 
 
 def generate_voicebank(options: GenerationOptions) -> dict[str, Any]:
     normalize_alias_suffix(options.alias_suffix)  # reject ',', '=' before any alignment work
+    if options.unmapped_row_output not in UNMAPPED_ROW_OUTPUTS:
+        raise ValueError(f"unsupported unmapped_row_output: {options.unmapped_row_output}")
     backend = options.backend.strip().casefold()
     if options.development_alignment_profile and backend != "routed_hsmm":
         raise ValueError("development alignment profiles require backend=routed_hsmm")
@@ -658,6 +665,13 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             {"wav": failed["wav"], "alias": row.alias, "source_index": row.source_index, "reason": "alignment_failed",
              "detail": failed["reason"], "written_to_oto": False}
             for row in base_rows_by_wav.get(failed["wav"], ()))
+    kept_base_rows = 0
+    if options.unmapped_row_output == "keep_base" and options.base_oto is not None and excluded_rows:
+        kept_base_rows = _write_kept_base_rows(
+            excluded_rows, base_path=options.base_oto, project=build.project, primary_output=output / "oto.ini",
+            alias_suffix=options.alias_suffix,
+            encoding=resolve_output_encoding(options.output_encoding, source_encoding), newline=source_newline,
+        )
     manifest = {
         **dict(build.manifest),
         "base_oto": str(options.base_oto.resolve()) if options.base_oto else None,
@@ -689,6 +703,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             "project_manifest": str(project_manifest_path) if project_manifest_path is not None else None,
             "elapsed_seconds": time.perf_counter() - started,
             "excluded_alias_rows": len(excluded_rows),
+            "kept_base_rows": kept_base_rows,
             "excluded_alias_samples": [
                 {"wav": row["wav"], "alias": row["alias"], "reason": row["reason"]}
                 for row in excluded_rows[:EXCLUDED_ALIAS_SAMPLE_LIMIT]
@@ -706,11 +721,63 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
     if excluded_rows and options.write_unmapped_aliases_csv:
         excluded_csv = output / "unmapped_aliases.csv"
         with excluded_csv.open("w", encoding="utf-8-sig", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["wav", "alias", "source_index", "reason", "detail", "written_to_oto"])
+            writer = csv.DictWriter(stream, fieldnames=["wav", "alias", "source_index", "reason", "detail", "written_to_oto", "base_value_kept"])
             writer.writeheader()
             writer.writerows(excluded_rows)
         report["excluded_alias_rows_csv"] = str(excluded_csv)
     return report
+
+
+def _write_kept_base_rows(
+    excluded_rows: list[dict[str, Any]],
+    *,
+    base_path: Path,
+    project,
+    primary_output: Path,
+    alias_suffix: str,
+    encoding: str,
+    newline: str,
+) -> int:
+    """Append the rows that could not be generated with their base oto.ini values, unchanged.
+
+    They go to the oto.ini (and oto.review.ini) their recording would have been written to, and to
+    row_report.jsonl when it exists, marked "base_oto_value_kept". Returns the number of rows kept.
+    """
+
+    base_lines = read_text_auto(base_path)[0].splitlines()
+    by_target: dict[Path, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for row in excluded_rows:
+        index = int(row.get("source_index", -1))
+        if not 0 <= index < len(base_lines) or "=" not in base_lines[index]:
+            continue
+        alias, separator, values = base_lines[index].split("=", 1)[1].partition(",")
+        wav_name = Path(str(row["wav"])).name
+        line = f"{wav_name}={with_alias_suffix(alias.strip(), alias_suffix)}{separator}{values}"
+        by_target[_recording_output_path(project, str(row["wav"]), primary_output)].append((line, row))
+        row["written_to_oto"] = True
+        row["base_value_kept"] = True
+    report_path = primary_output.parent / "row_report.jsonl"
+    report_entries: list[str] = []
+    for target, kept in by_target.items():
+        review = target.with_name(f"{target.stem}.review{target.suffix}")
+        for path in (target, review):
+            if path == review and not review.exists() and target.exists():
+                continue  # split files were not written for this output
+            # Same encoding/newline generate_project wrote with: an ASCII-only file would read back as UTF-8.
+            existing = read_text_auto(path)[0] if path.exists() else ""
+            lines = [*existing.splitlines(), *(line for line, _ in kept)]
+            write_lines_atomic(path, lines, encoding=encoding, newline=newline, backup_existing=False)
+        for line, row in kept:
+            report_entries.append(json.dumps({
+                "wav": Path(str(row["wav"])).name, "alias": line.split("=", 1)[1].split(",", 1)[0],
+                "split": "review", "output_oto": str(target), "recording_wav": row["wav"],
+                "reasons": ["base_oto_value_kept", str(row.get("reason", ""))],
+            }, ensure_ascii=False, sort_keys=True))
+    if report_entries and report_path.is_file():
+        existing = report_path.read_text(encoding="utf-8").splitlines()
+        write_lines_atomic(report_path, [*existing, *report_entries], encoding="utf-8", newline="\n",
+                           backup_existing=False)
+    return sum(len(kept) for kept in by_target.values())
 
 
 def resolve_recording_tempo(options: GenerationOptions, bank: Path, wavs: list[Path]) -> dict[str, Any]:

@@ -144,7 +144,7 @@ def test_product_ui_leaves_unbindable_rows_out_and_logs_them(tmp_path: Path) -> 
     sf.write(bank / "ka.wav", np.sin(2 * np.pi * 220 * np.arange(12000) / 16000) * .15, 16000)
     (bank / "oto.ini").write_text("ka.wav=ka,0,0,0,0,0\nka.wav=zzz,0,0,0,0,0\n", encoding="utf-8")
     options = build_product_generation_options(bank=bank, output=tmp_path / "out", base_oto=bank / "oto.ini",
-                                               format_choice="CV",
+                                               format_choice="CV", unmapped_row_choice="oto.ini에서 빼기",
                                                diagnostic_files={"write_unmapped_aliases_csv": True})
     assert options.unmapped_alias_policy == PRODUCT_UNMAPPED_ALIAS_POLICY == "exclude_row"
     summary = summarize_generation_result(generate_voicebank(options), output=tmp_path / "out")
@@ -377,6 +377,31 @@ def test_generation_writes_the_alias_suffix(tmp_path: Path) -> None:
     assert options.alias_suffix == "C4"
     generate_voicebank(options)
     for name in ("oto.ini", "oto.review.ini"):
-        assert [row.alias for row in parse_oto(tmp_path / "out" / name)[0]] == ["ka_C4"]
+        # zzz cannot be generated; its base values are kept, with the suffix too
+        assert [row.alias for row in parse_oto(tmp_path / "out" / name)[0]] == ["ka_C4", "zzz_C4"]
     with pytest.raises(ValueError):
         build_product_generation_options(bank=bank, output=tmp_path / "out2", format_choice="CV", alias_suffix="a=b")
+
+
+def test_rows_that_cannot_be_generated_keep_their_base_values_by_default(tmp_path: Path) -> None:
+    import json
+
+    from universal_auto_oto.generator import generate_voicebank
+    from universal_auto_oto.oto_generator_ui import excluded_rows_log_lines
+
+    bank = _one_wav_bank(tmp_path)
+    (bank / "oto.ini").write_bytes("ka.wav=ka,0,0,0,0,0\r\nka.wav=ばか,12.5,30,-80,20,\r\n".encode("cp932"))
+    options = build_product_generation_options(bank=bank, output=tmp_path / "out", base_oto=bank / "oto.ini",
+                                               format_choice="CV", alias_suffix="C4",
+                                               diagnostic_files={"write_row_report": True})
+    assert options.unmapped_row_output == "keep_base"
+    summary = summarize_generation_result(generate_voicebank(options), output=tmp_path / "out")
+    assert summary["excluded_alias_rows"] == 1 and summary["kept_base_rows"] == 1
+    oto = (tmp_path / "out" / "oto.ini").read_bytes().decode("cp932").splitlines()
+    assert oto[0].startswith("ka.wav=ka_C4,") and oto[1] == "ka.wav=ばか_C4,12.5,30,-80,20,"
+    review = (tmp_path / "out" / "oto.review.ini").read_bytes().decode("cp932")
+    assert "ka.wav=ばか_C4,12.5,30,-80,20," in review
+    report = [json.loads(line) for line in (tmp_path / "out" / "row_report.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert report[-1]["alias"] == "ばか_C4" and report[-1]["reasons"][0] == "base_oto_value_kept"
+    assert excluded_rows_log_lines(summary)[0].startswith("[주의] 생성하지 못한 행 1개")
+    assert "기존 oto.ini 값을 그대로" in excluded_rows_log_lines(summary)[0]

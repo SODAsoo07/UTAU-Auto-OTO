@@ -261,6 +261,14 @@ _EN: dict[str, str] = {
     "접미사 적용": "Apply suffix",
     "접미사 {suffix}: 별칭 {changed}/{total}개에 붙였습니다 (이미 붙은 별칭은 그대로).": (
         "Suffix {suffix}: added to {changed}/{total} aliases (aliases that already had it are unchanged)."),
+    "기존 oto 값 유지 (권장)": "Keep the existing oto values (recommended)",
+    "oto.ini에서 빼기": "Leave them out of oto.ini",
+    "생성하지 못한 기존 oto 행": "Existing oto rows that could not be generated",
+    "[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+    "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).": (
+        "[Note] {count} rows could not be generated: their aliases in the source OTO could not be matched to a "
+        "recording file name, or the recording could not be analyzed, so their existing oto.ini values were kept "
+        "unchanged (also in oto.review.ini)."),
     "▶ 고급 설정": "▶ Advanced settings",
     "▼ 고급 설정": "▼ Advanced settings",
     "고급 설정": "Advanced settings",
@@ -597,6 +605,13 @@ _JA: dict[str, str] = {
     "접미사 적용": "接尾辞の適用",
     "접미사 {suffix}: 별칭 {changed}/{total}개에 붙였습니다 (이미 붙은 별칭은 그대로).": (
         "接尾辞 {suffix}: エイリアス {changed}/{total}個に付けました (すでに付いているものはそのまま)。"),
+    "기존 oto 값 유지 (권장)": "既存のotoの値を維持 (推奨)",
+    "oto.ini에서 빼기": "oto.iniから除外",
+    "생성하지 못한 기존 oto 행": "生成できなかった既存のoto行",
+    "[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+    "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).": (
+        "[注意] 生成できなかった行 {count}個: 元のOTOのエイリアスを録音ファイル名と対応付けられなかったか、録音を解析できなかったため、"
+        "既存のoto.iniの値をそのまま入れました (oto.review.iniにも含みます)。"),
     "▶ 고급 설정": "▶ 詳細設定",
     "▼ 고급 설정": "▼ 詳細設定",
     "고급 설정": "詳細設定",

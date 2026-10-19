@@ -240,6 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON preset of advanced OTO style settings (overlap ratios, preutterance shifts, margins).",
     )
     generate_parser.add_argument(
+        "--keep-base-values",
+        action="store_true",
+        help="With --unmapped-alias-policy exclude_row: write rows that could not be generated with their "
+             "base oto.ini values (review) instead of leaving them out.",
+    )
+    generate_parser.add_argument(
         "--alias-suffix",
         default="",
         help="Append _<suffix> to every generated alias (C4 -> ka_C4); aliases that already end with it are kept.",
@@ -622,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
                     estimate_bpm=args.estimate_bpm,
                     oto_style=load_oto_style(args.oto_style) if args.oto_style else None,
                     alias_suffix=args.alias_suffix,
+                    unmapped_row_output="keep_base" if args.keep_base_values else "exclude",
                     alignment_workers=args.workers,
                 )
             )

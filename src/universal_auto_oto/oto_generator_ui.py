@@ -43,6 +43,11 @@ VC_END_CHOICES: Mapping[str, str] = {
     "다음 자음 안에서 끝냄 (권장)": "consonant",
     "템플릿 기본값": "template",
 }
+# Base-OTO rows that could not be generated: keep the base values (default) or leave them out.
+UNMAPPED_ROW_CHOICES: Mapping[str, str] = {
+    "기존 oto 값 유지 (권장)": "keep_base",
+    "oto.ini에서 빼기": "exclude",
+}
 RELEASE_PRE_CHOICES: Mapping[str, str] = {
     "모음 끝 (권장)": "vowel_end",
     "템플릿 기본값": "template",
@@ -153,6 +158,7 @@ def build_generation_options(
     vc_end_policy: str = "template",
     release_pre_policy: str = "template",
     unmapped_alias_policy: str = "fail",
+    unmapped_row_output: str = "exclude",
     diagnostic_files: Mapping[str, bool] | None = None,
     generate_missing_aliases: bool = False,
     oto_style: OtoStyle | None = None,
@@ -202,6 +208,7 @@ def build_generation_options(
         vc_end_policy=vc_end_policy,
         release_pre_policy=release_pre_policy,
         unmapped_alias_policy=unmapped_alias_policy,
+        unmapped_row_output=unmapped_row_output,
         **_diagnostic_file_flags(diagnostic_files, default=True),
         generate_missing_aliases=generate_missing_aliases,
         oto_style=oto_style,
@@ -239,6 +246,7 @@ def build_product_generation_options(
     vc_end_choice: str | None = None,
     release_pre_choice: str | None = None,
     alias_suffix: str = "",
+    unmapped_row_choice: str | None = None,
 ) -> GenerationOptions:
     """Build the safe production options exposed by the product UI.
 
@@ -276,6 +284,7 @@ def build_product_generation_options(
         vc_end_policy=vc_end_policy,
         release_pre_policy=release_pre_policy,
         unmapped_alias_policy=PRODUCT_UNMAPPED_ALIAS_POLICY,
+        unmapped_row_output=UNMAPPED_ROW_CHOICES[unmapped_row_choice or next(iter(UNMAPPED_ROW_CHOICES))],
         diagnostic_files=_diagnostic_file_flags(diagnostic_files, default=False),
         generate_missing_aliases=not has_base_oto,
         oto_style=None if oto_style is None or oto_style.is_default else oto_style,
@@ -485,6 +494,7 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
         },
         "usage_review": dict(report.get("usage_review", {}) or {}),
         "excluded_alias_rows": int(report.get("excluded_alias_rows", 0) or 0),
+        "kept_base_rows": int(report.get("kept_base_rows", 0) or 0),
         "excluded_alias_rows_csv": report.get("excluded_alias_rows_csv"),
         "recording_tempo": report.get("recording_tempo"),
         "generated_alias_wavs": int(report.get("generated_alias_wavs", 0) or 0),
@@ -537,9 +547,12 @@ def excluded_rows_log_lines(payload: Mapping[str, object]) -> list[str]:
     if count <= 0:
         return []
     failed = list(payload.get("failed_recordings") or [])
+    kept = int(payload.get("kept_base_rows", 0) or 0)
     lines = [
-        t("[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
-          "녹음을 분석하지 못해 oto.ini에서 뺐습니다.", count=count),
+        t("[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+          "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).", count=count) if kept
+        else t("[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
+               "녹음을 분석하지 못해 oto.ini에서 뺐습니다.", count=count),
         *([t("  분석하지 못한 녹음 {count}개(무음·잘린 녹음일 수 있음): {names}", count=len(failed),
              names=", ".join(failed))] if failed else []),
         (t("  전체 목록: {path}", path=payload["excluded_alias_rows_csv"]) if payload.get("excluded_alias_rows_csv")
@@ -645,6 +658,7 @@ def launch_oto_generator_ui(
             self.alias_suffix_var = tk.StringVar()
             self.vc_end_var = tk.StringVar(value=next(iter(VC_END_CHOICES)))
             self.release_pre_var = tk.StringVar(value=next(iter(RELEASE_PRE_CHOICES)))
+            self.unmapped_row_var = tk.StringVar(value=next(iter(UNMAPPED_ROW_CHOICES)))
             self.style_vars = {name: tk.StringVar() for name, _, _ in STYLE_FIELDS}
             self.detection_var = tk.StringVar(value=t("형식 감지: 보이스뱅크 폴더를 고르면 표시됩니다."))
             self._detection: FormatDetection | None = None
@@ -844,6 +858,10 @@ def launch_oto_generator_ui(
                               translated=True)
             self._option_menu(
                 ctk_module, option_row, "'-' 선행발성", self.release_pre_var, tuple(RELEASE_PRE_CHOICES),
+                translated=True,
+            )
+            self._option_menu(
+                ctk_module, option_row, "생성하지 못한 기존 oto 행", self.unmapped_row_var, tuple(UNMAPPED_ROW_CHOICES),
                 translated=True,
             )
             style_grid = ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent")
@@ -1189,6 +1207,7 @@ def launch_oto_generator_ui(
             self.encoding_var.set("preserve")
             self.vc_end_var.set(next(iter(VC_END_CHOICES)))
             self.release_pre_var.set(next(iter(RELEASE_PRE_CHOICES)))
+            self.unmapped_row_var.set(next(iter(UNMAPPED_ROW_CHOICES)))
 
         def _refresh_detection(self) -> FormatDetection | None:
             bank = self.bank_var.get().strip()
@@ -1260,6 +1279,7 @@ def launch_oto_generator_ui(
                 vc_end_choice=self.vc_end_var.get(),
                 release_pre_choice=self.release_pre_var.get(),
                 alias_suffix=self.alias_suffix_var.get(),
+                unmapped_row_choice=self.unmapped_row_var.get(),
             )
 
         def _read_options(self, *, force: bool = False, detected_format: str | None = None) -> GenerationOptions | None:
