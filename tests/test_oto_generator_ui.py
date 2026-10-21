@@ -93,8 +93,8 @@ def test_product_ui_overwrite_toggle_enables_in_place_force(tmp_path: Path) -> N
 
 def test_product_ui_keeps_legacy_credits_and_explains_review_rows() -> None:
     assert CREDIT_LINES[0] == "카메비 Kamebit"
-    assert CREDIT_LINES[-1] == "집냥 Blue"
-    assert len(CREDIT_LINES) == 18
+    assert CREDIT_LINES[-1] == "다다쿤 DADAKUN"
+    assert len(CREDIT_LINES) == 19
     text = format_result_text(
         "OTO 생성",
         {
@@ -117,7 +117,7 @@ def test_product_ui_applies_the_recommended_generation_settings(tmp_path: Path) 
         RECOMMENDED_DEVELOPMENT_PROFILE, RECOMMENDED_RELEASE_PRE_POLICY, RECOMMENDED_VC_END_POLICY,
     )
     options = build_product_generation_options(bank=tmp_path / "bank", output=tmp_path / "output")
-    assert options.development_alignment_profile == RECOMMENDED_DEVELOPMENT_PROFILE == "cvvc_slot_rhythm_v16"
+    assert options.development_alignment_profile == RECOMMENDED_DEVELOPMENT_PROFILE == "cvvc_slot_rhythm_v19"
     assert RECOMMENDED_DEVELOPMENT_PROFILE in DEVELOPMENT_ALIGNMENT_PROFILES
     assert options.vc_end_policy == RECOMMENDED_VC_END_POLICY == "consonant"
     assert options.release_pre_policy == RECOMMENDED_RELEASE_PRE_POLICY == "vowel_end"
@@ -405,3 +405,39 @@ def test_rows_that_cannot_be_generated_keep_their_base_values_by_default(tmp_pat
     assert report[-1]["alias"] == "ばか_C4" and report[-1]["reasons"][0] == "base_oto_value_kept"
     assert excluded_rows_log_lines(summary)[0].startswith("[주의] 생성하지 못한 행 1개")
     assert "기존 oto.ini 값을 그대로" in excluded_rows_log_lines(summary)[0]
+
+
+def test_a_stray_unreadable_wav_and_a_very_short_take_do_not_stop_the_bank(tmp_path: Path) -> None:
+    import numpy as np
+    import soundfile as sf
+    from universal_auto_oto.generator import generate_voicebank
+
+    bank = tmp_path / "bank"
+    bank.mkdir()
+    tone = np.sin(2 * np.pi * 220 * np.arange(16000) / 16000) * .15
+    sf.write(bank / "ka.wav", tone[:12000], 16000)
+    sf.write(bank / "ki.wav", tone[:1600], 16000)  # 0.1 s: shorter than the decoder's longest internal gap
+    sf.write(bank / "sample.wav", tone[:4000], 16000)  # not a recording-list name and no oto rows
+    (bank / "oto.ini").write_text("ka.wav=ka,0,0,0,0,0\nki.wav=ki,0,0,0,0,0\n", encoding="utf-8")
+    options = build_product_generation_options(bank=bank, output=tmp_path / "out", base_oto=bank / "oto.ini",
+                                               format_choice="CV")
+    summary = summarize_generation_result(generate_voicebank(options), output=tmp_path / "out")
+    assert summary["oto_exists"] and summary["generated_rows"] + summary["kept_base_rows"] == 2
+
+
+
+def test_garbled_kana_aliases_are_written_as_kana_and_as_the_original_text(tmp_path: Path) -> None:
+    from universal_auto_oto.generator import generate_voicebank
+    from universal_auto_oto.oto_io import parse_oto, repair_kana_mojibake
+
+    assert repair_kana_mojibake("- 궭") == "- ち" and repair_kana_mojibake("궔") == "か"
+    assert repair_kana_mojibake("가") is None and repair_kana_mojibake("か") is None  # real Korean / real kana
+    bank = _one_wav_bank(tmp_path)
+    (bank / "oto.ini").write_text("ka.wav=궔,0,0,0,0,0\nka.wav=zzz,0,0,0,0,0\n", encoding="utf-8")
+    options = build_product_generation_options(bank=bank, output=tmp_path / "out", base_oto=bank / "oto.ini",
+                                               language_choice="일본어", format_choice="CV")
+    generate_voicebank(options)
+    rows = (tmp_path / "out" / "oto.ini").read_text(encoding="utf-8").splitlines()
+    by_alias = {line.split("=", 1)[1].split(",", 1)[0]: line.split(",", 1)[1] for line in rows}
+    assert by_alias["か"] == by_alias["궔"]  # same generated timing for both spellings
+    assert [row.alias for row in parse_oto(tmp_path / "out" / "oto.ini")[0]][:2] == ["か", "궔"]

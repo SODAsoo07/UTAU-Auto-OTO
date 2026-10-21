@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from collections import Counter, defaultdict
 from dataclasses import replace
@@ -18,7 +19,7 @@ from .alias_type_symbolic import (
 from .oto_io import resolve_output_encoding, with_alias_suffix, write_lines_atomic
 from .oto_style import OtoStyle, apply_korean_cvc_window, apply_korean_vcv_window, apply_oto_style
 from . import analysis_cache
-from .row_risk import risk_threshold, row_risks, voicing_onsets_ms
+from .row_risk import load_profile, risk_threshold, row_risks, voicing_onsets_ms
 from .audio import file_sha256
 from .domain import LandmarkTimeline, RecordingSpec, landmark_timeline_from_dict
 from .project import ProjectSpec
@@ -276,10 +277,10 @@ def _recording_identity_sha256(recording: RecordingSpec) -> str:
     ).hexdigest()
 
 
-def _with_row_risk(row, risk: float):
+def _with_row_risk(row, risk: float, threshold: float):
     """Split by the fitted row risk (row_risk.py): low-risk rows become clean unless a template
     repair was needed; the confidence becomes 1 - risk so review priority follows the risk."""
-    clean = risk <= risk_threshold() and "template_constraint_repaired" not in row.reasons
+    clean = risk <= threshold and "template_constraint_repaired" not in row.reasons
     reasons = tuple(reason for reason in row.reasons if reason != "uncalibrated_confidence")
     marker = "row_risk_low" if clean else "row_risk_high"
     return replace(row, split="clean" if clean else "review", confidence=float(1.0 - risk),
@@ -308,9 +309,18 @@ def _align_job(job: tuple) -> tuple[AlignmentResult | AlignmentError, object, ob
             cepstra(wav) if with_cepstra and not isinstance(result, AlignmentError) else None)
 
 
+def _risk_profile(recording: RecordingSpec):
+    """The row risk profile of the recording's language/format, or None (rows stay review).
+
+    AUTOOTO_ROW_RISK=off skips it, for generating risk-model training data from the raw rows.
+    """
+    if os.environ.get("AUTOOTO_ROW_RISK", "").strip().casefold() == "off":
+        return None
+    return load_profile(recording.metadata.get("language_hint"), recording.metadata.get("format_hint"))
+
+
 def _needs_row_risk(recording: RecordingSpec) -> bool:
-    return (recording.metadata.get("language_hint") in {"ko", "kr", "korean"}
-            and recording.metadata.get("format_hint") in {"vcv", "cvc"})
+    return _risk_profile(recording) is not None
 
 
 class _Aligner:
@@ -428,7 +438,10 @@ def _sonorant_identity_two_pass(
 
 def _identity_passes(project, recordings, alignment_options, weight, passes, scope, aligner):
     passes = max(2, int(passes))
-    first = aligner.map(f"align:1/{passes}", [(recording, alignment_options) for recording in recordings],
+    refine_japanese = alignment_options.get('japanese_special_refinement', False)
+    baseline_options = ({**alignment_options, 'japanese_special_refinement': False}
+                        if refine_japanese else alignment_options)
+    first = aligner.map(f"align:1/{passes}", [(recording, baseline_options) for recording in recordings],
                         with_cepstra=True)
     targets = [
         index for index, recording in enumerate(recordings)
@@ -451,12 +464,23 @@ def _identity_passes(project, recordings, alignment_options, weight, passes, sco
         )
         template_summaries.append(templates.summary())
         current = list(final)
-        identity_options = {**alignment_options, "sonorant_identity": templates, "sonorant_identity_weight": weight}
+        identity_options = {**baseline_options, "sonorant_identity": templates, "sonorant_identity_weight": weight}
         realigned_all = aligner.map(f"align:{_pass}/{passes}", [(recordings[index], identity_options) for index in targets])
         for index, realigned in zip(targets, realigned_all):
             # A later pass that fails keeps the earlier timeline.
             current[index] = realigned if not isinstance(realigned, AlignmentError) else current[index]
         final = current
+    if refine_japanese:
+        from .japanese_cvvc import special_slots
+        indices = [i for i, recording in enumerate(recordings)
+                   if special_slots(recording.wav) and not any(surface in {'s', 'sh'}
+                       for _, surface in special_slots(recording.wav))]
+        refined = aligner.map('refine:japanese', [(recordings[i],
+            {**(identity_options if i in targets else baseline_options), 'japanese_special_refinement': True})
+            for i in indices])
+        for i, result in zip(indices, refined):
+            if not isinstance(result, AlignmentError):
+                final[i] = result
     return final, {
         "review_only": True,
         "weight": weight,
@@ -710,14 +734,18 @@ def generate_project(
         korean = recording.metadata.get("language_hint") in {"ko", "kr", "korean"}
         format_hint = recording.metadata.get("format_hint")
         risks: list[float] | None = None
-        if korean and format_hint in {"vcv", "cvc"} and rendered:
+        risk_profile = _risk_profile(recording)
+        if risk_profile is not None and rendered:
             risks = row_risks(
                 [{"alias": row.alias, "role": row.role, "confidence": row.confidence, "reasons": row.reasons,
-                  "pre_abs": trace.final_anchors["pre_abs"]} for _plan, row, trace in rendered],
-                project.wav_path(recording), onsets=aligner.onsets.get(recording.wav))
+                  "pre_abs": trace.final_anchors["pre_abs"], "offset_abs": trace.final_anchors["offset_abs"],
+                  "fixed_abs": trace.final_anchors["fixed_abs"], "cutoff_abs": trace.final_anchors["cutoff_abs"],
+                  "fallback_count": trace.fallback_count, "missing_landmarks": len(trace.missing_landmarks)}
+                 for _plan, row, trace in rendered],
+                project.wav_path(recording), onsets=aligner.onsets.get(recording.wav), profile=risk_profile)
         for alias_index, (plan, row, trace) in enumerate(rendered):
             if risks is not None:
-                row = _with_row_risk(row, risks[alias_index])
+                row = _with_row_risk(row, risks[alias_index], risk_threshold(risk_profile, format_hint))
             if korean and format_hint == "vcv":
                 row = apply_korean_vcv_window(row)
             elif korean and format_hint == "cvc":
@@ -782,13 +810,20 @@ def generate_project(
         )
 
     targets = []
+    output_encoding = resolve_output_encoding(project.generation.output_encoding, source_encoding)
+    encoding_fallback = None
+    if not _encodes_all(rows_by_output.values(), output_encoding):
+        # File names or aliases the source encoding cannot hold (a kana bank extracted with the
+        # Korean code page has Hangul file names): write UTF-8 rather than fail the bank.
+        encoding_fallback = {"requested": output_encoding, "used": "utf-8"}
+        output_encoding = "utf-8"
     for canonical_path, rows in sorted(rows_by_output.items(), key=lambda item: str(item[0]).casefold()):
         clean_path = canonical_path.with_name(f"{canonical_path.stem}.clean{canonical_path.suffix}")
         review_path = canonical_path.with_name(f"{canonical_path.stem}.review{canonical_path.suffix}")
         for path in (canonical_path, clean_path, review_path):
             if path.exists() and not force:
                 raise FileExistsError(path)
-        encoding = resolve_output_encoding(project.generation.output_encoding, source_encoding)
+        encoding = output_encoding
         write_lines_atomic(
             canonical_path,
             (row.to_line() for row in rows),
@@ -923,7 +958,8 @@ def generate_project(
         },
         "template_selection_warning_counts": dict(sorted(selection_warning_counts.items())),
         "symbolic_alias_type_export": symbolic_alias_type_export,
-        "output_encoding": resolve_output_encoding(project.generation.output_encoding, source_encoding),
+        "output_encoding": output_encoding,
+        "output_encoding_fallback": encoding_fallback,
         "source_newline": "crlf" if output_newline == "\r\n" else "lf",
         "outputs": targets,
         "timelines": timeline_rows,
@@ -1033,6 +1069,16 @@ def _recording_output_path(project: ProjectSpec, wav: str, primary_output: Path)
     if parts and parts[0].casefold() == "wav":
         parent = Path(*parts[1:]) if len(parts) > 1 else Path()
     return primary_output.parent / parent / primary_output.name
+
+
+def _encodes_all(row_groups, encoding: str) -> bool:
+    try:
+        for rows in row_groups:
+            for row in rows:
+                row.to_line().encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _write_json(path: Path, payload: object, *, backup: bool) -> None:

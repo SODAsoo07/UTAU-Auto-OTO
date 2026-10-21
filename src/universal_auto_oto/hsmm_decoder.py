@@ -332,7 +332,8 @@ def decode_segmental_hsmm_exact(
         base = prev + gap_cost * gap_prefix
         best = np.full(frame_count + 1, -np.inf)
         best_prev = frames.copy()
-        for shift in range(max_gap_frames, -1, -1):
+        # A gap longer than the file adds no candidate (and would not fit the slice in a very short take).
+        for shift in range(min(max_gap_frames, frame_count), -1, -1):
             candidate = np.full(frame_count + 1, -np.inf)
             candidate[shift:] = base[:frame_count + 1 - shift]
             better = candidate > best

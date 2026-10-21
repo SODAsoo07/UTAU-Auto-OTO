@@ -18,8 +18,8 @@ from .audio import analyze_wav, file_sha256
 from .domain import RenderedOtoRow
 from .evaluation import WavDirectoryIndex
 from .i18n import t
-from .oto_io import (normalize_alias_suffix, parse_oto, read_text_auto, resolve_output_encoding, with_alias_suffix,
-                     write_lines_atomic)
+from .oto_io import (normalize_alias_suffix, parse_oto, read_text_auto, repair_kana_mojibake, resolve_output_encoding,
+                     with_alias_suffix, write_lines_atomic)
 from .oto_style import OtoStyle
 from .planning import (
     fallback_source_rows,
@@ -163,6 +163,37 @@ DEVELOPMENT_ALIGNMENT_PROFILES = {
         "syllabic_sonorant_holds": True, "explicit_pause_tokens": True, "exact_hsmm_search": True,
         "dense_speech_activity_floor": True,
     },
+}
+
+
+# v17: v16 + level-robust activity (a softly recorded take's room/reverb tail is not speech).
+DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v17"] = {
+    **DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v16"],
+    "level_robust_activity": True,
+}
+
+
+# v18: v17 + speech span limit (the speech phones start/end near the first/last frame within 22 dB of
+# the peak; pure breath states are outside the limit).
+DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v18"] = {
+    **DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v17"],
+    "speech_span_limit": True,
+}
+
+
+# v19: v18 + fitted nasal-frame probability in the emissions (profiles/nasal_frame_v1.json): nasal
+# states gain where murmur is likely and lose on vowels, vowel states lose on murmur. A vowel no longer
+# runs through the next m and pushes the rest of the list a syllable late. Off for VCV lists.
+DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v19"] = {
+    **DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v18"],
+    "nasal_murmur_emission": 2.0,
+    "nasal_murmur_scope": "model",
+}
+
+
+DEVELOPMENT_ALIGNMENT_PROFILES['japanese_cvvc_special_v1'] = {
+    **DEVELOPMENT_ALIGNMENT_PROFILES['cvvc_slot_rhythm_v16'],
+    'japanese_special_refinement': True,
 }
 
 
@@ -670,7 +701,8 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         kept_base_rows = _write_kept_base_rows(
             excluded_rows, base_path=options.base_oto, project=build.project, primary_output=output / "oto.ini",
             alias_suffix=options.alias_suffix,
-            encoding=resolve_output_encoding(options.output_encoding, source_encoding), newline=source_newline,
+            encoding=str(report.get("output_encoding") or resolve_output_encoding(options.output_encoding, source_encoding)),
+            newline=source_newline,
         )
     manifest = {
         **dict(build.manifest),
@@ -752,8 +784,11 @@ def _write_kept_base_rows(
             continue
         alias, separator, values = base_lines[index].split("=", 1)[1].partition(",")
         wav_name = Path(str(row["wav"])).name
-        line = f"{wav_name}={with_alias_suffix(alias.strip(), alias_suffix)}{separator}{values}"
-        by_target[_recording_output_path(project, str(row["wav"]), primary_output)].append((line, row))
+        target = _recording_output_path(project, str(row["wav"]), primary_output)
+        # Garbled kana ("- 궭") is also written as the kana it was ("- ち"), as for generated rows.
+        for text in dict.fromkeys((alias.strip(), repair_kana_mojibake(alias.strip()))):
+            if text:
+                by_target[target].append((f"{wav_name}={with_alias_suffix(text, alias_suffix)}{separator}{values}", row))
         row["written_to_oto"] = True
         row["base_value_kept"] = True
     report_path = primary_output.parent / "row_report.jsonl"

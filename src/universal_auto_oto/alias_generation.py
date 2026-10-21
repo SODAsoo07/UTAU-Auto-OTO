@@ -25,6 +25,7 @@ from typing import Iterable, Sequence
 
 from .domain import SourceOtoRow
 from .kana import parse_kana_slots
+from .japanese_cvvc import special_slots
 from .planning import recording_tokens
 from .voicebank_project_adapter import (
     VoicebankReviewRequired,
@@ -64,6 +65,10 @@ def generate_aliases(wav_name: str, *, format_hint: str, language_hint: str | No
     format_type = format_hint.strip().casefold()
     if format_type not in {"cv", "cvc", "cvvc", "vcv"}:
         raise ValueError(f"unsupported format for alias generation: {format_hint}")
+    if format_type == 'cvvc' and (language_hint or '').casefold() in {'ja', 'jp', 'japanese'}:
+        special = special_slots(wav_name)
+        if special:
+            return _japanese_special_aliases(special, wav_name)
     try:
         slots = parse_filename_phone_slots(wav_name, format_hint=format_type, language_hint=language_hint)
     except VoicebankReviewRequired:
@@ -114,6 +119,30 @@ def generate_aliases(wav_name: str, *, format_hint: str, language_hint: str | No
         previous = item
     if previous is not None and format_type != "cv" and not (format_type == "vcv" and previous.coda):
         aliases.append(f"{_left(previous, format_type)} -")
+    return aliases
+
+
+def _japanese_special_aliases(
+    units: Sequence[tuple[tuple[str, ...], str]], wav_name: str,
+) -> list[str]:
+    if units[0][1].endswith('L'):
+        return [units[0][1], f'{units[0][0][-1]} H']
+    if any(surface in {'s', 'sh'} for _, surface in units):
+        return [f'{units[i-1][1]} {surface}' for i, (_, surface) in enumerate(units)
+                if i and units[i-1][1] in {'s', 'sh'}]
+    if any(surface.startswith('ん') and len(surface) > 1 for _, surface in units):
+        return [alias for i, (_, surface) in enumerate(units)
+                if i and surface.startswith('ん') and len(surface) > 1
+                for alias in (f'{units[i-1][0][-1]} {surface}', f'n {surface}')]
+    aliases = []
+    for i, (phones, surface) in enumerate(units):
+        if surface == 'ん':
+            continue
+        if i == 0 or '_' in Path(wav_name).stem.strip('_'):
+            aliases.append(f'- {surface}')
+        aliases.append(surface)
+        if i:
+            aliases.append(f'{units[i-1][0][-1]} {surface[0]}')
     return aliases
 
 

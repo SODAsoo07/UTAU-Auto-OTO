@@ -14,7 +14,7 @@ import numpy as np
 import soundfile as sf
 
 from .audio import file_sha256
-from .oto_io import oto_cutoff_end_abs, read_text_auto, write_lines_atomic
+from .oto_io import oto_cutoff_end_abs, read_text_auto, repair_kana_mojibake, write_lines_atomic
 from .planning import normalize_wav_key
 
 
@@ -45,6 +45,10 @@ class WavDirectoryIndex:
             relative = path.relative_to(self.root)
             self._relative[_normalize_relative_reference(str(relative))].append(path)
             self._basename[normalize_wav_key(path.name)].append(path)
+            # A kana file name extracted with the Korean code page ("궇.wav" for "あ.wav").
+            repaired = repair_kana_mojibake(path.stem)
+            if repaired:
+                self._basename[normalize_wav_key(repaired + path.suffix)].append(path)
 
     def resolve(self, wav_name: str) -> Path:
         for reference_variant in _legacy_filename_variants(wav_name):
@@ -70,6 +74,10 @@ class WavDirectoryIndex:
         embedded_matches = self._embedded_basename_matches(wav_name)
         if len(embedded_matches) == 1:
             return embedded_matches[0]
+        reference = Path(wav_name.replace("\\", "/"))
+        repaired = repair_kana_mojibake(reference.stem)
+        if repaired:  # the OTO spells a kana file name in garbled Hangul
+            return self.resolve(reference.with_name(repaired + reference.suffix).as_posix())
         count = len(relative_matches) if relative_matches else len(basename_matches)
         if not count:
             count = len(pitch_prefixed_matches) or len(embedded_matches)

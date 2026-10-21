@@ -160,6 +160,10 @@ def align_recording(
     korean_ending_voicing_offset: bool = False,
     korean_coda_period_ratio: bool = False,
     pause_aware_gaps: bool = False,
+    nasal_murmur_start_strength: float = 0.0,
+    speech_span_limit: bool = False,
+    nasal_murmur_emission: float = 0.0,
+    nasal_murmur_scope: str = "all",
     sonorant_identity: SonorantTemplates | None = None,
     sonorant_identity_weight: float = 0.0,
     syllabic_sonorant_holds: bool = False,
@@ -167,6 +171,8 @@ def align_recording(
     exhaustive_coarse_search: bool = False,
     exact_hsmm_search: bool = False,
     dense_speech_activity_floor: bool = False,
+    level_robust_activity: bool = False,
+    japanese_special_refinement: bool = False,
     syllable_period_ms: float | None = None,
     boundary_competition_strength: float = 0.0,
     occurrence_ranker_model: Path | None = None,
@@ -194,6 +200,7 @@ def align_recording(
             if recording.phones and recording.phones[0] in project.inventory else False
         ),
         dense_speech_activity_floor=dense_speech_activity_floor,
+        level_robust_activity=level_robust_activity,
     )
     if requested == "acoustic_heuristic_v1":
         return _legacy_alignment(project, recording, evidence, requested=requested)
@@ -220,12 +227,17 @@ def align_recording(
             korean_ending_voicing_offset=korean_ending_voicing_offset,
             korean_coda_period_ratio=korean_coda_period_ratio,
             pause_aware_gaps=pause_aware_gaps,
+            nasal_murmur_start_strength=nasal_murmur_start_strength,
+            speech_span_limit=speech_span_limit,
+            nasal_murmur_emission=nasal_murmur_emission,
+            nasal_murmur_scope=nasal_murmur_scope,
             sonorant_identity=sonorant_identity,
             sonorant_identity_weight=sonorant_identity_weight,
             syllabic_sonorant_holds=syllabic_sonorant_holds,
             explicit_pause_tokens=explicit_pause_tokens,
             exhaustive_coarse_search=exhaustive_coarse_search,
             exact_hsmm_search=exact_hsmm_search,
+            japanese_special_refinement=japanese_special_refinement,
             syllable_period_ms=syllable_period_ms,
             boundary_competition_strength=boundary_competition_strength,
             occurrence_ranker_model=occurrence_ranker_model,
@@ -509,12 +521,17 @@ def _hsmm_alignment(
     korean_ending_voicing_offset: bool = False,
     korean_coda_period_ratio: bool = False,
     pause_aware_gaps: bool = False,
+    nasal_murmur_start_strength: float = 0.0,
+    speech_span_limit: bool = False,
+    nasal_murmur_emission: float = 0.0,
+    nasal_murmur_scope: str = "all",
     sonorant_identity: SonorantTemplates | None = None,
     sonorant_identity_weight: float = 0.0,
     syllabic_sonorant_holds: bool = False,
     explicit_pause_tokens: bool = False,
     exhaustive_coarse_search: bool = False,
     exact_hsmm_search: bool = False,
+    japanese_special_refinement: bool = False,
     syllable_period_ms: float | None = None,
     boundary_competition_strength: float = 0.0,
     occurrence_ranker_model: Path | None = None,
@@ -644,7 +661,31 @@ def _hsmm_alignment(
             target_tokens=tokens,
             target_frame_times_ms=evidence.frame_times_ms,
         )
+    special_refinement_allowed = bool(
+        japanese_special_refinement and requested in {'hsmm', 'legacy_hsmm_compat'}
+        and project.alignment.scorer_backend == 'heuristic_fallback'
+        and frame_score_provider is None and not use_external_evidence and ctc_prior is None
+        and not state_duration_constraints and not manual_occurrence_start_anchors
+        and not recording.guide_anchors and not boundary_competition_strength
+        and not occurrence_ranker_strength)
     compiled = compile_recording_states(recording, project.inventory)
+    long_vowel_policy = None
+    # Explicit Japanese long-vowel take: do not cap the first held nucleus
+    # at an ordinary syllable's duration. The second nucleus closes with breath.
+    if (recording.metadata.get('language_hint') in {'ja', 'jp', 'japanese'}
+            and any(plan.template == 'builtin:long_vowel' for plan in recording.aliases)):
+        compiled = tuple(replace(state, acoustic_role='periodic',
+                                 max_ms=max(state.max_ms, evidence.duration_ms),
+                                 mode_ms=max(state.mode_ms or 0.0, 1000.0))
+                         if state.phone_index == 0 and state.state_id in {'stable', 'consonant'}
+                         else state for state in compiled)
+        long_vowel_policy = {
+            'source': 'japanese_cvvc_long_vowel_filename_v1',
+            'base_oto_timing_reused': False,
+            'states': [{'instance_id': state.instance_id, 'max_ms': state.max_ms,
+                        'mode_ms': state.mode_ms, 'acoustic_role': state.acoustic_role}
+                       for state in compiled if state.phone_index == 0],
+        }
     compiled_state_inferences = compiled_state_inference_provenance(recording, project.inventory)
     sonorant_policy = None
     if (sustain_isolated_sonorants and requested in {"hsmm", "legacy_hsmm_compat"}
@@ -657,7 +698,8 @@ def _hsmm_alignment(
         internal_gap_policy = "contiguous"
     held_policy = None
     if syllabic_sonorant_holds and sonorant_policy is None:
-        compiled, held_policy = _syllabic_sonorant_holds(project, recording, compiled)
+        compiled, held_policy = _syllabic_sonorant_holds(project, recording, compiled,
+                                                       include_tagged_nasals=special_refinement_allowed)
     score_compilation = _compile_frame_score_compilation(
         compiled,
         project,
@@ -689,6 +731,10 @@ def _hsmm_alignment(
     if sonorant_identity is not None and sonorant_identity_weight > 0.0:
         frame_scores, identity_policy = _apply_sonorant_identity(
             project, recording, evidence, compiled, frame_scores, sonorant_identity, sonorant_identity_weight)
+    murmur_emission_policy = None
+    if nasal_murmur_emission > 0.0:
+        frame_scores, murmur_emission_policy = _apply_nasal_murmur_emission(
+            recording, evidence, compiled, frame_scores, float(nasal_murmur_emission), nasal_murmur_scope)
     score_warnings = score_compilation.result.warnings
     occurrence_priors_enabled = score_compilation.occurrence_priors_applied
     occurrence_prior_diagnostics = score_compilation.occurrence_diagnostics
@@ -735,6 +781,13 @@ def _hsmm_alignment(
     for state_id, values in provider_transition_start_scores.items():
         prior = boundary_start_scores.get(state_id)
         boundary_start_scores[state_id] = values if prior is None else prior + values
+    murmur_policy = None
+    if nasal_murmur_start_strength > 0.0:
+        murmur_scores, murmur_policy = _nasal_murmur_start_scores(
+            compiled, recording, evidence, strength=float(nasal_murmur_start_strength))
+        for state_id, values in murmur_scores.items():
+            prior = boundary_start_scores.get(state_id)
+            boundary_start_scores[state_id] = values if prior is None else prior + values
     ranker_scores, ranker_diagnostics = _occurrence_ranker_start_scores(
         compiled,
         project,
@@ -808,7 +861,32 @@ def _hsmm_alignment(
             recording, compiled, specs, frame_scores, evidence)
         boundary_start_scores.update(pause_start_scores)
     long_input = len(compiled) >= 10 or len(evidence.frame_times_ms) >= 1400
-    if exact_hsmm_search:
+    span_windows, span_policy = ({}, None)
+    if speech_span_limit and exact_hsmm_search:
+        span_windows, span_policy = _speech_span_windows(specs, compiled, evidence)
+    if exact_hsmm_search and span_windows:
+        decoded = decode_segmental_hsmm_exact(
+            specs,
+            evidence.frame_times_ms,
+            frame_scores,
+            allow_leading_gap=allow_leading_gap,
+            max_leading_gap_ms=max_leading_gap_ms,
+            allow_trailing_gap=True,
+            trailing_gap_penalty_per_ms=trailing_gap_penalty_per_ms,
+            allow_internal_gaps=allow_internal_gaps,
+            internal_gap_penalty_per_ms=internal_gap_penalty_per_ms,
+            max_internal_gap_ms=max_internal_gap_ms,
+            internal_gap_frame_weights=internal_gap_weights,
+            transition_start_scores=boundary_start_scores,
+            state_frame_windows=span_windows,
+            **(decode_options if not long_input or slot_policy is not None or pause_aware_gaps else {}),
+        )
+        span_policy["applied"] = bool(decoded.ok)
+        if not decoded.ok:  # the span estimate cannot hold these phones: decode without it
+            span_windows = {}
+    if exact_hsmm_search and span_windows:
+        pass
+    elif exact_hsmm_search:
         # Full search of the same objective (no beam, no coarse pass); vectorised, so it is
         # also faster than the pruned search.
         decoded = decode_segmental_hsmm_exact(
@@ -988,13 +1066,22 @@ def _hsmm_alignment(
         state_confidences = [segment.confidence for segment in state_segments]
         ending_policy = ({**ending_policy, "profile": "cvvc_slot_rhythm_v8", "review_only": True,
                           "promotion_eligible": False} if ending_policy["applied_count"] else None)
+    japanese_policy = None
+    if special_refinement_allowed:
+        from .japanese_timing import refine_special_timing
+        state_segments, japanese_policy = refine_special_timing(recording, evidence, state_segments)
     phones = _phone_segments(recording, state_segments)
     landmarks = _build_landmarks(phones, evidence)
+    if japanese_policy:
+        landmarks = (*landmarks, *(Landmark(item['label'], item['time_ms'], item['phone_index'],
+                         .5, 'japanese_special_timing_v1') for item in japanese_policy.get('landmarks', ())))
     guide_warnings = _guide_agreement_warnings(phones, recording)
     if compatibility_mode and "guide_agreement_failed" in guide_warnings:
         raise AlignmentError("고신뢰 guide anchor와 HSMM 경계가 250ms 넘게 다릅니다")
     landmarks = _apply_guide_anchors(landmarks, recording)
     warnings = [*evidence.warnings, *score_warnings, *guide_warnings, *_diagnostic_warnings(hsmm_diagnostics)]
+    if japanese_policy:
+        warnings.append('japanese_special_timing_review_only')
     if slot_policy is not None:
         warnings.append("cvvc_slot_rhythm_review_only")
     if ctc_prior is not None and ctc_prior.confidence < 0.35:
@@ -1028,6 +1115,9 @@ def _hsmm_alignment(
         "internal_gap_policy": internal_gap_policy,
         "boundary_competition_strength": boundary_competition_strength,
         "boundary_competition": boundary_competition_diagnostics,
+        **({"nasal_murmur_starts": murmur_policy} if murmur_policy is not None else {}),
+        **({"speech_span_limit": span_policy} if span_policy is not None else {}),
+        **({"nasal_murmur_emission": murmur_emission_policy} if murmur_emission_policy is not None else {}),
         "occurrence_ranker": ranker_diagnostics,
         "frame_scorer": frame_scorer_provenance,
         "allow_internal_gaps": allow_internal_gaps,
@@ -1060,6 +1150,8 @@ def _hsmm_alignment(
             else None
         ),
         "compiled_state_inferences": compiled_state_inferences,
+        **({'japanese_special_timing': japanese_policy} if japanese_policy else {}),
+        **({'japanese_long_vowel_policy': long_vowel_policy} if long_vowel_policy else {}),
         **({"isolated_sonorant_policy": sonorant_policy} if sonorant_policy is not None else {}),
         **({"cvvc_slot_rhythm_policy": slot_policy} if slot_policy is not None else {}),
         **({"korean_nasal_coda_onset_policy": coda_onset_policy}
@@ -1123,6 +1215,8 @@ def _hsmm_alignment(
                 else {"applied_state_count": 0}
             ),
             "compiled_state_inferences": compiled_state_inferences,
+            **({'japanese_special_timing': japanese_policy} if japanese_policy else {}),
+            **({'japanese_long_vowel_policy': long_vowel_policy} if long_vowel_policy else {}),
             **({"isolated_sonorant_policy": sonorant_policy} if sonorant_policy is not None else {}),
             **({"cvvc_slot_rhythm_policy": slot_policy} if slot_policy is not None else {}),
             **({"korean_nasal_coda_onset_policy": coda_onset_policy}
@@ -1283,12 +1377,20 @@ def _syllabic_sonorant_holds(
     project: ProjectSpec,
     recording: RecordingSpec,
     compiled: Sequence[CompiledState],
+    *, include_tagged_nasals: bool = False,
 ) -> tuple[Sequence[CompiledState], dict[str, object] | None]:
     """Development overlay: a nasal or liquid that is a syllable of its own (Korean list '-M',
     '-L', Japanese moraic n) may be held like a vowel instead of a 260 ms consonant."""
     held: set[int] = set()
     for slot in recording.metadata.get("phone_slots") or ():
-        if not isinstance(slot, Mapping) or not slot.get("start") == slot.get("end") == slot.get("vowel"):
+        if not isinstance(slot, Mapping):
+            continue
+        isolated = slot.get('start') == slot.get('end') == slot.get('vowel')
+        tagged = (include_tagged_nasals and recording.metadata.get('language_hint') in {'ja', 'jp', 'japanese'}
+                  and slot.get('start') == slot.get('vowel') and slot.get('end') == slot.get('start', -2)+1
+                  and recording.phones[int(slot['start'])] == 'n'
+                  and recording.phones[int(slot['end'])] in {'n', 'm', 'ng'})
+        if not isolated and not tagged:
             continue
         index = int(slot["start"])
         definition = project.inventory.get(recording.phones[index]) if 0 <= index < len(recording.phones) else None
@@ -1856,6 +1958,193 @@ def _cached_evidence(path: Path, **options: object) -> AcousticEvidence:
     """extract_acoustic_evidence, computed once per WAV and options during a generation run."""
     key = tuple(sorted((name, str(value)) for name, value in options.items()))
     return analysis_cache.cached("evidence", path, key, lambda: extract_acoustic_evidence(path, **options))
+
+
+# Onset nasals (m, n before a vowel or glide): in a sonorant list (みゃみみゅみぇ, mamimu) the voicing never
+# breaks, so energy marks no syllable boundary and the decoder can let one vowel swallow the next
+# syllable. A nasal murmur moves the energy below 400 Hz: the start of each murmur is a sharp rise of
+# the low-band share (_audio_band_balance), which becomes a start bonus for that nasal's first state.
+NASAL_ONSET_PHONES = frozenset({"m", "n", "ny"})
+MURMUR_RISE_FRAMES = 3  # 15 ms each side at the 5 ms hop
+MURMUR_RISE_FULL = 0.5  # rise of the low-minus-mid share counted as a full murmur onset
+MURMUR_SIGMA_MS = 20.0
+
+
+def _nasal_murmur_start_scores(
+    states: Sequence[CompiledState], recording: RecordingSpec, evidence: AcousticEvidence, *, strength: float,
+) -> tuple[dict[str, np.ndarray], Mapping[str, object]]:
+    phones = [str(phone).casefold() for phone in recording.phones]
+    first_state: dict[int, CompiledState] = {}
+    for state in states:
+        first_state.setdefault(int(state.phone_index), state)
+    onset_indices = [i for i, phone in enumerate(phones)
+                     if phone in NASAL_ONSET_PHONES and i + 1 < len(phones)
+                     and (_is_vowel_like(phones[i + 1]) or phones[i + 1] in {"y", "w"})]
+    if not onset_indices:
+        return {}, {"applied_count": 0}
+    times = np.asarray(evidence.frame_times_ms, dtype=np.float64)
+    balance = _audio_band_balance(evidence.wav_path, times)
+    k = MURMUR_RISE_FRAMES
+    rise = np.zeros(len(balance))
+    if len(balance) > 2 * k:
+        after = np.array([balance[i:i + k].mean() for i in range(k, len(balance) - k)])
+        before = np.array([balance[i - k:i].mean() for i in range(k, len(balance) - k)])
+        rise[k:len(balance) - k] = np.clip(after - before, 0.0, None)
+    strength_curve = np.clip(rise / MURMUR_RISE_FULL, 0.0, 1.0)
+    inside = (times >= evidence.active_start_ms) & (times <= evidence.active_end_ms)
+    peaks = [i for i in range(1, len(rise) - 1)
+             if inside[i] and strength_curve[i] > 0.2 and rise[i] >= rise[i - 1] and rise[i] > rise[i + 1]]
+    if not peaks:
+        return {}, {"applied_count": 0, "onset_nasals": len(onset_indices), "peaks": 0}
+    bonus = np.zeros(len(times))
+    for i in peaks:
+        bonus = np.maximum(bonus, strength_curve[i] * np.exp(-0.5 * ((times - times[i]) / MURMUR_SIGMA_MS) ** 2))
+    scores = {first_state[i].instance_id: strength * bonus for i in onset_indices if i in first_state}
+    return scores, {"applied_count": len(scores), "onset_nasals": len(onset_indices), "peaks": len(peaks),
+                    "strength": strength}
+
+
+# Nasal murmur in the emissions: in a sonorant list a vowel state scored as well on the murmur of the
+# next m/n as on its own vowel, so the decoder held the vowel through it and skipped a syllable
+# (a _みゃみみゅみぇみょ take: u held 753 ms). The murmur is read as a local rise of the low-band share
+# above the surrounding vowel's level (a vowel i sits as high as a murmur, so only the rise counts).
+MURMUR_EMISSION_BASELINE_MS = 300.0  # surrounding vowel level: the lowest share within ±300 ms (a held ん runs ~450 ms)
+MURMUR_EMISSION_FULL_RISE = 0.25
+MURMUR_VOWEL_ROLES = frozenset({"vowel_stable", "vowel_nucleus", "vowel_transition"})
+MURMUR_OPEN_VOWEL_BALANCE = -0.35  # u sits near -0.22 and murmur near 0; a/e/o at -0.45..-0.75
+NASAL_PHONES = frozenset({"m", "n", "ny", "N", "ng"})
+
+
+def _apply_nasal_murmur_emission(recording: RecordingSpec, evidence: AcousticEvidence,
+                                 compiled: Sequence[CompiledState], frame_scores, strength: float,
+                                 scope: str = "all"):
+    """scope "all": murmur cue on vowels and onset nasals plus the open-vowel cost on every nasal;
+    "syllabic": only the open-vowel cost, only on nasals not followed by a vowel (a held ん);
+    "hybrid": the murmur cue as in "all", the open-vowel cost only on the held nasals;
+    "model": the fitted nasal-frame probability p (nasal_frame_v1): every nasal state gets
+    strength * (2p - 1), vowel states lose strength * max(0, 2p - 1)."""
+    phones = [str(phone).casefold() for phone in recording.phones]
+    onset_nasals = {i for i, phone in enumerate(phones)
+                    if phone in NASAL_ONSET_PHONES and i + 1 < len(phones)
+                    and (_is_vowel_like(phones[i + 1]) or phones[i + 1] in {"y", "w"})}
+    if scope == "model":
+        if recording.metadata.get("format_hint") == "vcv":
+            # VCV lists lost 0.5-1.5 points with it (a Japanese and a Korean VCV bank); their aliases already
+            # pin each vowel-consonant-vowel, so the shift it fixes does not arise there.
+            return frame_scores, {"applied": False, "scope": "model", "reason": "vcv_format"}
+        return _apply_nasal_frame_model(phones, evidence, compiled, frame_scores, strength)
+    syllabic = scope == "syllabic"
+    nasal_phones = {i for i, phone in enumerate(phones) if phone in NASAL_PHONES}
+    if syllabic:
+        nasal_phones -= onset_nasals
+    if not (nasal_phones if syllabic else onset_nasals):
+        return frame_scores, {"applied": False, "reason": "no_nasal_in_scope", "scope": scope}
+    times = np.asarray(evidence.frame_times_ms, dtype=np.float64)
+    balance = _audio_band_balance(evidence.wav_path, times)
+    hop = float(np.median(np.diff(times))) if len(times) > 1 else 5.0
+    radius = max(1, int(round(MURMUR_EMISSION_BASELINE_MS / hop)))
+    padded = np.pad(balance, radius, mode="edge")
+    baseline = np.array([padded[i:i + 2 * radius + 1].min() for i in range(len(balance))])
+    murmur = np.clip((balance - baseline) / MURMUR_EMISSION_FULL_RISE, 0.0, 1.0)
+    # The other way round: a held ん (a periodic state) scored an open vowel as well as the vowel did and
+    # took the last syllable's vowel. a/e/o sit far below any murmur, so those frames count against nasals.
+    open_vowel = np.clip((MURMUR_OPEN_VOWEL_BALANCE - balance) / MURMUR_EMISSION_FULL_RISE, 0.0, 1.0)
+    adjusted = dict(frame_scores)
+    changed = 0
+    for state in compiled:
+        values = adjusted.get(state.instance_id)
+        if values is None:
+            continue
+        index = int(state.phone_index)
+        if state.acoustic_role in MURMUR_VOWEL_ROLES and not syllabic:
+            adjusted[state.instance_id] = np.asarray(values, dtype=np.float64) - strength * murmur
+            changed += 1
+        elif index in nasal_phones:
+            bonus = murmur if index in onset_nasals else 0.0
+            cost = 0.0 if scope == "hybrid" and index in onset_nasals else open_vowel
+            adjusted[state.instance_id] = np.asarray(values, dtype=np.float64) + strength * (bonus - cost)
+            changed += 1
+    return adjusted, {"applied": True, "strength": strength, "scope": scope, "states_changed": changed,
+                      "murmur_frames": int(np.sum(murmur > 0.5))}
+
+
+def _apply_nasal_frame_model(phones, evidence: AcousticEvidence, compiled: Sequence[CompiledState],
+                             frame_scores, strength: float):
+    from .nasal_frame import model_available, nasal_probability
+
+    nasal_phones = {i for i, phone in enumerate(phones) if phone in NASAL_PHONES}
+    if not nasal_phones or not model_available():
+        return frame_scores, {"applied": False, "scope": "model",
+                              "reason": "no_nasal" if not nasal_phones else "model_missing"}
+    probability = nasal_probability(evidence.wav_path, np.asarray(evidence.frame_times_ms, dtype=np.float64))
+    centered = 2.0 * probability - 1.0
+    vowel_cost = strength * np.clip(centered, 0.0, None)
+    adjusted = dict(frame_scores)
+    changed = 0
+    for state in compiled:
+        values = adjusted.get(state.instance_id)
+        if values is None:
+            continue
+        if int(state.phone_index) in nasal_phones:
+            adjusted[state.instance_id] = np.asarray(values, dtype=np.float64) + strength * centered
+            changed += 1
+        elif state.acoustic_role in MURMUR_VOWEL_ROLES:
+            adjusted[state.instance_id] = np.asarray(values, dtype=np.float64) - vowel_cost
+            changed += 1
+    return adjusted, {"applied": True, "scope": "model", "strength": strength, "states_changed": changed,
+                      "nasal_frames": int(np.sum(probability > 0.5))}
+
+
+# Speech span limit: the speech phones (breath/silence/pause states excluded) must start near the first
+# and end near the last strong frame (within SPAN_STRONG_RANGE_DB of the peak), so the decoder cannot
+# spread the syllables over a room tail or squeeze the last one past the singing.
+SPAN_STRONG_RANGE_DB = 22.0
+SPAN_START_EARLY_MS = 300.0  # an onset consonant before the first strong frame
+SPAN_START_LATE_MS = 20.0
+SPAN_END_EARLY_MS = 20.0
+SPAN_END_LATE_MS = 200.0  # a coda / fade after the last strong frame
+
+
+def _speech_span_windows(specs, compiled: Sequence[CompiledState], evidence: AcousticEvidence):
+    from .hsmm_decoder import HSMMStateFrameWindow
+
+    times = np.asarray(evidence.frame_times_ms, dtype=np.float64)
+    level = _audio_frame_level_db(evidence.wav_path, times)
+    strong = np.flatnonzero(level >= float(np.percentile(level, 99.0)) - SPAN_STRONG_RANGE_DB)
+    speech = [spec for spec in specs if spec.state_type not in EXPLICIT_GAP_ROLES]
+    if not len(strong) or not speech:
+        return {}, {"applied": False, "reason": "no_strong_frames"}
+    first_ms, last_ms = float(times[strong[0]]), float(times[strong[-1]])
+    frame = lambda ms: int(np.searchsorted(times, ms))
+    windows = {
+        speech[0].state_id: HSMMStateFrameWindow(start_min_frame=frame(first_ms - SPAN_START_EARLY_MS),
+                                                 start_max_frame=frame(first_ms + SPAN_START_LATE_MS)),
+    }
+    end_window = HSMMStateFrameWindow(end_min_frame=max(1, frame(last_ms - SPAN_END_EARLY_MS)),
+                                      end_max_frame=frame(last_ms + SPAN_END_LATE_MS))
+    if speech[-1].state_id in windows:  # a single speech state carries both limits
+        first = windows[speech[-1].state_id]
+        end_window = HSMMStateFrameWindow(first.start_min_frame, first.start_max_frame,
+                                          end_window.end_min_frame, end_window.end_max_frame)
+    windows[speech[-1].state_id] = end_window
+    return windows, {"first_strong_ms": first_ms, "last_strong_ms": last_ms}
+
+
+def _audio_frame_level_db(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
+    times = np.asarray(times_ms, dtype=np.float64)
+    return analysis_cache.cached("frame_level_db", wav_path, (times.tobytes(),),
+                                 lambda: _audio_frame_level_db_uncached(wav_path, times))
+
+
+def _audio_frame_level_db_uncached(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
+    samples, rate = sf.read(str(wav_path), dtype="float64", always_2d=True)
+    mono = samples.mean(axis=1)
+    window = max(16, int(round(0.030 * rate)))
+    padded = np.concatenate((np.zeros(window), mono, np.zeros(window)))
+    starts = np.clip(np.round(np.asarray(times_ms) / 1000.0 * rate).astype(int) - window // 2 + window,
+                     0, len(padded) - window)
+    frames = padded[starts[:, None] + np.arange(window)[None, :]]
+    return 20.0 * np.log10(np.sqrt((frames ** 2).mean(axis=1)) + 1e-9)
 
 
 def _audio_band_balance(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:

@@ -21,7 +21,7 @@ from .dataset_evaluation import evaluate_dataset_manifest
 from .evaluation import evaluate_oto
 from .external_evidence import inspect_external_evidence
 from .oto_style import load_oto_style
-from .generator import GenerationOptions, generate_voicebank, inspect_voicebank
+from .generator import DEVELOPMENT_ALIGNMENT_PROFILES, GenerationOptions, generate_voicebank, inspect_voicebank
 from .transition_duration_constraint import fit_transition_duration_constraint
 from .neural_evidence_dataset import build_publicdata_manifest
 from .oto_generator_ui import launch_oto_generator_ui
@@ -274,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_parser.add_argument(
         "--development-alignment-profile",
-        choices=("occurrence_v1", "isolated_sonorant_v1", "cvvc_slot_rhythm_v1", "cvvc_slot_rhythm_v2", "cvvc_slot_rhythm_v3", "cvvc_slot_rhythm_v4", "cvvc_slot_rhythm_v5", "cvvc_slot_rhythm_v6", "cvvc_slot_rhythm_v7", "cvvc_slot_rhythm_v8", "cvvc_slot_rhythm_v9", "cvvc_slot_rhythm_v10", "cvvc_slot_rhythm_v11", "cvvc_slot_rhythm_v12", "cvvc_slot_rhythm_v13", "cvvc_slot_rhythm_v14", "cvvc_slot_rhythm_v15", "cvvc_slot_rhythm_v16", "pause_aware_v1"),
+        choices=tuple(DEVELOPMENT_ALIGNMENT_PROFILES),
         help="Explicit development-only HSMM profile; never changes the safe default.",
     )
     generate_parser.add_argument(

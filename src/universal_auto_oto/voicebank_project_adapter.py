@@ -14,7 +14,8 @@ import yaml
 
 from .domain import AliasPlan, PhoneDefinition, PhoneStateDefinition, RecordingSpec, SourceOtoRow
 from .kana import parse_kana_slots
-from .oto_io import read_text_auto
+from .japanese_cvvc import alias_part_key, special_slots
+from .oto_io import read_text_auto, repair_kana_mojibake
 from .planning import _kana_surface_slots, _surface_phone_key, recording_tokens
 from .project import (
     AlignmentConfig,
@@ -194,7 +195,14 @@ def parse_filename_phone_slots(
     """
 
     format_type = _require_format(format_hint)
+    repaired = repair_kana_mojibake(Path(str(source)).stem)
+    if repaired:  # a kana file name extracted with the Korean code page ("궇.wav" is "あ.wav")
+        source = Path(str(source)).with_name(repaired + Path(str(source)).suffix).as_posix()
     stem = Path(str(source)).stem.strip().strip("_")
+    if format_type == 'cvvc' and _is_japanese(language_hint):
+        special = special_slots(source)
+        if special:
+            return tuple(phones for phones, _ in special)
     kana_slots = parse_kana_slots(stem)
     if kana_slots:
         dotted = _kana_slots_with_fry_dots(stem)
@@ -383,6 +391,7 @@ def build_routed_voicebank_project(
     if release_pre_policy not in RELEASE_PRE_POLICIES:
         raise ValueError(f"unsupported release_pre_policy: {release_pre_policy}")
     excluded_rows: list[dict[str, object]] = []
+    skipped_wavs: list[dict[str, object]] = []
     bank = bank.resolve()
     format_type = _require_format(format_hint)
     language = (language_hint or "mixed").strip().casefold() or "mixed"
@@ -425,8 +434,12 @@ def build_routed_voicebank_project(
                 alias_hints=tuple(row.alias for row in source_rows),
             )
         except VoicebankReviewRequired as exc:
-            if unmapped_alias_policy != "exclude_row" or not source_rows:
+            if unmapped_alias_policy != "exclude_row":
                 raise
+            if not source_rows:
+                # A stray WAV with an unreadable name and no OTO rows (sample.wav): nothing to generate.
+                skipped_wavs.append({"wav": relative, "reason": exc.reason, "detail": exc.detail})
+                continue
             excluded_rows.extend(_excluded_row(relative, row, exc.reason, exc.detail) for row in source_rows)
             continue
         inferred_exhalations: tuple[int, ...] = ()
@@ -448,10 +461,16 @@ def build_routed_voicebank_project(
             aliases = _parse_manifest_aliases(raw_record, len(phones), relative)
             alias_source = "recording_manifest"
             alias_binding_policy = "explicit_manifest_phone_indices"
+            base_lines = []
         elif source_rows:
             unmapped: list[tuple[SourceOtoRow, str]] = []
+            # Kana saved as cp932 and read as cp949 ("- 궭" = "- ち") binds as the kana; the row is
+            # written twice below, with the kana and with the original text.
+            garbled = {row.source_index: row.alias for row in source_rows if repair_kana_mojibake(row.alias)}
+            binding_rows = tuple(replace(row, alias=repair_kana_mojibake(row.alias)) if row.source_index in garbled
+                                 else row for row in source_rows)
             aliases = _planned_aliases(
-                source_rows,
+                binding_rows,
                 slots,
                 format_type,
                 wav.name,
@@ -459,9 +478,24 @@ def build_routed_voicebank_project(
                 unmapped=unmapped if unmapped_alias_policy == "exclude_row" else None,
                 wi_as_y_glide=wi_as_y_glide,
             )
-            excluded_rows.extend(_excluded_row(relative, row, "unmapped_alias", detail) for row, detail in unmapped)
+            excluded_rows.extend(
+                _excluded_row(relative, replace(row, alias=garbled.get(row.source_index, row.alias)), "unmapped_alias", detail)
+                for row, detail in unmapped)
             if not aliases and unmapped:
                 continue
+            unmapped_lines = {row.source_index for row, _ in unmapped}
+            mapped_lines = [row.source_index for row in binding_rows if row.source_index not in unmapped_lines]
+            if len(mapped_lines) == len(aliases):
+                expanded, base_lines = [], []
+                for line, plan in zip(mapped_lines, aliases):
+                    expanded.append(plan)
+                    base_lines.append(line)
+                    if line in garbled:
+                        expanded.append(replace(plan, alias=garbled[line]))
+                        base_lines.append(line)
+                aliases = tuple(expanded)
+            else:
+                base_lines = []
             alias_source = "base_oto_alias_only"
             alias_binding_policy = "filename_semantics_v4_coda_exhalation"
         else:
@@ -478,6 +512,7 @@ def build_routed_voicebank_project(
             aliases = tuple(generated)
             alias_source = "filename_fallback"
             alias_binding_policy = "filename_slot_identity_v1"
+            base_lines = []
         if not aliases:
             raise VoicebankReviewRequired("empty_alias_plan", wav=relative)
         if vc_end_policy == "consonant":
@@ -497,6 +532,8 @@ def build_routed_voicebank_project(
             "alias_inferred_exhalation_indices": list(inferred_exhalations),
             "phone_slots": [{"start": slot.start, "vowel": slot.vowel, "end": slot.end} for slot in slots],
             "base_oto_timing_reused": False,
+            # Line of the base oto.ini each alias plan came from (row_report: recording_metadata).
+            "alias_base_lines": list(base_lines),
             **review_metadata,
         }
         recording = RecordingSpec(
@@ -636,6 +673,7 @@ def build_routed_voicebank_project(
     if excluded_rows:
         manifest["unmapped_alias_policy"] = unmapped_alias_policy
         manifest["excluded_rows"] = excluded_rows
+        manifest["skipped_wavs_without_rows"] = skipped_wavs
     return RoutedProjectBuild(project=project, manifest=manifest, input_hashes=input_hashes, route_id=route_id,
                               excluded_rows=tuple(excluded_rows))
 
@@ -827,6 +865,16 @@ def _recording_phone_contract(
         phones, slots = _flatten_slots(compact)
         return phones, slots, "korean_vcv_compact_segmentation", None
     phones, slots = _flatten_slots(slot_phones)
+    special = special_slots(wav.name) if format_type == 'cvvc' and _is_japanese(language_hint) else ()
+    if special and special[0][1].endswith('L'):
+        from .japanese_timing import long_phrase_layout
+        try:
+            layout = long_phrase_layout(wav)
+        except (RuntimeError, OSError):
+            layout = 'unresolved'
+        if layout == 'continuous':
+            phones, slots = _flatten_slots((slot_phones[0], slot_phones[-1]))
+            return phones, slots, 'japanese_continuous_long_acoustic_layout_v1', None
     return phones, slots, "original_filename_only", None
 
 
@@ -980,7 +1028,7 @@ def _flatten_slots(slot_phones: Sequence[Sequence[str]]) -> tuple[tuple[str, ...
             continue
         vowel_positions = [index for index, phone in enumerate(normalized) if _is_vowel_id(phone)]
         if len(vowel_positions) != 1:
-            if len(normalized) == 1 and normalized[0] in (_BREATH_PHONES | _SILENCE_PHONES | _STANDALONE_SONORANTS):
+            if len(normalized) == 1 and normalized[0] in (_BREATH_PHONES | _SILENCE_PHONES | _STANDALONE_SONORANTS | {'s', 'sh'}):
                 # This is a slot endpoint, not a change to the phone's acoustic class.
                 vowel_position = 0
             elif len(normalized) == 3 and normalized[0] == normalized[2] == "vf" and normalized[1] in _KOREAN_CVVC_VOCAL_FRY_CODAS:
@@ -990,6 +1038,8 @@ def _flatten_slots(slot_phones: Sequence[Sequence[str]]) -> tuple[tuple[str, ...
             elif len(normalized) == 2 and normalized[1] == "vf" and normalized[0] in _KOREAN_CVVC_VOCAL_FRY_CODAS:
                 vowel_position = 1
             elif len(normalized) == 2 and normalized[1] == "exh" and normalized[0] in _STANDALONE_SONORANTS:
+                vowel_position = 0
+            elif len(normalized) == 2 and normalized[0] == 'n' and normalized[1] in {'n', 'm', 'ng'}:
                 vowel_position = 0
             else:
                 raise VoicebankReviewRequired("ambiguous_slot_vowel", detail=" ".join(normalized))
@@ -1072,13 +1122,15 @@ def _recording_review_metadata(raw_record: Mapping[str, object] | None, bank: Pa
     }
 
 
-def _alias_surface(alias: str, *, preserve_coda_case: bool = False) -> tuple[tuple[str, ...], int | None]:
+def _alias_surface(alias: str, *, preserve_coda_case: bool = False, japanese: bool = False) -> tuple[tuple[str, ...], int | None]:
     """Separate style/pitch from explicit occurrence without swallowing ``ka2``.
 
     Pitch suffixes must use uppercase note names; a bare trailing integer is
     an occurrence ordinal. #N/@N are also accepted and are unambiguous.
     """
     value = alias.strip()
+    # A kanji glued to the end names the take's variant ("a R夜", "a あ昼"); 息/吸 are breath marks.
+    value = re.sub(r"(?<=\S)[一-鿿]+$", lambda m: m[0] if set(m[0]) & {"息", "吸"} else "", value)
     while True:
         stripped = re.sub(r"(?:_[A-Za-z]+|_?[A-G](?:#|b)?\d+[A-Za-z]*)$", "", value).strip()
         if stripped == value:
@@ -1093,10 +1145,14 @@ def _alias_surface(alias: str, *, preserve_coda_case: bool = False) -> tuple[tup
     if value.startswith("-"):
         value = "- " + value[1:].lstrip()
     value = re.sub(r"([*'\u30fb])", r" \1 ", unicodedata.normalize("NFKC", value))
-    parts = tuple(part if part in {"-", "R", "*", "'", "\u30fb"} or
-                  (preserve_coda_case and part in {"K", "T", "P", "N", "M", "NG", "L"})
-                  else _surface_phone_key(part)
-                  for part in value.split())
+    def part_key(part: str) -> str:
+        if part in {"-", "R", "*", "'", "\u30fb"} or (preserve_coda_case and part in {"K", "T", "P", "N", "M", "NG", "L"}):
+            return part
+        if japanese:
+            return alias_part_key(part) or ('H' if part == 'H' else _surface_phone_key(part))
+        return _surface_phone_key(part)
+
+    parts = tuple(part_key(part) for part in value.split())
     return parts, occurrence
 
 
@@ -1277,6 +1333,47 @@ def _planned_aliases(
         add(key, (left, left+1), role)
 
     if japanese:
+        special = special_slots(wav_name) if format_type == 'cvvc' else ()
+        if special and special[0][1].endswith('L') and len(slots) == 2:
+            special = (special[0], special[-1])
+        if special and len(special) == len(slots):
+            nasal_candidates: dict[tuple[str, ...], list[AliasPlan]] = {}
+            for index, (slot, (raw_phones, surface)) in enumerate(zip(slots, special)):
+                key = alias_part_key(surface)
+                if key and surface.endswith('L'):
+                    add((key,), (slot.vowel,), 'v', 'builtin:long_vowel')
+                elif surface == 'H' and index:
+                    add((phones[slots[index-1].vowel], 'H'), (slots[index-1].vowel, slot.start),
+                        'release', 'builtin:ending_exhalation')
+                elif surface.startswith('ん') and key and len(surface) > 1:
+                    # A single filename mora contains n -> m/ng/n; keep both
+                    # occurrences so n んm is a real internal transition.
+                    nasal_candidates.setdefault(('n', key), []).append(AliasPlan('', (slot.start, slot.end),
+                        'builtin:vc_soft_voiced', 'vc'))
+                    if index:
+                        previous = slots[index-1]
+                        nasal_candidates.setdefault((phones[previous.end], key), []).append(AliasPlan('',
+                            (previous.end, slot.start, slot.end), 'builtin:vc_nasal_variant', 'vc'))
+                elif surface.startswith(('l', 'x')) and key:
+                    indices, template, role = _alias_mapping('cv', index, slots)
+                    if raw_phones[0] == 'trill':
+                        indices, template = [slot.start, slot.start + 1, slot.vowel], 'builtin:cv_trill'
+                    add((key,), indices, role, template)
+                    add(('-', key), indices, 'cv_head', template)
+                    if index:
+                        previous = slots[index - 1]
+                        if raw_phones[0] == 'trill':
+                            add((phones[previous.end], 'x'), (previous.end, slot.start, slot.start + 1),
+                                'vc', 'builtin:vc_trill')
+                        else:
+                            add((phones[previous.end], 'l'), (previous.end, slot.start), 'vc')
+                # Fricative-to-CV aliases retain the frication as the offset,
+                # with preutterance at the following vowel (same as base OTO).
+                if index and slots[index - 1].phones in {('s',), ('sh',)} and slot.start < slot.vowel:
+                    previous = slots[index - 1]
+                    add((phones[previous.start], ''.join(slot.phones)),
+                        (previous.start, *range(slot.start, slot.vowel + 1)), 'vcv', 'builtin:vcv')
+            candidates.update(nasal_candidates)
         for i in sorted(phones):
             if phones[i] != "vf":
                 continue
@@ -1391,7 +1488,7 @@ def _planned_aliases(
                         if korean_vcv and p in _KOREAN_CODAS and s.start + i > s.vowel}
     result = []
     for row in rows:
-        key, occurrence = _alias_surface(row.alias, preserve_coda_case=korean_cvvc)
+        key, occurrence = _alias_surface(row.alias, preserve_coda_case=korean_cvvc, japanese=japanese)
         # br2.wav/br2 is a named breath variant, not the second event in a
         # one-phone file. Only accept an exact filename/alias variant match.
         variant = row.alias.strip().casefold()
@@ -1460,6 +1557,13 @@ def _planned_aliases(
             # phrase end by a trailing '-' (user-confirmed 2026-10-09); other
             # formats keep the first event, as their banks are not consistent.
             matches = matches[-1:]
+        elif (japanese and format_type == 'cvvc' and special_slots(wav_name) and len(key) == 1
+              and any(alias_part_key(surface) == key[0] and surface.startswith(('l', 'x'))
+                      for _, surface in special_slots(wav_name))):
+            # Heads use the first take. A plain repeated CV uses the first
+            # phrase-internal take; explicit #N/@N retains its original meaning.
+            internal = [p for p in matches if min(p.phone_indices) > slots[0].end]
+            matches = (internal or matches)[:1]
         else:
             if (korean_cvvc and lowercase_vc_prefers_onset and len(key) == 2 and _is_vowel_id(key[0])
                     and key[1] in {"k", "t", "p", "n", "m", "l"}):
@@ -1485,7 +1589,16 @@ def _planned_aliases(
             unmapped.append((row, detail))
             continue
         selected = matches[0]
-        result.append(AliasPlan(row.alias, selected.phone_indices, selected.template, selected.role))
+        overrides = dict(selected.overrides)
+        if (japanese and format_type == 'cvvc' and special_slots(wav_name)
+                and special_slots(wav_name)[0][1].endswith('L')
+                and selected.template == 'builtin:ending_exhalation'):
+            # Short releases cannot fit a 25 ms fixed tail plus a 15 ms trim.
+            # Keep both anchors inside the measured release instead of relying
+            # on the renderer's generic repair/clamping pass.
+            overrides.update(fixed_abs='min(max(pre_abs + 25, phone[1].end - 70), phone[1].end - 15)',
+                             cutoff_abs='phone[1].end - 5')
+        result.append(AliasPlan(row.alias, selected.phone_indices, selected.template, selected.role, overrides))
     return tuple(result)
 
 
@@ -1698,6 +1811,9 @@ def _inferred_phone_definition(phone: str) -> PhoneDefinition:
     elif phone in _SILENCE_PHONES:
         features = {"manner": "silence", "voiced": False, "continuant": False}
         states = (PhoneStateDefinition("silence", "silence", 20.0, 1600.0, 120.0),)
+    elif phone == 'trill':
+        features = {"manner": "liquid", "voiced": True, "sonorant": True, "continuant": True}
+        states = (PhoneStateDefinition('irregular', 'aperiodic', 10.0, 400.0, 70.0),)
     elif phone == "vf":
         features = {"manner": "vocal_fry", "voiced": True, "continuant": True}
         states = (

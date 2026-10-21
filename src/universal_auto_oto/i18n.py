@@ -269,6 +269,8 @@ _EN: dict[str, str] = {
         "[Note] {count} rows could not be generated: their aliases in the source OTO could not be matched to a "
         "recording file name, or the recording could not be analyzed, so their existing oto.ini values were kept "
         "unchanged (also in oto.review.ini)."),
+    "[주의] 파일 이름이나 별칭을 {requested}로 저장할 수 없어 oto.ini를 UTF-8로 저장했습니다.": (
+        "[Note] File names or aliases could not be saved as {requested}, so oto.ini was saved as UTF-8."),
     "▶ 고급 설정": "▶ Advanced settings",
     "▼ 고급 설정": "▼ Advanced settings",
     "고급 설정": "Advanced settings",
@@ -408,8 +410,8 @@ _EN: dict[str, str] = {
         "Japanese is selected, but {share:.0%} of the romanized names use Korean spellings (eo, eu, ng, ss, "
         "...). Check that this is not a Korean voicebank."),
     # OTO preview
-    "위험도 모델이 없는 형식(한국어 VCV·CVC 외)이라 자동 판정하지 않았습니다": (
-        "Not judged automatically: there is no risk model for this format (only Korean VCV/CVC have one)"),
+    "위험도 모델이 없는 형식(한국어 VCV·CVC·CVVC 외)이라 자동 판정하지 않았습니다": (
+        "Not judged automatically: there is no risk model for this format (only Korean VCV/CVC/CVVC have one)"),
     "미판정": "unrated",
     "{alias}  ({wav}, {line}행)": "{alias}  ({wav}, line {line})",
     "고정": "fixed",
@@ -612,6 +614,8 @@ _JA: dict[str, str] = {
     "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).": (
         "[注意] 生成できなかった行 {count}個: 元のOTOのエイリアスを録音ファイル名と対応付けられなかったか、録音を解析できなかったため、"
         "既存のoto.iniの値をそのまま入れました (oto.review.iniにも含みます)。"),
+    "[주의] 파일 이름이나 별칭을 {requested}로 저장할 수 없어 oto.ini를 UTF-8로 저장했습니다.": (
+        "[注意] ファイル名やエイリアスを{requested}で保存できないため、oto.iniをUTF-8で保存しました。"),
     "▶ 고급 설정": "▶ 詳細設定",
     "▼ 고급 설정": "▼ 詳細設定",
     "고급 설정": "詳細設定",
@@ -744,8 +748,8 @@ _JA: dict[str, str] = {
         "言語に日本語を選びましたが、ローマ字名の{share:.0%}に韓国語の表記 (eo, eu, ng, ss など) があります。"
         "韓国語音源ではないか確認してください。"),
     # OTO preview
-    "위험도 모델이 없는 형식(한국어 VCV·CVC 외)이라 자동 판정하지 않았습니다": (
-        "リスクモデルのない形式 (韓国語VCV・CVC以外) のため、自動判定していません"),
+    "위험도 모델이 없는 형식(한국어 VCV·CVC·CVVC 외)이라 자동 판정하지 않았습니다": (
+        "リスクモデルのない形式 (韓国語VCV・CVC・CVVC以外) のため、自動判定していません"),
     "미판정": "未判定",
     "{alias}  ({wav}, {line}행)": "{alias}  ({wav}, {line}行目)",
     "고정": "固定範囲",

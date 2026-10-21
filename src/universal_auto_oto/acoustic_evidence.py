@@ -81,6 +81,7 @@ def extract_acoustic_evidence(
     evidence_provider: str = "cuda",
     preserve_leading_silence: bool = False,
     dense_speech_activity_floor: bool = False,
+    level_robust_activity: bool = False,
 ) -> AcousticEvidence:
     backend = str(feature_backend).strip().casefold()
     if backend not in SUPPORTED_FEATURE_BACKENDS:
@@ -147,6 +148,7 @@ def extract_acoustic_evidence(
         warnings,
         expected_regions=expected_activity_regions,
         dense_speech_floor=dense_speech_activity_floor,
+        level_robust=level_robust_activity,
     )
     config = {
         "schema_version": 2 if backend != LEGACY_FEATURE_BACKEND_ID else 1,
@@ -160,7 +162,8 @@ def extract_acoustic_evidence(
         "resample_method": analysis.resample_method,
         "channel_mix_policy": analysis.channel_mix_policy,
         "amplitude_normalization_policy": "none",
-        "activity_region_policy": "sequence_aware_v2" + ("_dense_floor" if dense_speech_activity_floor else ""),
+        "activity_region_policy": "sequence_aware_v2" + ("_dense_floor" if dense_speech_activity_floor else "")
+        + ("_level_robust" if level_robust_activity else ""),
         "expected_activity_regions": expected_activity_regions,
         **backend_details,
         **padding_details,
@@ -789,6 +792,7 @@ def _activity_region(
     *,
     expected_regions: int = 1,
     dense_speech_floor: bool = False,
+    level_robust: bool = False,
 ) -> tuple[float, float, dict[str, float]]:
     peak_db = float(np.percentile(analysis.rms_db, 99.0))
     noise_db = float(np.percentile(analysis.rms_db, 15.0))
@@ -826,6 +830,10 @@ def _activity_region(
         active_start_ms = 0.0
         active_end_ms = analysis.duration_ms
         warnings.append("no_reliable_activity")
+    level_trim: dict[str, float] = {}
+    if level_robust and np.any(active_mask):
+        active_start_ms, active_end_ms, level_trim = _trim_low_level_edges(
+            analysis, peak_db, active_start_ms, active_end_ms)
     periodicity = np.asarray(tracks.get("periodicity", np.zeros(len(analysis.frames))))
     voiced_fraction = float(np.mean(periodicity >= 0.35)) if len(periodicity) else 0.0
     f0 = np.asarray(tracks.get("f0_hz", np.zeros(len(analysis.frames))))
@@ -838,9 +846,33 @@ def _activity_region(
         "activity_peak_range_db": peak_range_db,
         **({"dense_speech_floor_db": dense_floor_db} if dense_floor_db is not None else {}),
         "expected_activity_regions": float(max(1, int(expected_regions))),
+        **level_trim,
         "voiced_frame_fraction": voiced_fraction,
         "median_f0_hz": float(np.median(voiced_f0)) if len(voiced_f0) else 0.0,
     }
+
+
+# Level-robust activity: a take sung softly sits only 20-30 dB above the room/reverb tail that follows
+# it, so the peak-relative threshold (35-38 dB) counts that tail as speech and the decoder stretches the
+# syllables over it (a quiet take: one syllable late from the 3rd on). Speech frames are those within
+# STRONG_RANGE_DB of the peak; a weaker run longer than the margins at either edge is left out.
+LEVEL_ROBUST_STRONG_RANGE_DB = 22.0
+LEVEL_ROBUST_LEAD_MARGIN_MS = 200.0  # an onset consonant before the first strong frame
+LEVEL_ROBUST_TAIL_MARGIN_MS = 150.0  # a coda / release after the last strong frame
+
+
+def _trim_low_level_edges(
+    analysis: _FrameAnalysis, peak_db: float, start_ms: float, end_ms: float,
+) -> tuple[float, float, dict[str, float]]:
+    times = analysis.frame_times_ms
+    inside = (times >= start_ms) & (times <= end_ms)
+    strong = np.flatnonzero(inside & (analysis.rms_db >= peak_db - LEVEL_ROBUST_STRONG_RANGE_DB))
+    if not len(strong):
+        return start_ms, end_ms, {}
+    first, last = float(times[strong[0]]), float(times[strong[-1]])
+    new_start = max(start_ms, first - LEVEL_ROBUST_LEAD_MARGIN_MS)
+    new_end = min(end_ms, last + LEVEL_ROBUST_TAIL_MARGIN_MS)
+    return new_start, new_end, {"level_trim_start_ms": new_start - start_ms, "level_trim_end_ms": end_ms - new_end}
 
 
 def _autocorrelation_pitch(

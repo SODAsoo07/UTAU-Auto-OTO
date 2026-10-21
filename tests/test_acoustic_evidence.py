@@ -184,3 +184,27 @@ def test_dense_speech_activity_floor_keeps_the_softer_first_syllables(tmp_path: 
     assert dense.active_start_ms < 150.0
     assert dense.metadata["dense_speech_floor_db"] < dense.metadata["noise_db"] + 1e-9
     assert dense.feature_config_sha256 != default.feature_config_sha256
+
+
+def test_level_robust_activity_leaves_out_a_soft_takes_room_tail(tmp_path: Path) -> None:
+    # A softly sung take: the hum/reverb after it is only ~25 dB below the singing, so the
+    # peak-relative threshold counts it as speech; the level-robust edges stop at the singing.
+    sample_rate = 44100
+    rng = np.random.default_rng(7)
+    edge = np.zeros(int(0.30 * sample_rate), dtype=np.float32)
+    sung_time = np.arange(int(1.20 * sample_rate), dtype=np.float64) / sample_rate
+    sung = (0.01 * np.sin(2.0 * np.pi * 196.0 * sung_time)).astype(np.float32)
+    tail_time = np.arange(int(0.60 * sample_rate), dtype=np.float64) / sample_rate
+    tail = (0.0006 * np.sin(2.0 * np.pi * 120.0 * tail_time)
+            + 0.0003 * rng.standard_normal(len(tail_time))).astype(np.float32)
+    wav = tmp_path / "soft_take.wav"
+    sf.write(wav, np.concatenate((edge, sung, tail, edge)), sample_rate)
+    options = dict(internal_sample_rate=44100, convert_to_mono=True, resampler="soxr_hq", expected_activity_regions=6)
+
+    plain = extract_acoustic_evidence(wav, **options)
+    robust = extract_acoustic_evidence(wav, **options, level_robust_activity=True)
+
+    assert plain.active_end_ms > 1900.0  # the tail counted as speech
+    assert 1500.0 <= robust.active_end_ms <= 1700.0  # end of singing (1500 ms) + the coda margin
+    assert robust.metadata["level_trim_end_ms"] > 200.0
+    assert abs(robust.active_start_ms - plain.active_start_ms) < 1.0  # nothing weak before the singing

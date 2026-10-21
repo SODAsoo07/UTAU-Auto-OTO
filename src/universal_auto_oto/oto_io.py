@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import unicodedata
@@ -127,6 +128,35 @@ def write_lines_atomic(
         if temp_path.exists():
             temp_path.unlink()
     return backup
+
+
+_HANGUL_SYLLABLES = re.compile(r"[가-힣]")
+# Kana and kanji (夜, 息, 吸 in take names), ASCII and separators; at least one kana or kanji.
+_REPAIRED_KANA = re.compile(r"[ぁ-ゖァ-ヺー・々一-鿿 A-Za-z0-9_#\-']*[ぁ-ゖァ-ヺ一-鿿][ぁ-ゖァ-ヺー・々一-鿿 A-Za-z0-9_#\-']*")
+
+
+def _is_ks_x_1001_hangul(syllable: str) -> bool:
+    """True for the 2,350 everyday syllables (cp949 lead B0-C8, trail A1-FE); the rest are UHC extensions."""
+    lead, trail = syllable.encode("cp949")
+    return 0xB0 <= lead <= 0xC8 and 0xA1 <= trail <= 0xFE
+
+
+def repair_kana_mojibake(alias: str) -> str | None:
+    """Kana saved as cp932 and read back as cp949 shows up as rare Hangul ("- 궭" is "- ち", "뽭" is "夜").
+
+    Returns the repaired text when every Hangul syllable is a rare UHC extension syllable and the
+    bytes read as cp932 give kana/kanji text, else None. Real Korean aliases use everyday syllables
+    (KS X 1001: 가, 카, 쌍 ...), so they are left alone.
+    """
+
+    syllables = _HANGUL_SYLLABLES.findall(alias)
+    if not syllables or any(_is_ks_x_1001_hangul(syllable) for syllable in syllables):
+        return None
+    try:
+        repaired = alias.encode("cp949").decode("cp932")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return None
+    return repaired if _REPAIRED_KANA.fullmatch(repaired) else None
 
 
 def normalize_alias_suffix(suffix: str | None) -> str:

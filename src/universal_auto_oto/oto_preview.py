@@ -44,9 +44,9 @@ SPLIT_COLORS = {"clean": "#2e7d32", "review": "#ef6c00", "high_risk": "#c62828",
                 "unknown": "#546e7a"}
 SPLIT_TEXT_COLORS = {"clean": "#81c784", "review": "#ffb74d", "high_risk": "#ff6e6e", "unrated": "#a7b0bc",
                      "unknown": "#90a4ae"}
-# Rows of formats without a fitted risk model (only Korean VCV/CVC have one, row_risk.py) are all
+# Rows of formats without a fitted risk model (only Korean VCV/CVC/CVVC have one, row_risk.py) are all
 # written to the review file; that means "not judged", not "risky", so they get their own state.
-UNRATED_NOTE = "위험도 모델이 없는 형식(한국어 VCV·CVC 외)이라 자동 판정하지 않았습니다"
+UNRATED_NOTE = "위험도 모델이 없는 형식(한국어 VCV·CVC·CVVC 외)이라 자동 판정하지 않았습니다"
 # The generator UI's dark palette (oto_generator_ui.PANEL_BG etc.).
 DARK = {
     "bg": "#1F232B",

@@ -33,6 +33,10 @@ _PALATAL_ONSETS = {"ch", "sh", "j"}
 def parse_kana_slots(text: str) -> list[tuple[str, ...]]:
     """Return one phone tuple per Japanese mora-like filename slot."""
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
+    # A trailing kanji tag names the take's variant (_ああいあうえあ夜 / 昼), not a mora;
+    # kanji with a meaning here (息 = breath) are kept.
+    while normalized and "一" <= normalized[-1] <= "鿿" and normalized[-1] not in _BASE_PHONES:
+        normalized = normalized[:-1]
     if not normalized:
         return []
     slots: list[list[str]] = []

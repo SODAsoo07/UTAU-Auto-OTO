@@ -78,7 +78,12 @@ STYLE_FIELDS = (
 # off for other languages; pause-aware gaps, the exact (unpruned) HSMM search, the
 # dense-speech activity floor, the three-pass phone identity templates, held syllabic
 # nasals, filename pause states and the VC/release policies apply to all.
-RECOMMENDED_DEVELOPMENT_PROFILE = "cvvc_slot_rhythm_v16"
+# v17 adds level-robust activity: a softly recorded take's room/reverb tail is not taken for
+# speech (run_outputs/row_risk_20261019/eval_level.txt: quiet folders 55% -> 33% rows off by
+# > 80 ms, no bank worse in eval_all_v17.txt).
+# v18 adds the speech span limit (user's idea, run_outputs/row_risk_20261019/variant_span.txt:
+# 13.49% -> 13.10% rows off by > 80 ms on 18 folders, syllable shifts 7.82% -> 7.46%).
+RECOMMENDED_DEVELOPMENT_PROFILE = "cvvc_slot_rhythm_v19"
 RECOMMENDED_VC_END_POLICY = "consonant"
 RECOMMENDED_RELEASE_PRE_POLICY = "vowel_end"
 # Rows the parser cannot bind to a recording are left out and listed instead
@@ -115,6 +120,7 @@ CREDIT_LINES = (
     "펜촉 ianharuesaone",
     "다유 DAU_Multiverse",
     "집냥 Blue",
+    "다다쿤 DADAKUN",
 )
 
 # Colors reused from the existing AutoOTO light/dark palette.
@@ -442,6 +448,14 @@ def tempo_log_lines(payload: Mapping[str, object]) -> list[str]:
     return []
 
 
+def encoding_log_lines(payload: Mapping[str, object]) -> list[str]:
+    fallback = payload.get("output_encoding_fallback")
+    if not isinstance(fallback, Mapping):
+        return []
+    return [t("[주의] 파일 이름이나 별칭을 {requested}로 저장할 수 없어 oto.ini를 UTF-8로 저장했습니다.",
+              requested=fallback.get("requested"))]
+
+
 def alias_generation_log_lines(payload: Mapping[str, object]) -> list[str]:
     count = int(payload.get("generated_alias_wavs", 0) or 0)
     if count <= 0:
@@ -497,6 +511,7 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
         "kept_base_rows": int(report.get("kept_base_rows", 0) or 0),
         "excluded_alias_rows_csv": report.get("excluded_alias_rows_csv"),
         "recording_tempo": report.get("recording_tempo"),
+        "output_encoding_fallback": report.get("output_encoding_fallback"),
         "generated_alias_wavs": int(report.get("generated_alias_wavs", 0) or 0),
         "alias_generation_skipped": list(report.get("alias_generation_skipped", []) or [])[:EXCLUDED_ROW_LOG_SAMPLES],
         "alias_generation_skipped_count": len(report.get("alias_generation_skipped", []) or []),
@@ -1578,7 +1593,8 @@ def launch_oto_generator_ui(
                         self._append_log(
                             json.dumps(dict(result.payload), ensure_ascii=False, indent=2, default=str)
                         )
-                        for line in (*tempo_log_lines(result.payload), *alias_generation_log_lines(result.payload)):
+                        for line in (*tempo_log_lines(result.payload), *alias_generation_log_lines(result.payload),
+                                     *encoding_log_lines(result.payload)):
                             self._append_log(line)
                         for item in result.payload.get("results", []) or []:
                             state = t("완료") if item.get("ok") else t("실패: {error}", error=item.get("error"))

@@ -1,6 +1,38 @@
 schema_version: 1
 template_set_id: builtin_oto_templates_v1
 templates:
+  long_vowel:
+    role: v
+    anchors:
+      offset_abs: phone[0].start
+      pre_abs: fallback(phone[0].japanese_long_pre, phone[0].start + 100)
+      overlap_abs: max(offset_abs, min(phone[0].start + 33, pre_abs - 10))
+      fixed_abs: fallback(phone[0].japanese_long_fixed, phone[0].start + 300)
+      cutoff_abs: phone[0].end - 15
+  vc_trill:
+    role: vc
+    anchors:
+      offset_abs: fallback(phone[0].vowel_stable_start, phone[0].start)
+      overlap_abs: max(offset_abs, phone[1].start)
+      pre_abs: phone[2].start
+      fixed_abs: phone[2].end
+      cutoff_abs: phone[2].end + 5
+  cv_trill:
+    role: cv
+    anchors:
+      offset_abs: phone[0].start
+      overlap_abs: phone[0].start
+      pre_abs: phone[1].start
+      fixed_abs: fallback(phone[2].vowel_stable_start, phone[2].start)
+      cutoff_abs: phone[2].end - 15
+  vc_nasal_variant:
+    role: vc
+    anchors:
+      offset_abs: max(phone[0].start, phone[0].end - 100)
+      overlap_abs: max(offset_abs, phone[1].start - 45)
+      pre_abs: phone[1].start
+      fixed_abs: min(phone[1].start + 70, phone[1].end - 10)
+      cutoff_abs: min(phone[1].start + 180, phone[2].end - 8)
   v:
     role: v
     anchors:
