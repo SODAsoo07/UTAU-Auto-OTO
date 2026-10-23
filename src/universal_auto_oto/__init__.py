@@ -1,6 +1,6 @@
 """Universal Auto OTO acoustic-first runtime."""
 
-__version__ = "5.3.0b1"
+__version__ = "5.3.0"
 
 
 def display_version(version: str = __version__) -> str:
