@@ -50,6 +50,7 @@ from .hsmm_decoder import (
     decode_segmental_hsmm_coarse_to_refine,
     decode_segmental_hsmm_exact,
 )
+from .pack_landmarks import PACK_RUMBLE_HIGHPASS_HZ
 from .project import ProjectSpec
 from .posterior_model import apply_posterior_model, load_posterior_model
 from .sequence_compiler import compile_recording_states, compiled_state_inference_provenance
@@ -200,6 +201,8 @@ def align_recording(
             if recording.phones and recording.phones[0] in project.inventory else False
         ),
         dense_speech_activity_floor=dense_speech_activity_floor,
+        # Language-pack recordings drop sub-bass rumble; Korean/Japanese routes keep the raw signal.
+        **({"rumble_highpass_hz": PACK_RUMBLE_HIGHPASS_HZ} if recording.metadata.get("language_pack") else {}),
         level_robust_activity=level_robust_activity,
     )
     if requested == "acoustic_heuristic_v1":

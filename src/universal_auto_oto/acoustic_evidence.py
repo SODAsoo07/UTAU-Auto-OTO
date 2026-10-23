@@ -12,7 +12,7 @@ from typing import Mapping
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly
+from scipy.signal import butter, resample_poly, sosfiltfilt
 
 from .audio import _robust_normalize, _select_main_activity_region, _smooth, file_sha256
 
@@ -81,6 +81,7 @@ def extract_acoustic_evidence(
     evidence_provider: str = "cuda",
     preserve_leading_silence: bool = False,
     dense_speech_activity_floor: bool = False,
+    rumble_highpass_hz: float = 0.0,
     level_robust_activity: bool = False,
 ) -> AcousticEvidence:
     backend = str(feature_backend).strip().casefold()
@@ -96,6 +97,7 @@ def extract_acoustic_evidence(
         frame_ms=frame_ms,
         hop_ms=5.0,
         canonicalize_digital_padding=(backend == PADDING_STABLE_FEATURE_BACKEND_ID and not preserve_leading_silence),
+        rumble_highpass_hz=rumble_highpass_hz,
     )
     if backend == PADDING_STABLE_FEATURE_BACKEND_ID:
         origin_ms = float(analysis.frame_times_ms[0]) - analysis.frame_ms / 2.0
@@ -167,6 +169,8 @@ def extract_acoustic_evidence(
         "expected_activity_regions": expected_activity_regions,
         **backend_details,
         **padding_details,
+        **({"rumble_highpass_hz": float(rumble_highpass_hz), "rumble_highpass_filter": "butterworth4_zero_phase"}
+           if rumble_highpass_hz > 0.0 else {}),
     }
     config_hash = hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -292,6 +296,7 @@ def _frame_analysis(
     frame_ms: float,
     hop_ms: float,
     canonicalize_digital_padding: bool = False,
+    rumble_highpass_hz: float = 0.0,
 ) -> _FrameAnalysis:
     audio, source_sample_rate = sf.read(path, dtype="float32", always_2d=True)
     first = 0
@@ -309,6 +314,7 @@ def _frame_analysis(
         hop_ms=hop_ms,
         time_offset_ms=first * 1000.0 / source_sample_rate,
         source_label=str(path),
+        rumble_highpass_hz=rumble_highpass_hz,
     )
     return replace(analysis, duration_ms=len(audio) * 1000.0 / source_sample_rate)
 
@@ -356,6 +362,7 @@ def _frame_analysis_samples(
     hop_ms: float,
     time_offset_ms: float,
     source_label: str,
+    rumble_highpass_hz: float = 0.0,
 ) -> _FrameAnalysis:
     if audio.size == 0:
         raise ValueError(f"빈 WAV입니다: {source_label}")
@@ -374,6 +381,9 @@ def _frame_analysis_samples(
         resample_method = "scipy.signal.resample_poly"
     else:
         resample_method = "identity"
+    if rumble_highpass_hz > 0.0:
+        # Sub-bass rumble (mic bumps, wind) is loud in the RMS but carries no speech.
+        mono = sosfiltfilt(butter(4, float(rumble_highpass_hz), "highpass", fs=analysis_sample_rate, output="sos"), mono)
 
     frame_length = max(128, int(round(analysis_sample_rate * frame_ms / 1000.0)))
     hop_length = max(32, int(round(analysis_sample_rate * hop_ms / 1000.0)))

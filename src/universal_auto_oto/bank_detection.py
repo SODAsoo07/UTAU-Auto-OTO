@@ -172,6 +172,31 @@ def detect_format_from_aliases(aliases: Sequence[str], *, language: str | None =
     return FormatDetection(None, "low", "base_oto", (*evidence, t("별칭 패턴이 어느 형식과도 뚜렷하게 맞지 않습니다.")), dict(counts))
 
 
+def detect_format_from_language_pack(
+    wav_names: Sequence[str], aliases: Sequence[str], *, language: str | None
+) -> FormatDetection | None:
+    """Languages served by a language pack: the pack whose symbols read the names best."""
+
+    from .generic_alias_binding import parse_pack_alias
+    from .language_pack import builtin_language_packs
+
+    packs = [pack for pack in builtin_language_packs() if (language or "").casefold() in pack.languages]
+    if not packs:
+        return None
+    scored = []
+    for pack in packs:
+        files = sum(1 for name in wav_names if pack.parse_filename(name) is not None)
+        read = sum(1 for alias in aliases if parse_pack_alias(pack, alias) is not None)
+        share = (files + read) / max(1, len(wav_names) + len(aliases))
+        scored.append((share, files, read, pack))
+    share, files, read, pack = max(scored, key=lambda item: item[0])
+    format_type = sorted(pack.formats)[0]
+    evidence = (f"언어팩 {pack.display_name}: 파일 이름 {files}/{len(wav_names)}개, 별칭 {read}/{len(aliases)}개를 읽었습니다.",)
+    if share < 0.5:
+        return FormatDetection(None, "low", "language_pack", (*evidence, "언어팩 표기와 맞지 않습니다. 형식을 직접 선택하세요."))
+    return FormatDetection(format_type, "high" if share >= 0.9 else "medium", "language_pack", evidence)
+
+
 def detect_format_from_folder_name(bank: Path) -> FormatDetection | None:
     for name in (bank.name, bank.parent.name):
         normalized = unicodedata.normalize("NFKC", name)
@@ -227,6 +252,9 @@ def detect_format(
 ) -> FormatDetection:
     """Detect the format; the existing oto.ini wins, then single-syllable files, then the folder name."""
 
+    from_pack = detect_format_from_language_pack(wav_names, base_aliases or (), language=language)
+    if from_pack is not None:
+        return from_pack
     if base_aliases:
         from_oto = detect_format_from_aliases(base_aliases, language=language)
         if from_oto.format is not None:

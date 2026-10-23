@@ -30,6 +30,15 @@ SPECTROGRAM_HOP_MS = 4.0
 WAVEFORM_ENVELOPE_COLUMNS = 32768
 ROW_CONTEXT_MS = 120.0
 HIGH_RISK = 0.5  # rows above this probability of a large pre error are drawn red, not orange
+# Language-pack rows are ranked instead (pack_row_risk.py): the riskiest 10% carry pack_row_risk_first.
+RISK_MARKERS = ("row_risk_", "pack_row_risk_")
+RISK_HINT_TEXT = {
+    "pack_risk_off_tempo": "박자 이탈",
+    "pack_risk_phone_length": "음소 길이 이상",
+    "pack_risk_silence_or_noise": "무음·잡음 구간",
+    "pack_risk_unusual_position": "같은 모양 행과 위치가 다름",
+    "pack_risk_landmark_fallback": "랜드마크 대체값 사용",
+}
 
 # UTAU setParam convention: blanks shaded blue, fixed range pink, pre red, overlap green.
 PARAM_COLORS = {
@@ -44,9 +53,10 @@ SPLIT_COLORS = {"clean": "#2e7d32", "review": "#ef6c00", "high_risk": "#c62828",
                 "unknown": "#546e7a"}
 SPLIT_TEXT_COLORS = {"clean": "#81c784", "review": "#ffb74d", "high_risk": "#ff6e6e", "unrated": "#a7b0bc",
                      "unknown": "#90a4ae"}
-# Rows of formats without a fitted risk model (only Korean VCV/CVC/CVVC have one, row_risk.py) are all
-# written to the review file; that means "not judged", not "risky", so they get their own state.
-UNRATED_NOTE = "위험도 모델이 없는 형식(한국어 VCV·CVC·CVVC 외)이라 자동 판정하지 않았습니다"
+# Rows of formats without a fitted risk model (Korean VCV/CVC/CVVC: row_risk.py; English VCCV:
+# pack_row_risk.py) are all written to the review file; that means "not judged", not "risky", so
+# they get their own state.
+UNRATED_NOTE = "위험도 모델이 없는 형식(한국어 VCV·CVC·CVVC, 영어 VCCV 외)이라 자동 판정하지 않았습니다"
 # The generator UI's dark palette (oto_generator_ui.PANEL_BG etc.).
 DARK = {
     "bg": "#1F232B",
@@ -89,13 +99,14 @@ class OtoPreviewRow:
 @dataclass(frozen=True)
 class RowStatus:
     split: str  # clean / review / unrated / unknown
-    risk: float | None = None  # P(|pre error| > 80 ms) when the row went through row_risk.py
+    risk: float | None = None  # P(large pre error) when the row went through row_risk.py or pack_row_risk.py
     confidence: float | None = None
     reasons: tuple[str, ...] = ()
 
     @property
     def color_key(self) -> str:
-        if self.split == "review" and self.risk is not None and self.risk > HIGH_RISK:
+        if self.split == "review" and self.risk is not None and (self.risk > HIGH_RISK
+                                                                  or "pack_row_risk_first" in self.reasons):
             return "high_risk"
         return self.split if self.split in SPLIT_COLORS else "unknown"
 
@@ -199,8 +210,8 @@ def load_row_statuses(oto_path: Path, rows: Sequence[OtoPreviewRow]) -> list[Row
         reasons = tuple(str(item) for item in entry.get("reasons", ()) or ())
         confidence = entry.get("confidence")
         confidence = float(confidence) if isinstance(confidence, (int, float)) else None
-        # row_risk.py stores confidence = 1 - risk on the rows it scored.
-        risked = any(reason.startswith("row_risk_") for reason in reasons)
+        # row_risk.py and pack_row_risk.py store confidence = 1 - risk on the rows they scored.
+        risked = any(reason.startswith(RISK_MARKERS) for reason in reasons)
         risk = 1.0 - confidence if risked and confidence is not None else None
         row_split = split.get(key) or str(entry.get("split") or "unknown")
         unrated = "uncalibrated_confidence" in reasons if entry else all_review
@@ -342,7 +353,8 @@ def format_row_details(row: OtoPreviewRow, status: RowStatus, markers: OtoMarker
         state += t("  |  절대 위치: 선행발성 {pre:.1f} ms, 끝 {end:.1f} ms", pre=markers.preutterance,
                    end=markers.cutoff_end)
     parts.append(state)
-    shown = [reason for reason in status.reasons if not reason.startswith("row_risk_")]
+    shown = [t(RISK_HINT_TEXT[reason]) if reason in RISK_HINT_TEXT else reason
+             for reason in status.reasons if not reason.startswith(RISK_MARKERS)]
     if shown:
         parts.append(t("근거: {reasons}", reasons=", ".join(shown)))
     return "\n".join(parts)

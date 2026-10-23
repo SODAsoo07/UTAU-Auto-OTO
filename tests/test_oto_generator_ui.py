@@ -114,21 +114,25 @@ def test_product_ui_keeps_legacy_credits_and_explains_review_rows() -> None:
 def test_product_ui_applies_the_recommended_generation_settings(tmp_path: Path) -> None:
     from universal_auto_oto.generator import DEVELOPMENT_ALIGNMENT_PROFILES
     from universal_auto_oto.oto_generator_ui import (
-        RECOMMENDED_DEVELOPMENT_PROFILE, RECOMMENDED_RELEASE_PRE_POLICY, RECOMMENDED_VC_END_POLICY,
+        RECOMMENDED_DEVELOPMENT_PROFILE, RECOMMENDED_RELEASE_PRE_POLICY, RECOMMENDED_STABLE_WINDOW_POLICY,
+        RECOMMENDED_VC_END_POLICY,
     )
     options = build_product_generation_options(bank=tmp_path / "bank", output=tmp_path / "output")
     assert options.development_alignment_profile == RECOMMENDED_DEVELOPMENT_PROFILE == "cvvc_slot_rhythm_v19"
     assert RECOMMENDED_DEVELOPMENT_PROFILE in DEVELOPMENT_ALIGNMENT_PROFILES
     assert options.vc_end_policy == RECOMMENDED_VC_END_POLICY == "consonant"
     assert options.release_pre_policy == RECOMMENDED_RELEASE_PRE_POLICY == "vowel_end"
+    assert options.stable_window_policy == RECOMMENDED_STABLE_WINDOW_POLICY == "stable"
     # The general builder keeps the plain defaults for other callers.
     plain = build_generation_options(bank=tmp_path / "bank", output=tmp_path / "output", backend="routed_hsmm")
-    assert (plain.development_alignment_profile, plain.vc_end_policy, plain.release_pre_policy) == (None, "template", "template")
+    assert (plain.development_alignment_profile, plain.vc_end_policy, plain.release_pre_policy,
+            plain.stable_window_policy) == (None, "template", "template", "template")
 
 
 def test_generation_summary_reports_the_settings_used(tmp_path: Path) -> None:
     report = {"provenance": {"development_alignment_profile": "cvvc_slot_rhythm_v16",
-                             "vc_end_policy": "consonant", "release_pre_policy": "vowel_end"}}
+                             "vc_end_policy": "consonant", "release_pre_policy": "vowel_end",
+                             "stable_window_policy": "stable"}}
     summary = summarize_generation_result(report, output=tmp_path)
     assert summary["generation_settings"] == report["provenance"]
 
@@ -241,7 +245,8 @@ def test_product_ui_auto_format_uses_detection_and_generates_aliases_without_oto
 
 
 def test_product_ui_bpm_and_advanced_settings(tmp_path: Path) -> None:
-    from universal_auto_oto.oto_generator_ui import RELEASE_PRE_CHOICES, VC_END_CHOICES, build_oto_style, parse_bpm
+    from universal_auto_oto.oto_generator_ui import (RELEASE_PRE_CHOICES, STABLE_WINDOW_CHOICES, VC_END_CHOICES,
+                                                     build_oto_style, parse_bpm)
 
     assert parse_bpm("") is None
     assert parse_bpm(" 128 ") == 128.0
@@ -256,10 +261,12 @@ def test_product_ui_bpm_and_advanced_settings(tmp_path: Path) -> None:
     options = build_product_generation_options(
         bank=tmp_path / "bank", output=tmp_path / "out", bpm="120", estimate_bpm=True, oto_style=style,
         vc_end_choice=list(VC_END_CHOICES)[1], release_pre_choice=list(RELEASE_PRE_CHOICES)[1],
+        stable_window_choice=list(STABLE_WINDOW_CHOICES)[1],
     )
     assert options.bpm == 120.0 and options.estimate_bpm is True
     assert options.oto_style == style
     assert options.vc_end_policy == "template" and options.release_pre_policy == "template"
+    assert options.stable_window_policy == "template"
     default = build_product_generation_options(bank=tmp_path / "bank", output=tmp_path / "out", oto_style=build_oto_style({}))
     assert default.oto_style is None
 

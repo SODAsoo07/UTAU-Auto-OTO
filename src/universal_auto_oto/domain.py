@@ -149,6 +149,11 @@ class AliasPlan:
     template: str
     role: str
     overrides: Mapping[str, object] = field(default_factory=dict)
+    # Relative phone index where each space-separated alias group starts
+    # (language-pack aliases only; templates read it as group_start[k]).
+    group_starts: tuple[int, ...] = ()
+    # Labeler style: ms added to the evaluated template anchors (offset_abs, ...).
+    anchor_shifts: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

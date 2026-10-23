@@ -107,6 +107,12 @@ def load_template_set(project: ProjectSpec) -> TemplateSet:
             source_hashes.append(definition.source_sha256)
             sources.append(definition.source)
             continue
+        if requested.startswith("pack:"):
+            definition = _pack_template(requested)
+            _insert_template(all_templates, requested, definition)
+            source_hashes.append(definition.source_sha256)
+            sources.append(definition.source)
+            continue
         if not requested.startswith("file:"):
             raise TemplateError(f"template source prefix가 유효하지 않습니다: {requested}")
         path = (project.root / requested[5:]).resolve()
@@ -177,6 +183,10 @@ def render_project_alias(
         raise TemplateError(f"AliasPlan phone_indices가 비어 있습니다: {plan.alias}")
     evaluator = phone_views[0].evaluator
     raw_values = _evaluate_anchor_graph(expressions, evaluator)
+    for name, shift in plan.anchor_shifts.items():
+        if name not in REQUIRED_ANCHORS:
+            raise TemplateError(f"지원하지 않는 style anchor입니다: {name}")
+        raw_values[name] += float(shift)
     calibrated_values = dict(raw_values)
     calibration_trace: dict[str, object] = {"enabled": False, "applied": False}
     calibration_bank_backoff = False
@@ -379,6 +389,23 @@ def _load_template_yaml(text: str, source: str) -> dict[str, TemplateDefinition]
     return result
 
 
+def _pack_template(requested: str) -> TemplateDefinition:
+    """pack:<pack_id>:<template_id> -> a template defined inside a language pack."""
+    from .language_pack import LanguagePackError, language_pack_by_id
+
+    try:
+        _, pack_id, template_id = requested.split(":", 2)
+        pack = language_pack_by_id(pack_id)
+    except (ValueError, LanguagePackError) as exc:
+        raise TemplateError(f"language pack template을 찾을 수 없습니다: {requested}") from exc
+    if template_id not in pack.templates:
+        raise TemplateError(f"language pack에 없는 template입니다: {requested}")
+    text = yaml.safe_dump({"schema_version": 1, "templates": {template_id: dict(pack.templates[template_id])}},
+                          allow_unicode=True, sort_keys=True)
+    definition = _load_template_yaml(text, pack.source)[template_id]
+    return replace(definition, source_sha256=pack.sha256)
+
+
 def _resolve_template(name: str, templates: TemplateSet) -> TemplateDefinition:
     candidates = [name]
     if name.startswith("builtin:"):
@@ -515,14 +542,28 @@ class _PhoneAccessor:
     values: Sequence[_PhoneView]
 
     def get(self, index: int) -> _PhoneView:
+        # Negative indices count from the alias' last phone (phone[-1]).
+        if index < 0:
+            index += len(self.values)
         if index < 0 or index >= len(self.values):
             return _PhoneView(None, {}, {}, self.values[0].evaluator if self.values else _ExpressionEvaluator(()))
         return self.values[index]
 
 
+def _nucleus_view(phones: Sequence[_PhoneView]) -> _PhoneView:
+    """First vowel/syllabic phone of the alias (missing when it has none)."""
+    for view in phones:
+        if view.features.get("syllabic") is True or view.features.get("vowel_like") is True:
+            return view
+    return _PhoneView(None, {}, {}, phones[0].evaluator if phones else _ExpressionEvaluator(()))
+
+
 class _ExpressionEvaluator:
     def __init__(self, phones: Sequence[_PhoneView]):
         self.phones = tuple(phones)
+        # Relative phone index where each space-separated alias group starts.
+        self.group_starts: tuple[int, ...] = ()
+        self.context: dict[str, _PhoneView] = {}
         self.referenced_landmarks: set[str] = set()
         self.missing_landmarks: set[str] = set()
         self.fallback_count = 0
@@ -537,6 +578,15 @@ class _ExpressionEvaluator:
         if isinstance(node, ast.Name):
             if node.id == "phone":
                 return _PhoneAccessor(self.phones)
+            if node.id == "nucleus":
+                return _nucleus_view(self.phones)
+            if node.id in {"before", "after"}:
+                # The recording's phone just outside the alias (missing at the file edges).
+                return self.context.get(node.id) or _PhoneView(None, {}, {}, self)
+            if node.id == "group_start":
+                empty = _PhoneView(None, {}, {}, self)
+                return _PhoneAccessor(tuple(self.phones[i] if 0 <= i < len(self.phones) else empty
+                                            for i in self.group_starts))
             if node.id in anchors:
                 return anchors[node.id]
             if node.id in {"true", "True"}:
@@ -547,6 +597,9 @@ class _ExpressionEvaluator:
         if isinstance(node, ast.Subscript):
             value = self.evaluate(node.value, anchors)
             index = self.evaluate(node.slice, anchors)
+            if (isinstance(node.slice, ast.UnaryOp) and isinstance(node.slice.op, ast.USub)
+                    and isinstance(node.slice.operand, ast.Constant) and type(node.slice.operand.value) is int):
+                index = -node.slice.operand.value
             if not isinstance(value, _PhoneAccessor) or isinstance(index, bool) or not isinstance(index, int):
                 raise TemplateError("phone[정수] subscript만 허용합니다")
             return value.get(index)
@@ -666,20 +719,26 @@ def _phone_views(
     for landmark in timeline.landmarks:
         if landmark.phone_index is not None:
             landmarks.setdefault(landmark.phone_index, {})[landmark.label] = landmark.time_ms
+    def view(phone_index: int) -> _PhoneView:
+        return _PhoneView(
+            segment=by_index.get(phone_index),
+            features=project.inventory[recording.phones[phone_index]].features,
+            landmarks=landmarks.get(phone_index, {}),
+            evaluator=evaluator,
+        )
+
     views: list[_PhoneView] = []
     for phone_index in plan.phone_indices:
         if phone_index < 0 or phone_index >= len(recording.phones):
             raise TemplateError(f"AliasPlan phone index 범위를 벗어났습니다: {phone_index}")
-        phone_id = recording.phones[phone_index]
-        views.append(
-            _PhoneView(
-                segment=by_index.get(phone_index),
-                features=project.inventory[phone_id].features,
-                landmarks=landmarks.get(phone_index, {}),
-                evaluator=evaluator,
-            )
-        )
+        views.append(view(phone_index))
     evaluator.phones = tuple(views)
+    evaluator.group_starts = tuple(plan.group_starts)
+    first, last = min(plan.phone_indices, default=0), max(plan.phone_indices, default=-1)
+    if first > 0:
+        evaluator.context["before"] = view(first - 1)
+    if 0 <= last < len(recording.phones) - 1:
+        evaluator.context["after"] = view(last + 1)
     return tuple(views)
 
 

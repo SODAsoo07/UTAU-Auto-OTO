@@ -235,6 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="routed_hsmm only: vowel_end puts the preutterance of '-' releases at the vowel's end.",
     )
     generate_parser.add_argument(
+        "--stable-window-policy",
+        choices=("template", "stable"),
+        default="template",
+        help="routed_hsmm only: stable keeps fixed/cutoff on steady level and pitch and shortens VC vowel leads.",
+    )
+    generate_parser.add_argument(
         "--oto-style",
         type=Path,
         help="JSON preset of advanced OTO style settings (overlap ratios, preutterance shifts, margins).",
@@ -262,8 +268,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="routed_hsmm without --base-oto: write the format's alias list (CV, VC, VCV) from the file names.",
     )
     generate_parser.add_argument("--force", action="store_true", help="비어 있지 않은 출력 폴더의 산출물을 교체합니다")
-    generate_parser.add_argument("--format-hint", choices=("cv", "cvc", "cvvc", "vcv"))
-    generate_parser.add_argument("--language-hint", choices=("korean", "japanese"))
+    generate_parser.add_argument(
+        "--style-profile",
+        help="Language-pack banks: a style profile from fit-style, or 'none' for templates only (default: the pack's style).",
+    )
+    generate_parser.add_argument("--format-hint", choices=("cv", "cvc", "cvvc", "vcv", "vccv"))
+    generate_parser.add_argument("--language-hint", choices=("korean", "japanese", "english"))
     generate_parser.add_argument("--timing-profile", type=Path)
     generate_parser.add_argument("--no-builtin-profile", action="store_true")
     generate_parser.add_argument(
@@ -299,6 +309,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Exact-WAV review-only occurrence anchors for a development constrained re-decode; never trains or promotes.",
     )
+
+    fit_style_parser = subparsers.add_parser(
+        "fit-style",
+        help="Learn a labeler's timing style (language-pack banks) from banks they already timed by hand.",
+    )
+    fit_style_parser.add_argument("--bank", required=True, type=Path, action="append",
+                                  help="Folder with WAVs and the hand-made oto.ini; repeat for several folders.")
+    fit_style_parser.add_argument("--output", required=True, type=Path, help="Style profile YAML to write.")
+    fit_style_parser.add_argument("--format-hint", required=True)
+    fit_style_parser.add_argument("--language-hint", required=True)
+    fit_style_parser.add_argument("--work-dir", type=Path, help="Keep the style-free generations here.")
+    fit_style_parser.add_argument("--workers", type=int, default=0)
+    fit_style_parser.add_argument("--min-rows", type=int, default=4)
+
+    sample_style_parser = subparsers.add_parser(
+        "fit-style-sample",
+        help="Learn a labeler style from the rows listed in style_sample.csv after checking them in the generated oto.ini.",
+    )
+    sample_style_parser.add_argument("--sample", required=True, type=Path,
+                                     help="style_sample.csv, or a generation output folder (batch outputs are searched).")
+    sample_style_parser.add_argument("--output", required=True, type=Path, help="Style profile YAML to write.")
+    sample_style_parser.add_argument("--edited", type=Path,
+                                     help="Checked oto.ini (or a folder laid out like the output); default: the generated files.")
 
     oto_ui_parser = subparsers.add_parser(
         "oto-ui",
@@ -623,15 +656,37 @@ def main(argv: list[str] | None = None) -> int:
                     unmapped_alias_policy=args.unmapped_alias_policy,
                     vc_end_policy=args.vc_end_policy,
                     release_pre_policy=args.release_pre_policy,
+                    stable_window_policy=args.stable_window_policy,
                     generate_missing_aliases=args.generate_aliases,
                     bpm=args.bpm,
                     estimate_bpm=args.estimate_bpm,
                     oto_style=load_oto_style(args.oto_style) if args.oto_style else None,
+                    style_profile=args.style_profile,
                     alias_suffix=args.alias_suffix,
                     unmapped_row_output="keep_base" if args.keep_base_values else "exclude",
                     alignment_workers=args.workers,
                 )
             )
+        elif args.command == "fit-style":
+            from .style_fitting import fit_style_from_banks
+
+            result = fit_style_from_banks(
+                args.bank, output=args.output, format_hint=args.format_hint, language_hint=args.language_hint,
+                work_dir=args.work_dir, workers=args.workers, min_rows=args.min_rows,
+            )
+            for warning in result.get("warnings", ()):
+                if warning.get("code") == "template_like_reference":
+                    print(f"WARNING: the reference oto.ini has only {warning['distinct_offsets']} distinct offsets over "
+                          f"{warning['rows']} rows; if it is an unadjusted reclist template, the fitted style is wrong.",
+                          file=sys.stderr)
+        elif args.command == "fit-style-sample":
+            from .style_sample import fit_style_from_sample
+
+            from .style_sample import find_style_samples
+
+            samples = find_style_samples(args.sample) if args.sample.is_dir() else [args.sample]
+            result = fit_style_from_sample(samples, args.output, edited=args.edited,
+                                           root=args.sample if args.sample.is_dir() else None)
         elif args.command == "oto-ui":
             result = launch_oto_generator_ui(initial_bank=args.bank, initial_output=args.output)
         elif args.command == "validate-oto":

@@ -31,6 +31,8 @@ from .renderer import force_review, render_alias
 from .timing_profile import BUILTIN_PROFILE_ID, load_timing_profile, select_timing_profile
 from .tempo import MAX_BPM, MIN_BPM, TempoEstimate, beats_for_period, bpm_to_period_ms, estimate_tempo
 from .voicebank_project_adapter import VoicebankReviewRequired, build_routed_voicebank_project, parse_filename_phone_slots
+from .language_pack import find_language_pack
+from .pack_style import NO_STYLE, load_style_profile
 
 
 DEVELOPMENT_ALIGNMENT_PROFILES = {
@@ -232,11 +234,17 @@ class GenerationOptions:
     vc_end_policy: str = "template"
     # "vowel_end" puts '-' release preutterances at the vowel's end (hand-made reference convention).
     release_pre_policy: str = "template"
+    # "stable" keeps fixed/cutoff on audio with steady level and pitch and shortens VC vowel leads
+    # (stable_window.py); "template" keeps the template's fixed and cutoff.
+    stable_window_policy: str = "template"
     # Without a base oto.ini, write the format's alias list from the file names
     # (alias_generation.py) instead of one CV row per syllable.
     generate_missing_aliases: bool = False
     # Advanced settings: overlap ratios, preutterance shifts, fixed/cutoff margins (oto_style.py).
     oto_style: OtoStyle | None = None
+    # Language-pack banks: None = the pack's default labeler style, "none" = templates
+    # only, or a style profile fitted from the user's own hand-timed bank (fit-style).
+    style_profile: Path | str | None = None
     # Appended to every generated alias as "_<suffix>" ("C4" -> "か_C4"), like the previous AutoOTO.
     alias_suffix: str = ""
     # Recording tempo. A BPM given by the user wins; otherwise estimate_bpm measures
@@ -317,6 +325,10 @@ def generate_voicebank(options: GenerationOptions) -> dict[str, Any]:
         raise ValueError("vc_end_policy requires backend=routed_hsmm")
     if options.release_pre_policy != "template" and backend != "routed_hsmm":
         raise ValueError("release_pre_policy requires backend=routed_hsmm")
+    if options.stable_window_policy not in {"template", "stable"}:
+        raise ValueError(f"unsupported stable_window_policy: {options.stable_window_policy}")
+    if options.stable_window_policy != "template" and backend != "routed_hsmm":
+        raise ValueError("stable_window_policy requires backend=routed_hsmm")
     if not all(getattr(options, name) for name in DIAGNOSTIC_FILE_OPTIONS) and backend != "routed_hsmm":
         raise ValueError("turning diagnostic files off requires backend=routed_hsmm")
     _validate_occurrence_ranker_options(options, backend=backend)
@@ -610,6 +622,8 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         unmapped_alias_policy=options.unmapped_alias_policy,
         vc_end_policy=options.vc_end_policy,
         release_pre_policy=options.release_pre_policy,
+        style_profile=(load_style_profile(Path(options.style_profile))
+                       if options.style_profile not in (None, NO_STYLE) else options.style_profile),
     )
     tempo = resolve_recording_tempo(options, bank, wavs)
     project_manifest_path = output / "project_manifest.json" if options.write_project_manifest else None
@@ -651,6 +665,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         progress=options.progress,
         oto_style=options.oto_style,
         alias_suffix=options.alias_suffix,
+        stable_window=options.stable_window_policy == "stable",
         output_oto=output / "oto.ini",
         force=options.force,
         source_encoding=source_encoding,
@@ -659,6 +674,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
         write_generation_report=options.write_generation_report,
         write_row_report=options.write_row_report,
         write_timelines=options.write_timelines,
+        pack_style_info=(build.manifest.get("language_pack") or {}).get("style"),
         provenance_context={
             "generation_backend": "routed_hsmm",
             "route_id": build.route_id,
@@ -681,6 +697,7 @@ def _generate_voicebank_routed(options: GenerationOptions) -> dict[str, Any]:
             "unmapped_alias_policy": options.unmapped_alias_policy,
             "vc_end_policy": options.vc_end_policy,
             "release_pre_policy": options.release_pre_policy,
+            "stable_window_policy": options.stable_window_policy,
             "oto_style": options.oto_style.to_dict() if options.oto_style is not None else None,
             "alias_suffix": normalize_alias_suffix(options.alias_suffix) or None,
             "recording_tempo": tempo,
@@ -848,6 +865,10 @@ def filename_syllable_count(wav_name: str, format_hint: str | None, language_hin
 
     if not format_hint:
         return None
+    pack = find_language_pack(language_hint, format_hint)
+    if pack is not None:
+        chunks = pack.parse_filename(wav_name)
+        return sum(1 for chunk in chunks for phone in chunk if pack.is_nucleus(phone)) if chunks else None
     try:
         slots = parse_filename_phone_slots(wav_name, format_hint=format_hint, language_hint=language_hint)
     except VoicebankReviewRequired:

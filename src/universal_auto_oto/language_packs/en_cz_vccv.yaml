@@ -1,0 +1,454 @@
+schema_version: 1
+pack_id: en_cz_vccv
+display_name: English VCCV (CZ-SAMPA)
+languages: [english, en]
+formats: [vccv]
+# Alignment profile the GUI uses for this pack. v17-v19 (activity level, speech span, nasal-frame
+# model; fitted on Korean/Japanese) lowered English VCCV on all five hand-timed banks (2026-10-22,
+# style-corrected pre<=30 -1 to -5.6 points), so English stays on v16.
+alignment_profile: cvvc_slot_rhythm_v16
+# CZ-SAMPA symbols differ only by case (a/A, e/E, i/I, o/O); phone ids below are
+# lowercase-safe ARPAbet-style names because the project casefolds phone ids.
+case_sensitive: true
+
+# class: vowel | syllabic | consonant.  manner picks the HSMM state topology.
+phones:
+  aa: {class: vowel}            # a   father
+  ae: {class: vowel}            # @   cat
+  ah: {class: vowel}            # u   cut
+  ao: {class: vowel}            # 9   thought
+  eh: {class: vowel}            # e   bed
+  er: {class: vowel}            # 3   bird
+  ih: {class: vowel}            # i   bit
+  iy: {class: vowel}            # E   beet
+  uh: {class: vowel}            # 6   book
+  uw: {class: vowel}            # o   boot
+  ey: {class: vowel}            # A   day
+  ow: {class: vowel}            # O   go
+  ay: {class: vowel}            # I   my
+  aw: {class: vowel}            # 8   now
+  oy: {class: vowel}            # Q   boy
+  ax: {class: vowel}            # x   ago
+  ae_n: {class: vowel}          # &   @ before m/n
+  ao_r: {class: vowel}          # 0   9 before r, O before l
+  ih_ng: {class: vowel}         # 1   i before ng
+  el: {class: syllabic, manner: liquid}
+  em: {class: syllabic, manner: nasal}
+  en: {class: syllabic, manner: nasal}
+  eng: {class: syllabic, manner: nasal}
+  b: {class: consonant, manner: stop, voiced: true}
+  d: {class: consonant, manner: stop, voiced: true}
+  g: {class: consonant, manner: stop, voiced: true}
+  p: {class: consonant, manner: stop, voiced: false}
+  t: {class: consonant, manner: stop, voiced: false}
+  k: {class: consonant, manner: stop, voiced: false}
+  q: {class: consonant, manner: stop, voiced: false}
+  dx: {class: consonant, manner: tap, voiced: true}
+  ch: {class: consonant, manner: affricate, voiced: false}
+  jh: {class: consonant, manner: affricate, voiced: true}
+  f: {class: consonant, manner: fricative, voiced: false}
+  v: {class: consonant, manner: fricative, voiced: true}
+  th: {class: consonant, manner: fricative, voiced: false}
+  dh: {class: consonant, manner: fricative, voiced: true}
+  s: {class: consonant, manner: fricative, voiced: false}
+  z: {class: consonant, manner: fricative, voiced: true}
+  sh: {class: consonant, manner: fricative, voiced: false}
+  zh: {class: consonant, manner: fricative, voiced: true}
+  h: {class: consonant, manner: fricative, voiced: false}
+  hh: {class: consonant, manner: fricative, voiced: false}
+  m: {class: consonant, manner: nasal, voiced: true}
+  n: {class: consonant, manner: nasal, voiced: true}
+  ng: {class: consonant, manner: nasal, voiced: true}
+  l: {class: consonant, manner: liquid, voiced: true}
+  r: {class: consonant, manner: liquid, voiced: true}
+  w: {class: consonant, manner: glide, voiced: true}
+  y: {class: consonant, manner: glide, voiced: true}
+
+# Surface symbol -> phone id.  Longest match wins (sh before s, ng before n).
+symbols:
+  a: aa
+  "@": ae
+  u: ah
+  "9": ao
+  e: eh
+  "3": er
+  i: ih
+  E: iy
+  "6": uh
+  o: uw
+  A: ey
+  O: ow
+  I: ay
+  "8": aw
+  Q: oy
+  x: ax
+  "&": ae_n
+  "0": ao_r
+  "1": ih_ng
+  ll: el
+  mm: em
+  nn: en
+  nng: eng
+  b: b
+  d: d
+  g: g
+  p: p
+  t: t
+  k: k
+  q: q
+  dd: dx
+  ch: ch
+  j: jh
+  f: f
+  v: v
+  th: th
+  dh: dh
+  s: s
+  z: z
+  sh: sh
+  zh: zh
+  h: h
+  hh: hh
+  m: m
+  n: n
+  ng: ng
+  l: l
+  r: r
+  w: w
+  y: y
+
+# Lists record a syllabic consonant after a consonant as schwa + consonant
+# (-ll__kxl: "_ll"/"ll-" are the x l of kxl).
+alias_equivalents:
+  el: [[ax, l]]
+  em: [[ax, m]]
+  en: [[ax, n]]
+  eng: [[ax, ng]]
+  # n before k/g is [ng]: lists spell it n (-bAnk), aliases ng (bAng).
+  ng: [[n]]
+
+filename:
+  separators: "_+ "
+  # A leading consonant-only token without a start marker groups the list
+  # (l_k@l_k@l, ng__k1ngz_k1ngz); it is not recorded.
+  drop_unmarked_consonant_prefix: true
+  # Trailing dashes keep A/a, E/e ... apart on case-insensitive file systems.
+  strip_trailing: "-"
+  start_markers: "-_"
+
+alias:
+  head_marker: "-"
+  after_consonant_marker: "_"
+  end_marker: "-"
+  # "b@" names the mid-phrase CV; the file-start take is "-b@".
+  unmarked_consonant_start_avoids_file_start: true
+
+# Alias shape -> template.  Shapes: optional marker, groups of V (vowel or
+# syllabic) and C joined by spaces, optional trailing end marker.  First
+# matching rule wins.
+shape_templates:
+  - {shape: "-C+V+C*", template: cv_head, role: cv_head}
+  - {shape: "_C+V+C*", template: cv_after_consonant, role: cv}
+  - {shape: "C+V+C*", template: cv, role: cv}
+  - {shape: "-V+C*", template: v_head, role: v_head}
+  - {shape: "_V+C*", template: v_after_consonant, role: v}
+  - {shape: "V-", template: release, role: release}
+  - {shape: "V", template: v, role: v}
+  - {shape: "VV+C*", template: vv, role: vv}
+  - {shape: "VC+-", template: vc_end, role: vc}
+  - {shape: "VC+", template: vc, role: vc}
+  - {shape: "V C", template: vc_onset, role: vc}
+  - {shape: "V CC+", template: vc_onset_cluster, role: vc}
+  - {shape: "V+C* C+", template: vcc, role: vc}
+  - {shape: "V C+ C+", template: vcc, role: vc}
+  - {shape: "C+ C+", template: cc, role: cc}
+  - {shape: "-C+", template: cc_head, role: cc_head}
+  - {shape: "_C+", template: cc_cluster, role: cc}
+  - {shape: "C+-", template: cc_end, role: cc}
+  - {shape: "C+", template: cc_cluster, role: cc}
+
+# Anchors in ms from the file start.  phone[i] indexes the alias' own phones
+# (phone[-1] = last); nucleus = first vowel/syllabic phone; group_start[k] =
+# first phone of the k-th space-separated alias group; before / after = the
+# recording's phone just outside the alias.  The preutterance sits
+# on an acoustic landmark; the other anchors keep the list's usual spacing
+# around it (medians of a hand-timed CZ VCCV bank).
+templates:
+  cv_head:
+    role: cv_head
+    anchors:
+      pre_abs: fallback(nucleus.vowel_onset, nucleus.vowel_transition + 15, nucleus.start + 15)
+      offset_abs: min(phone[0].start - 30, pre_abs - 40)
+      overlap_abs: max(offset_abs, min(phone[0].start, pre_abs - 20))
+      fixed_abs: pre_abs + 60
+      cutoff_abs: fixed_abs + 190
+  cv:
+    role: cv
+    anchors:
+      pre_abs: fallback(nucleus.vowel_onset, nucleus.vowel_transition + 12, nucleus.start + 12)
+      offset_abs: min(phone[0].start, pre_abs - 30)
+      overlap_abs: min(offset_abs + 30, pre_abs - 10)
+      fixed_abs: pre_abs + 60
+      cutoff_abs: fixed_abs + 150
+  cv_after_consonant:
+    role: cv
+    anchors:
+      pre_abs: fallback(nucleus.vowel_onset, nucleus.vowel_transition + 35, nucleus.start + 35)
+      offset_abs: pre_abs - 30
+      overlap_abs: pre_abs - 15
+      fixed_abs: pre_abs + 90
+      cutoff_abs: fixed_abs + 280
+  v_head:
+    role: v_head
+    anchors:
+      pre_abs: fallback(nucleus.vowel_transition, nucleus.start)
+      offset_abs: pre_abs - 37
+      overlap_abs: pre_abs - 19
+      fixed_abs: pre_abs + 60
+      cutoff_abs: min(phone[-1].end, fixed_abs + 394)
+  v_after_consonant:
+    role: v
+    anchors:
+      pre_abs: nucleus.start + 77
+      offset_abs: pre_abs - 30
+      overlap_abs: pre_abs - 15
+      fixed_abs: pre_abs + 60
+      cutoff_abs: fixed_abs + 133
+  v:
+    role: v
+    anchors:
+      offset_abs: nucleus.start + 100
+      overlap_abs: offset_abs + 150
+      pre_abs: offset_abs + 300
+      fixed_abs: offset_abs + 350
+      cutoff_abs: offset_abs + 600
+  release:
+    role: release
+    anchors:
+      pre_abs: min(phone[0].end, phone[0].start + 245)
+      offset_abs: pre_abs - 175
+      overlap_abs: pre_abs - 99
+      fixed_abs: pre_abs + 69
+      cutoff_abs: fixed_abs + 76
+  vv:
+    role: vv
+    anchors:
+      # Vowel-to-vowel glides have no sharp acoustic edge; all three hand-timed banks
+      # put the change one guide beat (~530 ms) after the first vowel starts.
+      pre_abs: clamp(phone[0].start + 530, phone[0].start + 150, max(phone[0].start + 150, phone[-1].end - 60))
+      offset_abs: pre_abs - 371
+      overlap_abs: pre_abs - 200
+      fixed_abs: pre_abs + 94
+      cutoff_abs: fixed_abs + 302
+  vc:
+    role: vc
+    anchors:
+      # Into a sonorant the voice glides on: the transition starts before the aligned end;
+      # a sonorant + obstruent coda (1ngz, arb) is heard at the obstruent.
+      pre_abs: fallback(phone[2].start - 15, phone[0].end - 60) if phone[1].features.sonorant == True else (phone[0].end + 30) if (phone[1].features.manner == 'fricative' and phone[1].features.voiced == True) else (fallback(phone[0].vowel_offset, phone[0].end) + 44)
+      offset_abs: pre_abs - 240
+      overlap_abs: pre_abs - 128
+      fixed_abs: pre_abs + 60
+      cutoff_abs: fixed_abs + 35
+  vc_end:
+    role: vc
+    anchors:
+      pre_abs: fallback(phone[2].start - 15, phone[0].end - 60) if phone[1].features.sonorant == True else (phone[0].end + 30) if (phone[1].features.manner == 'fricative' and phone[1].features.voiced == True) else (fallback(phone[0].vowel_offset, phone[0].end) + 58)
+      offset_abs: pre_abs - 238
+      overlap_abs: pre_abs - 129
+      fixed_abs: pre_abs + 95
+      cutoff_abs: fixed_abs + 75
+  vc_onset:
+    role: vc
+    anchors:
+      pre_abs: (phone[0].end) if (phone[1].features.manner == 'fricative' and phone[1].features.voiced == True) else (fallback(phone[0].vowel_offset, phone[0].end) + 17)
+      offset_abs: pre_abs - 300
+      overlap_abs: pre_abs - 150
+      fixed_abs: pre_abs + 200
+      cutoff_abs: fixed_abs + 200
+  vc_onset_cluster:
+    role: vc
+    anchors:
+      pre_abs: group_start[1].start + 42
+      offset_abs: pre_abs - 300
+      overlap_abs: pre_abs - 150
+      fixed_abs: pre_abs + 231
+      cutoff_abs: fixed_abs + 183
+  vcc:
+    role: vc
+    anchors:
+      pre_abs: group_start[1].start - 10
+      offset_abs: pre_abs - 326
+      overlap_abs: pre_abs - 178
+      fixed_abs: pre_abs + 200
+      cutoff_abs: fixed_abs + 100
+  cc:
+    role: cc
+    anchors:
+      pre_abs: group_start[1].start - 24
+      offset_abs: pre_abs - 68
+      overlap_abs: pre_abs - 30
+      fixed_abs: pre_abs + 400
+      cutoff_abs: fixed_abs + 200
+  cc_head:
+    role: cc_head
+    anchors:
+      pre_abs: fallback(phone[-1].vowel_transition, phone[-1].start + 60) + 16
+      offset_abs: min(phone[0].start - 30, pre_abs - 77)
+      overlap_abs: offset_abs + 32
+      fixed_abs: pre_abs + 83
+      cutoff_abs: fixed_abs + 191
+  cc_cluster:
+    role: cc
+    anchors:
+      # Mid-phrase onset cluster (bl, skr): heard where the following vowel starts.
+      pre_abs: fallback(after.vowel_onset, after.vowel_transition, phone[-1].end) if after.features.vowel_like == True else fallback(phone[1].start - 12, phone[0].start + 40)
+      offset_abs: pre_abs - 112
+      overlap_abs: pre_abs - 60
+      fixed_abs: pre_abs + 81
+      cutoff_abs: fixed_abs + 42
+  cc_end:
+    role: cc
+    anchors:
+      pre_abs: phone[0].start + 10
+      offset_abs: pre_abs - 116
+      overlap_abs: pre_abs - 63
+      fixed_abs: pre_abs + 171
+      cutoff_abs: fixed_abs + 92
+
+# Default labeler style: ms added to each anchor, the median (hand - generated)
+# over three hand-timed banks of different labelers (10,226 rows),
+# generated with the 70 Hz rumble high-pass.
+# Keys: "shape|class" (class of the consonant at the vowel boundary) before "shape".
+# Labelers differ; `fit-style` learns a user's own style from their hand OTO.
+style:
+  "-CC": {rows: 99, offset: 78.5, overlap: 83.2, pre: -14.7, fixed: -32.5, cutoff: -14.3}
+  "-CCC": {rows: 21, offset: 9.8, overlap: 49.7, pre: -16.0, fixed: -40.1, cutoff: -79.5}
+  "-CCC|fric_u": {rows: 21, offset: 9.8, overlap: 49.7, pre: -16.0, fixed: -40.1, cutoff: -79.5}
+  "-CCV": {rows: 339, offset: 1.0, overlap: 62.3, pre: -8.3, fixed: 4.1, cutoff: -37.8}
+  "-CCVC": {rows: 54, offset: -0.4, overlap: 59.4, pre: -5.6, fixed: -1.6, cutoff: -70.5}
+  "-CCVC|son": {rows: 27, offset: 2.0, overlap: 67.2, pre: -4.0, fixed: -1.0, cutoff: -67.0}
+  "-CCVC|stop": {rows: 27, offset: -2.7, overlap: 54.8, pre: -8.5, fixed: -8.5, cutoff: -72.4}
+  "-CCV|son": {rows: 168, offset: 7.8, overlap: 71.9, pre: -2.5, fixed: 7.4, cutoff: -38.0}
+  "-CCV|stop": {rows: 171, offset: -1.8, overlap: 50.7, pre: -12.3, fixed: -3.7, cutoff: -37.4}
+  "-CC|fric_u": {rows: 27, offset: 24.0, overlap: 54.1, pre: -16.0, fixed: -30.8, cutoff: -35.8}
+  "-CC|fric_v": {rows: 9, offset: 75.1, overlap: 75.2, pre: -19.7, fixed: -36.1, cutoff: -13.7}
+  "-CC|son": {rows: 6, offset: 136.7, overlap: 125.3, pre: 38.2, fixed: 15.2, cutoff: 55.3}
+  "-CC|stop": {rows: 57, offset: 88.7, overlap: 83.6, pre: -14.7, fixed: -35.9, cutoff: -8.5}
+  "-CV": {rows: 1368, offset: 44.0, overlap: 62.5, pre: -8.5, fixed: 16.5, cutoff: -10.4}
+  "-CVC": {rows: 216, offset: 48.5, overlap: 64.5, pre: -5.2, fixed: 4.0, cutoff: -57.7}
+  "-CVC|affricate": {rows: 18, offset: 51.4, overlap: 73.3, pre: -15.3, fixed: -1.2, cutoff: -85.5}
+  "-CVC|fric_u": {rows: 45, offset: 25.1, overlap: 54.7, pre: -8.1, fixed: 3.8, cutoff: -52.6}
+  "-CVC|fric_v": {rows: 36, offset: 29.2, overlap: 44.4, pre: -4.1, fixed: 4.1, cutoff: -40.2}
+  "-CVC|son": {rows: 54, offset: 67.2, overlap: 79.6, pre: -0.1, fixed: 6.4, cutoff: -58.5}
+  "-CVC|stop": {rows: 54, offset: 62.9, overlap: 67.9, pre: -9.7, fixed: 0.4, cutoff: -65.7}
+  "-CVC|tap": {rows: 9, offset: 71.6, overlap: 72.4, pre: -3.2, fixed: 38.8, cutoff: -17.3}
+  "-CV|affricate": {rows: 114, offset: 37.3, overlap: 61.2, pre: -16.7, fixed: 19.9, cutoff: -21.1}
+  "-CV|fric_u": {rows: 285, offset: 11.6, overlap: 42.9, pre: -10.0, fixed: 15.5, cutoff: -22.3}
+  "-CV|fric_v": {rows: 228, offset: 26.5, overlap: 49.5, pre: -7.9, fixed: 28.3, cutoff: -1.6}
+  "-CV|son": {rows: 342, offset: 59.3, overlap: 78.1, pre: -0.7, fixed: 14.1, cutoff: 1.9}
+  "-CV|stop": {rows: 342, offset: 55.4, overlap: 63.7, pre: -13.3, fixed: 6.6, cutoff: -25.0}
+  "-CV|tap": {rows: 57, offset: 78.3, overlap: 74.7, pre: -8.5, fixed: 18.1, cutoff: 41.6}
+  "-V": {rows: 69, offset: -36.2, overlap: -26.9, pre: -14.8, fixed: 18.4, cutoff: -4.1}
+  "-VC": {rows: 12, offset: -6.9, overlap: 0.9, pre: 6.0, fixed: 16.2, cutoff: 25.1}
+  "-VC|son": {rows: 12, offset: -6.9, overlap: 0.9, pre: 6.0, fixed: 16.2, cutoff: 25.1}
+  "-V|V": {rows: 69, offset: -36.2, overlap: -26.9, pre: -14.8, fixed: 18.4, cutoff: -4.1}
+  "C C": {rows: 375, offset: -10.2, overlap: -9.1, pre: -0.1, fixed: 22.6, cutoff: 29.0}
+  "C CC": {rows: 75, offset: -3.3, overlap: 4.1, pre: 14.6, fixed: 24.6, cutoff: 11.5}
+  "C CC|son": {rows: 75, offset: -3.3, overlap: 4.1, pre: 14.6, fixed: 24.6, cutoff: 11.5}
+  "C C|son": {rows: 375, offset: -10.2, overlap: -9.1, pre: -0.1, fixed: 22.6, cutoff: 29.0}
+  "CC": {rows: 291, offset: -13.5, overlap: -19.8, pre: -23.9, fixed: -31.1, cutoff: 17.4}
+  "CC C": {rows: 75, offset: -92.6, overlap: -91.9, pre: -92.4, fixed: -86.2, cutoff: -82.6}
+  "CC CC": {rows: 15, offset: -32.7, overlap: -25.7, pre: -10.0, fixed: -48.3, cutoff: -67.6}
+  "CC CC|son": {rows: 15, offset: -32.7, overlap: -25.7, pre: -10.0, fixed: -48.3, cutoff: -67.6}
+  "CC C|son": {rows: 75, offset: -92.6, overlap: -91.9, pre: -92.4, fixed: -86.2, cutoff: -82.6}
+  "CC-": {rows: 192, offset: 44.7, overlap: 36.5, pre: 30.3, fixed: 63.6, cutoff: 45.6}
+  "CC-|affricate": {rows: 6, offset: 14.4, overlap: 36.9, pre: 56.4, fixed: 39.6, cutoff: 7.8}
+  "CC-|fric_u": {rows: 18, offset: 101.2, overlap: 111.5, pre: 118.1, fixed: 150.9, cutoff: 146.2}
+  "CC-|fric_v": {rows: 12, offset: 86.6, overlap: 87.3, pre: 99.3, fixed: 39.1, cutoff: 130.0}
+  "CC-|son": {rows: 126, offset: 21.0, overlap: 18.7, pre: 4.4, fixed: 28.1, cutoff: -1.1}
+  "CC-|stop": {rows: 30, offset: 75.5, overlap: 73.3, pre: 75.7, fixed: 172.6, cutoff: 218.8}
+  "CCC": {rows: 108, offset: -32.6, overlap: -27.8, pre: 0.4, fixed: 47.3, cutoff: 47.5}
+  "CCC-": {rows: 87, offset: 35.9, overlap: 38.1, pre: 34.2, fixed: 103.3, cutoff: 109.3}
+  "CCC-|fric_u": {rows: 12, offset: 98.2, overlap: 105.8, pre: 105.9, fixed: 164.4, cutoff: 227.7}
+  "CCC-|son": {rows: 69, offset: 33.9, overlap: 34.2, pre: 29.8, fixed: 82.0, cutoff: 80.5}
+  "CCC|fric_u": {rows: 33, offset: -95.2, overlap: -64.4, pre: -27.8, fixed: -47.5, cutoff: 74.2}
+  "CCC|son": {rows: 69, offset: -7.3, overlap: -11.9, pre: 7.2, fixed: 54.0, cutoff: 36.4}
+  "CCV": {rows: 339, offset: 1.3, overlap: 36.7, pre: -7.0, fixed: 3.5, cutoff: 46.0}
+  "CCVC": {rows: 54, offset: 0.3, overlap: 29.0, pre: -9.8, fixed: -2.3, cutoff: -14.3}
+  "CCVC|son": {rows: 27, offset: 1.8, overlap: 27.2, pre: -7.6, fixed: -1.3, cutoff: -13.9}
+  "CCVC|stop": {rows: 27, offset: -2.3, overlap: 36.4, pre: -11.1, fixed: -4.5, cutoff: -24.7}
+  "CCV|son": {rows: 168, offset: 3.9, overlap: 36.5, pre: -3.5, fixed: 9.8, cutoff: 53.3}
+  "CCV|stop": {rows: 171, offset: -1.6, overlap: 37.1, pre: -9.8, fixed: -0.2, cutoff: 45.2}
+  "CC|affricate": {rows: 6, offset: -75.2, overlap: -57.4, pre: -44.0, fixed: -52.7, cutoff: -74.7}
+  "CC|fric_u": {rows: 45, offset: -34.4, overlap: -29.4, pre: -33.8, fixed: -45.4, cutoff: 54.0}
+  "CC|fric_v": {rows: 21, offset: 9.4, overlap: -7.8, pre: -16.6, fixed: -42.9, cutoff: 33.4}
+  "CC|son": {rows: 132, offset: -19.4, overlap: -22.5, pre: -17.1, fixed: -20.8, cutoff: -24.6}
+  "CC|stop": {rows: 87, offset: 0.3, overlap: -10.7, pre: -27.6, fixed: -39.9, cutoff: 92.3}
+  "CV": {rows: 1368, offset: 7.1, overlap: 18.1, pre: -7.5, fixed: 8.8, cutoff: -13.2}
+  "CVC": {rows: 216, offset: 6.6, overlap: 18.8, pre: -5.9, fixed: 16.6, cutoff: 8.8}
+  "CVC|affricate": {rows: 18, offset: -26.6, overlap: -0.5, pre: -14.3, fixed: 0.2, cutoff: -0.7}
+  "CVC|fric_u": {rows: 45, offset: 4.4, overlap: 29.2, pre: -5.0, fixed: 12.5, cutoff: 2.9}
+  "CVC|fric_v": {rows: 36, offset: 4.5, overlap: 17.6, pre: -10.2, fixed: 24.8, cutoff: 18.0}
+  "CVC|son": {rows: 54, offset: 9.2, overlap: 18.3, pre: 0.4, fixed: 22.1, cutoff: 19.5}
+  "CVC|stop": {rows: 54, offset: 10.0, overlap: 19.4, pre: -7.4, fixed: 9.0, cutoff: -5.1}
+  "CVC|tap": {rows: 9, offset: 10.3, overlap: -4.7, pre: -15.2, fixed: 6.0, cutoff: 16.5}
+  "CV|affricate": {rows: 114, offset: -1.1, overlap: 14.2, pre: -14.5, fixed: 0.0, cutoff: -33.9}
+  "CV|fric_u": {rows: 285, offset: 6.3, overlap: 31.5, pre: -5.5, fixed: 9.6, cutoff: -19.3}
+  "CV|fric_v": {rows: 228, offset: 8.0, overlap: 17.4, pre: -8.8, fixed: 4.1, cutoff: -22.9}
+  "CV|son": {rows: 342, offset: 14.9, overlap: 16.1, pre: 0.4, fixed: 23.3, cutoff: 66.5}
+  "CV|stop": {rows: 342, offset: 0.7, overlap: 13.5, pre: -11.2, fixed: 3.7, cutoff: -32.6}
+  "CV|tap": {rows: 57, offset: 10.8, overlap: -5.1, pre: -12.9, fixed: 13.4, cutoff: 105.1}
+  "V": {rows: 69, offset: -26.8, overlap: -26.8, pre: -26.8, fixed: -2.9, cutoff: -82.1}
+  "V C": {rows: 1210, offset: -12.1, overlap: -16.6, pre: -20.1, fixed: -7.9, cutoff: -71.0}
+  "V CC": {rows: 240, offset: -2.2, overlap: -17.7, pre: -38.6, fixed: -7.3, cutoff: -52.6}
+  "V CC|fric_u": {rows: 240, offset: -2.2, overlap: -17.7, pre: -38.6, fixed: -7.3, cutoff: -52.6}
+  "V C|affricate": {rows: 96, offset: -1.1, overlap: -13.5, pre: -16.3, fixed: -4.1, cutoff: -90.7}
+  "V C|fric_u": {rows: 288, offset: 0.4, overlap: -8.1, pre: -20.8, fixed: 6.3, cutoff: -43.4}
+  "V C|fric_v": {rows: 192, offset: -5.2, overlap: -7.4, pre: -6.9, fixed: -3.8, cutoff: -79.5}
+  "V C|son": {rows: 298, offset: -20.3, overlap: -24.7, pre: -26.2, fixed: -16.1, cutoff: -60.1}
+  "V C|stop": {rows: 288, offset: -16.2, overlap: -19.5, pre: -21.2, fixed: -16.6, cutoff: -88.0}
+  "V C|tap": {rows: 48, offset: -22.5, overlap: -23.5, pre: -23.0, fixed: -22.1, cutoff: -34.0}
+  "V-": {rows: 63, offset: 34.0, overlap: 75.9, pre: 115.8, fixed: 232.4, cutoff: 325.2}
+  "V-|V": {rows: 63, offset: 34.0, overlap: 75.9, pre: 115.8, fixed: 232.4, cutoff: 325.2}
+  "VC": {rows: 942, offset: -15.2, overlap: 4.7, pre: 18.9, fixed: 24.5, cutoff: 16.2}
+  "VC C": {rows: 372, offset: -20.9, overlap: -12.0, pre: -9.9, fixed: 7.1, cutoff: 13.8}
+  "VC CC": {rows: 75, offset: 42.3, overlap: 47.4, pre: 16.3, fixed: 75.7, cutoff: 78.2}
+  "VC CC|son": {rows: 75, offset: 42.3, overlap: 47.4, pre: 16.3, fixed: 75.7, cutoff: 78.2}
+  "VC C|son": {rows: 372, offset: -20.9, overlap: -12.0, pre: -9.9, fixed: 7.1, cutoff: 13.8}
+  "VC-": {rows: 945, offset: -36.1, overlap: -33.4, pre: -53.0, fixed: 41.7, cutoff: 46.7}
+  "VC-|affricate": {rows: 96, offset: -48.5, overlap: -35.3, pre: -37.1, fixed: 38.8, cutoff: 48.1}
+  "VC-|fric_u": {rows: 192, offset: -60.4, overlap: -50.3, pre: -60.5, fixed: 51.6, cutoff: 63.9}
+  "VC-|fric_v": {rows: 195, offset: -42.1, overlap: -37.7, pre: -52.6, fixed: 24.0, cutoff: 6.3}
+  "VC-|son": {rows: 174, offset: -25.1, overlap: -7.3, pre: 0.7, fixed: 48.4, cutoff: 35.3}
+  "VC-|stop": {rows: 288, offset: -22.0, overlap: -29.3, pre: -60.9, fixed: 42.0, cutoff: 55.4}
+  "VCC": {rows: 57, offset: -39.4, overlap: -31.1, pre: -15.4, fixed: 0.8, cutoff: 0.6}
+  "VCC C": {rows: 75, offset: -42.7, overlap: -38.3, pre: -64.0, fixed: -14.1, cutoff: -11.1}
+  "VCC CC": {rows: 15, offset: 38.7, overlap: 12.0, pre: 20.7, fixed: 35.4, cutoff: 62.1}
+  "VCC CC|son": {rows: 15, offset: 38.7, overlap: 12.0, pre: 20.7, fixed: 35.4, cutoff: 62.1}
+  "VCC C|son": {rows: 75, offset: -42.7, overlap: -38.3, pre: -64.0, fixed: -14.1, cutoff: -11.1}
+  "VCC-": {rows: 57, offset: -92.5, overlap: -80.9, pre: -72.1, fixed: 25.6, cutoff: 21.8}
+  "VCC-|son": {rows: 57, offset: -92.5, overlap: -80.9, pre: -72.1, fixed: 25.6, cutoff: 21.8}
+  "VCCC": {rows: 48, offset: -2.6, overlap: 11.1, pre: 47.8, fixed: 75.8, cutoff: 71.7}
+  "VCCC-": {rows: 48, offset: -40.0, overlap: -18.2, pre: -22.7, fixed: 85.0, cutoff: 71.7}
+  "VCCC-|son": {rows: 48, offset: -40.0, overlap: -18.2, pre: -22.7, fixed: 85.0, cutoff: 71.7}
+  "VCCC|son": {rows: 48, offset: -2.6, overlap: 11.1, pre: 47.8, fixed: 75.8, cutoff: 71.7}
+  "VCC|son": {rows: 57, offset: -39.4, overlap: -31.1, pre: -15.4, fixed: 0.8, cutoff: 0.6}
+  "VC|affricate": {rows: 96, offset: -5.4, overlap: 8.6, pre: 16.2, fixed: 26.6, cutoff: 19.8}
+  "VC|fric_u": {rows: 192, offset: -23.7, overlap: 2.2, pre: 16.3, fixed: 24.9, cutoff: 17.8}
+  "VC|fric_v": {rows: 192, offset: -26.0, overlap: -6.7, pre: 8.3, fixed: 10.3, cutoff: 4.2}
+  "VC|son": {rows: 174, offset: -6.7, overlap: 22.3, pre: 50.4, fixed: 47.6, cutoff: 29.4}
+  "VC|stop": {rows: 288, offset: -9.0, overlap: 8.4, pre: 21.5, fixed: 25.0, cutoff: 15.9}
+  "VV": {rows: 270, offset: -42.3, overlap: -18.0, pre: -1.7, fixed: 11.6, cutoff: -51.7}
+  "VVC": {rows: 30, offset: -58.4, overlap: -29.6, pre: -11.1, fixed: -18.3, cutoff: -134.3}
+  "VVC|V": {rows: 30, offset: -58.4, overlap: -29.6, pre: -11.1, fixed: -18.3, cutoff: -134.3}
+  "VV|V": {rows: 270, offset: -42.3, overlap: -18.0, pre: -1.7, fixed: 11.6, cutoff: -51.7}
+  "V|V": {rows: 69, offset: -26.8, overlap: -26.8, pre: -26.8, fixed: -2.9, cutoff: -82.1}
+  "_CV": {rows: 228, offset: 4.8, overlap: 4.9, pre: 5.0, fixed: 33.2, cutoff: -22.7}
+  "_CVC": {rows: 24, offset: 4.6, overlap: 4.6, pre: 4.6, fixed: 7.7, cutoff: -83.3}
+  "_CVC|son": {rows: 24, offset: 4.6, overlap: 4.6, pre: 4.6, fixed: 7.7, cutoff: -83.3}
+  "_CV|son": {rows: 228, offset: 4.8, overlap: 4.9, pre: 5.0, fixed: 33.2, cutoff: -22.7}
+  "_V": {rows: 70, offset: -16.7, overlap: -16.7, pre: -16.7, fixed: 2.0, cutoff: -22.0}
+  "_VC": {rows: 12, offset: -24.3, overlap: -24.3, pre: -24.3, fixed: 7.8, cutoff: -26.2}
+  "_VC|son": {rows: 12, offset: -24.3, overlap: -24.3, pre: -24.3, fixed: 7.8, cutoff: -26.2}
+  "_V|V": {rows: 70, offset: -16.7, overlap: -16.7, pre: -16.7, fixed: 2.0, cutoff: -22.0}

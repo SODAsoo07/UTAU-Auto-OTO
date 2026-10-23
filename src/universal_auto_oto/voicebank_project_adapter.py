@@ -13,8 +13,11 @@ from typing import Mapping, Sequence
 import yaml
 
 from .domain import AliasPlan, PhoneDefinition, PhoneStateDefinition, RecordingSpec, SourceOtoRow
+from .generic_alias_binding import bind_pack_aliases
 from .kana import parse_kana_slots
 from .japanese_cvvc import alias_part_key, special_slots
+from .language_pack import LanguagePack, find_language_pack, pack_formats
+from .pack_style import NO_STYLE, PackStyle
 from .oto_io import read_text_auto, repair_kana_mojibake
 from .planning import _kana_surface_slots, _surface_phone_key, recording_tokens
 from .project import (
@@ -383,6 +386,7 @@ def build_routed_voicebank_project(
     unmapped_alias_policy: str = "fail",
     vc_end_policy: str = "template",
     release_pre_policy: str = "template",
+    style_profile: PackStyle | str | None = None,
 ) -> RoutedProjectBuild:
     if unmapped_alias_policy not in UNMAPPED_ALIAS_POLICIES:
         raise ValueError(f"unsupported unmapped_alias_policy: {unmapped_alias_policy}")
@@ -395,6 +399,16 @@ def build_routed_voicebank_project(
     bank = bank.resolve()
     format_type = _require_format(format_hint)
     language = (language_hint or "mixed").strip().casefold() or "mixed"
+    # A language pack (language_packs/*.yaml) replaces the hand-written
+    # Korean/Japanese filename and alias rules for its language and format.
+    pack = find_language_pack(language, format_type)
+    if pack is None and format_type not in SUPPORTED_FORMATS:
+        raise VoicebankReviewRequired("no_language_pack", detail=f"{language}/{format_type}")
+    # None: the pack's default style; "none": templates only; or a fitted profile.
+    style = (pack.style if style_profile is None else None if style_profile == NO_STYLE
+             else style_profile) if pack is not None else None
+    if isinstance(style, PackStyle) and style.pack_id != pack.pack_id:
+        raise VoicebankReviewRequired("style_profile_pack_mismatch", detail=f"{style.pack_id} != {pack.pack_id}")
     artifacts = _discover_contract_artifacts(bank)
     if recordings_manifest is not None:
         manifest_path = recordings_manifest.resolve()
@@ -423,7 +437,13 @@ def build_routed_voicebank_project(
         raw_record = _match_manifest_record(manifest_records, relative)
         source_rows = tuple(base_rows_by_wav.get(relative, ()))
         try:
-            phones, slots, transcript_source, transcript_artifact = _recording_phone_contract(
+            phones, slots, transcript_source, transcript_artifact = (_pack_phone_contract(
+                pack,
+                wav=resolved_wav,
+                raw_record=raw_record,
+                reclist_entries=reclist_entries,
+                explicit_inventory=inventory,
+            ) if pack is not None else _recording_phone_contract(
                 wav=resolved_wav,
                 relative=relative,
                 raw_record=raw_record,
@@ -432,7 +452,7 @@ def build_routed_voicebank_project(
                 language_hint=language,
                 explicit_inventory=inventory,
                 alias_hints=tuple(row.alias for row in source_rows),
-            )
+            ))
         except VoicebankReviewRequired as exc:
             if unmapped_alias_policy != "exclude_row":
                 raise
@@ -455,13 +475,33 @@ def build_routed_voicebank_project(
                         wav=relative,
                         detail=token.phone_id,
                     )
-                inventory[token.phone_id] = _inferred_phone_definition(token.phone_id)
+                inventory[token.phone_id] = (pack.phone_definition(token.phone_id) if pack is not None
+                                             else _inferred_phone_definition(token.phone_id))
 
         if raw_record is not None and _manifest_aliases(raw_record):
             aliases = _parse_manifest_aliases(raw_record, len(phones), relative)
             alias_source = "recording_manifest"
             alias_binding_policy = "explicit_manifest_phone_indices"
             base_lines = []
+        elif source_rows and pack is not None:
+            unmapped = []
+            aliases = bind_pack_aliases(pack, source_rows, phones, wav.name,
+                                        unmapped=unmapped if unmapped_alias_policy == "exclude_row" else None,
+                                        style=style)
+            excluded_rows.extend(_excluded_row(relative, row, "unmapped_alias", detail) for row, detail in unmapped)
+            if not aliases and unmapped:
+                continue
+            unmapped_lines = {row.source_index for row, _ in unmapped}
+            base_lines = [row.source_index for row in source_rows if row.source_index not in unmapped_lines]
+            if len(base_lines) != len(aliases):
+                base_lines = []
+            alias_source = "base_oto_alias_only"
+            alias_binding_policy = f"language_pack:{pack.pack_id}"
+        elif pack is not None:
+            if unmapped_alias_policy == "exclude_row" and base_rows_by_wav:
+                # The bank's oto.ini names no alias for this take; nothing to write.
+                continue
+            raise VoicebankReviewRequired("language_pack_needs_alias_list", wav=relative, detail=pack.pack_id)
         elif source_rows:
             unmapped: list[tuple[SourceOtoRow, str]] = []
             # Kana saved as cp932 and read as cp949 ("- 궭" = "- ち") binds as the kana; the row is
@@ -524,6 +564,7 @@ def build_routed_voicebank_project(
         metadata = {
             "format_hint": format_type,
             "language_hint": language,
+            **({"language_pack": pack.pack_id} if pack is not None else {}),
             "phone_tokens": [token.to_dict() for token in tagged],
             "parser_source": transcript_source,
             "parser_artifact": transcript_artifact,
@@ -562,6 +603,8 @@ def build_routed_voicebank_project(
                         "phone_occurrence_ids": [tagged[i].occurrence_id for i in plan.phone_indices],
                         "template": plan.template,
                         "role": plan.role,
+                        **({"group_starts": list(plan.group_starts)} if plan.group_starts else {}),
+                        **({"anchor_shifts": dict(plan.anchor_shifts)} if plan.anchor_shifts else {}),
                     }
                     for plan in aliases
                 ],
@@ -654,6 +697,9 @@ def build_routed_voicebank_project(
         "bank": str(bank),
         "format_hint": format_type,
         "language_hint": language,
+        **({"language_pack": {"id": pack.pack_id, "sha256": pack.sha256,
+                              "style": {"source": style.source, "sha256": style.sha256} if style else None}}
+           if pack is not None else {}),
         "route_id": route_id,
         "alignment_backend": alignment_backend,
         "feature_backend": feature_backend,
@@ -690,7 +736,7 @@ def _excluded_row(wav: str, row: SourceOtoRow, reason: str, detail: str | None) 
 
 def _require_format(format_hint: str | None) -> str:
     value = (format_hint or "").strip().casefold()
-    if value not in SUPPORTED_FORMATS:
+    if value not in SUPPORTED_FORMATS | pack_formats():
         raise VoicebankReviewRequired(
             "unknown_parse_format",
             detail=value or "missing_format_hint",
@@ -822,6 +868,52 @@ def _parse_korean_cvvc_tagged_variant(
 
 def _is_pitch_token(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Ga-g](?:#|b)?\d+", value.strip()))
+
+
+def _pack_phone_contract(
+    pack: LanguagePack,
+    *,
+    wav: Path,
+    raw_record: Mapping[str, object] | None,
+    reclist_entries: Mapping[str, tuple[str, str]],
+    explicit_inventory: Mapping[str, PhoneDefinition],
+) -> tuple[tuple[str, ...], tuple[_PhoneSlot, ...], str, str | None]:
+    """Phones and syllable slots from a manifest, reclist line or file name, read with the pack."""
+    if raw_record is not None:
+        raw_phones = raw_record.get("phones")
+        if isinstance(raw_phones, Sequence) and not isinstance(raw_phones, (str, bytes)) and raw_phones:
+            phones = tuple(_untag_phone(str(value), explicit_inventory) for value in raw_phones)
+            slots = _manifest_slots(raw_record, phones, {**{p: pack.phone_definition(p) for p in phones
+                                                            if p in pack.phones}, **explicit_inventory})
+            return phones, slots, "voicebank_recording_manifest", "recordings"
+    reclist = reclist_entries.get(_normalized_recording_key(wav.name))
+    source, transcript_source, artifact = wav.name, "original_filename_only", None
+    if reclist is not None:
+        source, artifact = reclist
+        transcript_source = "voicebank_reclist"
+    chunks = pack.parse_filename(source)
+    if chunks is None:
+        raise VoicebankReviewRequired("unparsed_filename_token", wav=str(wav), detail=pack.pack_id)
+    phones: list[str] = []
+    slots: list[_PhoneSlot] = []
+    for chunk in chunks:
+        nuclei = [i for i, phone in enumerate(chunk) if pack.is_nucleus(phone)]
+        if not nuclei:
+            if not slots:
+                raise VoicebankReviewRequired("ambiguous_slot_vowel", wav=str(wav), detail=" ".join(chunk))
+            # A consonant-only chunk closes the previous syllable.
+            last = slots.pop()
+            slots.append(_PhoneSlot((*last.phones, *chunk), last.start, last.vowel, last.end + len(chunk)))
+            phones.extend(chunk)
+            continue
+        base = len(phones)
+        # Consonants before a nucleus are its onset; the last nucleus keeps the coda.
+        for k, nucleus in enumerate(nuclei):
+            start = nuclei[k - 1] + 1 if k else 0
+            end = nucleus if k + 1 < len(nuclei) else len(chunk) - 1
+            slots.append(_PhoneSlot(tuple(chunk[start:end + 1]), base + start, base + nucleus, base + end))
+        phones.extend(chunk)
+    return tuple(phones), tuple(slots), transcript_source, artifact
 
 
 def _recording_phone_contract(

@@ -18,6 +18,7 @@ from .alias_type_symbolic import (
 )
 from .oto_io import resolve_output_encoding, with_alias_suffix, write_lines_atomic
 from .oto_style import OtoStyle, apply_korean_cvc_window, apply_korean_vcv_window, apply_oto_style
+from .stable_window import apply_stable_window
 from . import analysis_cache
 from .row_risk import load_profile, risk_threshold, row_risks, voicing_onsets_ms
 from .audio import file_sha256
@@ -27,6 +28,9 @@ from .sonorant_identity import SonorantTemplates, cepstra, has_adjacent_sonorant
 from .renderer_calibration import load_renderer_calibration
 from .alias_type_confidence import load_alias_type_confidence
 from .template_engine import load_template_set, render_project_alias
+from .pack_landmarks import add_pack_landmarks
+from . import pack_row_risk, style_sample
+from .language_pack import language_pack_by_id
 from .usability_review import usage_review, write_review_priority
 
 
@@ -287,6 +291,54 @@ def _with_row_risk(row, risk: float, threshold: float):
                    reasons=(*reasons, marker))
 
 
+def _apply_pack_row_risk(row_reports, rows_by_output, pack_recordings, style_sample_info=None) -> list[dict]:
+    """Rank language-pack rows by the fitted review risk (pack_row_risk.py), per pack; the riskiest
+    share goes to review (template repairs always do) and the confidence becomes 1 - risk.
+    Returns the style-sample rows (style_sample.py) picked from the low-risk rows."""
+    sample: list[dict] = []
+    by_pack: dict[str, list[int]] = defaultdict(list)
+    for position, report in enumerate(row_reports):
+        pack_id = report["recording_metadata"].get("language_pack")
+        if pack_id and int(report["recording_index"]) in pack_recordings:
+            by_pack[str(pack_id)].append(position)
+    for pack_id, positions in by_pack.items():
+        profile = pack_row_risk.load_profile(pack_id)
+        if profile is None:
+            continue
+        reports = [row_reports[p] for p in positions]
+        features = pack_row_risk.row_features(
+            language_pack_by_id(pack_id), reports,
+            {index: timeline for index, (timeline, _wav) in pack_recordings.items()},
+            {index: wav for index, (_timeline, wav) in pack_recordings.items()})
+        risks = pack_row_risk.predict(profile, features)
+        ranks = pack_row_risk.review_ranks(risks)
+        pack = language_pack_by_id(pack_id)
+        sample += style_sample.sample_rows(pack, reports, style_sample.select_style_sample(pack, reports, risks),
+                                           {index: wav for index, (_timeline, wav) in pack_recordings.items()},
+                                           style_sample_info)
+        for position, item, risk, rank in zip(positions, features, risks, ranks):
+            report = row_reports[position]
+            target = Path(report["output_oto"])
+            row = rows_by_output[target][int(report["oto_line"]) - 1]
+            clean = rank == "clean" and "template_constraint_repaired" not in row.reasons
+            reasons = tuple(reason for reason in row.reasons if reason != "uncalibrated_confidence")
+            marker = "pack_row_risk_low" if clean else ("pack_row_risk_first" if rank == "inspect_first" else "pack_row_risk_high")
+            reasons = (*reasons, marker,
+                       *(() if clean else pack_row_risk.risk_hints(item)))
+            row = replace(row, split="clean" if clean else "review", confidence=float(1.0 - risk), reasons=reasons)
+            rows_by_output[target][int(report["oto_line"]) - 1] = row
+            # Keep what the risk model read, so a later fit sees the same inputs as this run.
+            report["pre_risk"] = {"confidence": report["confidence"], "reasons": list(report["reasons"]),
+                                  "usage_review": dict(report["usage_review"])}
+            report.update(split=row.split, confidence=row.confidence, reasons=list(row.reasons),
+                          pack_row_risk=round(float(risk), 4))
+            usage = dict(report["usage_review"])
+            usage.update(category="inspect_first" if rank == "inspect_first" else "spot_check",
+                         priority_score=int(round(100 * float(risk))))
+            report["usage_review"] = usage
+    return sample
+
+
 def _align_or_error(project: ProjectSpec, recording: RecordingSpec, skip_failed: bool,
                     **options: object) -> AlignmentResult | AlignmentError:
     """align_recording, but return the error instead of raising when ``skip_failed``."""
@@ -510,9 +562,11 @@ def generate_project(
     write_timelines: bool = True,
     oto_style: OtoStyle | None = None,
     alias_suffix: str = "",
+    stable_window: bool = False,
     skip_failed_recordings: bool = False,
     alignment_workers: int = 1,
     progress: ProgressCallback | None = None,
+    pack_style_info: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Generate OTO files; the write_* flags skip diagnostic files only, never the OTO files.
 
@@ -655,6 +709,7 @@ def generate_project(
     finally:
         aligner.close()
     failed_recordings: list[dict[str, str]] = []
+    pack_recordings: dict[int, tuple[dict[str, object], Path]] = {}
     for recording_index, recording in enumerate(recordings):
         if progress is not None:
             progress("render", recording_index, len(recordings))
@@ -688,6 +743,11 @@ def generate_project(
         else:
             timeline, timeline_source_path, timeline_source_sha256 = reused_timelines[recording_index]
             backend_used = str(timeline.provenance.get("backend_used", project.alignment.backend))
+        if recording.metadata.get("language_pack"):
+            timeline = add_pack_landmarks(timeline, project.wav_path(recording), project.inventory)
+            pack_recordings[recording_index] = ({"phone_segments": [segment.to_dict() for segment in timeline.phone_segments],
+                                                 "landmarks": [landmark.to_dict() for landmark in timeline.landmarks],
+                                                 "confidence": timeline.confidence}, project.wav_path(recording))
         profile_id = timeline.provenance.get("alignment_profile")
         profile_sha256 = timeline.provenance.get("alignment_profile_sha256")
         if isinstance(profile_id, str) and isinstance(profile_sha256, str):
@@ -733,6 +793,7 @@ def generate_project(
         ]
         korean = recording.metadata.get("language_hint") in {"ko", "kr", "korean"}
         format_hint = recording.metadata.get("format_hint")
+        segments = {segment.phone_index: segment for segment in timeline.phone_segments}
         risks: list[float] | None = None
         risk_profile = _risk_profile(recording)
         if risk_profile is not None and rendered:
@@ -750,6 +811,12 @@ def generate_project(
                 row = apply_korean_vcv_window(row)
             elif korean and format_hint == "cvc":
                 row = apply_korean_cvc_window(row)
+            stable_info = None
+            # Language-pack rows keep their shape: the pack style and review risk were fitted to it.
+            if stable_window and not recording.metadata.get("language_pack"):
+                vowel = segments.get(plan.phone_indices[0]) if plan.phone_indices else None
+                row, stable_info = apply_stable_window(row, project.wav_path(recording),
+                                                       vowel_start_ms=vowel.start_ms if vowel is not None else None)
             row = apply_oto_style(row, oto_style)
             if alias_suffix:  # every output (oto, clean/review, row report) carries the suffixed alias
                 row = replace(row, alias=with_alias_suffix(row.alias, alias_suffix))
@@ -792,6 +859,8 @@ def generate_project(
                 }
             )
             row_reports[-1]["usage_review"] = usage_review(row_reports[-1], timeline)
+            if stable_info is not None:
+                row_reports[-1]["stable_window"] = stable_info
         timeline_rows.append(
             {
                 "recording_index": recording_index,
@@ -809,6 +878,9 @@ def generate_project(
             }
         )
 
+    style_sample_rows: list[dict] = []
+    if pack_recordings:
+        style_sample_rows = _apply_pack_row_risk(row_reports, rows_by_output, pack_recordings, pack_style_info)
     targets = []
     output_encoding = resolve_output_encoding(project.generation.output_encoding, source_encoding)
     encoding_fallback = None
@@ -872,6 +944,10 @@ def generate_project(
             overwrite=force,
             backup_existing=project.generation.backup_existing,
         )
+    style_sample_path = None
+    if style_sample_rows:
+        style_sample_path = report_dir / style_sample.SAMPLE_FILE
+        style_sample.write_style_sample(style_sample_path, style_sample_rows)
     split_counts = Counter(str(row["split"]) for row in row_reports)
     usage_review_report = write_review_priority(row_reports, report_dir,
         backup_existing=project.generation.backup_existing)
@@ -951,6 +1027,8 @@ def generate_project(
         "clean_rows": split_counts.get("clean", 0),
         "review_rows": split_counts.get("review", 0),
         "usage_review": usage_review_report,
+        "style_sample": ({"path": str(style_sample_path), "rows": len(style_sample_rows)}
+                         if style_sample_path is not None else None),
         "reason_counts": dict(sorted(reason_counts.items())),
         "alias_type_counts": {
             f"{role}:{subtype}": count

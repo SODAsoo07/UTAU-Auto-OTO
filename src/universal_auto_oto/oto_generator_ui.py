@@ -12,23 +12,26 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
-from . import __version__
+from . import __version__, display_version
 from .app_icon import CTK_TOPLEVEL_ICON_DELAY_MS, apply_app_icon
 from .bank_detection import FormatDetection, check_language, detect_format
 from .batch import BankFolder, discover_bank_folders, run_batch
+from .language_pack import find_language_pack
 from .i18n import LANGUAGE_NAMES, get_language, load_ui_language, machine_translation_notice, save_ui_language, t, translate
 from .generator import (DIAGNOSTIC_FILE_OPTIONS, GenerationCancelled, GenerationOptions, _discover_wavs,
                         generate_voicebank, inspect_voicebank)
 from .oto_io import apply_alias_suffix_to_oto, normalize_alias_suffix, parse_oto, with_alias_suffix, write_lines_atomic
 from .oto_preview import launch_oto_preview
 from .oto_style import OtoStyle, load_oto_style, save_oto_style
+from .pack_style import NO_STYLE
 
 
-APP_NAME = f"AutoOTO v{__version__}"
+APP_NAME = f"AutoOTO v{display_version()}"
 
 LANGUAGE_CHOICES: Mapping[str, str | None] = {
     "한국어": "korean",
     "일본어": "japanese",
+    "영어": "english",
 }
 AUTO_FORMAT_CHOICE = "자동 감지"
 FORMAT_CHOICES: Mapping[str, str | None] = {
@@ -37,7 +40,23 @@ FORMAT_CHOICES: Mapping[str, str | None] = {
     "CVC": "cvc",
     "CVVC": "cvvc",
     "VCV": "vcv",
+    "VCCV": "vccv",
 }
+# Formats the format menu hides for a language (no route or pack for that pair).
+HIDDEN_FORMATS: Mapping[str, frozenset[str]] = {
+    "korean": frozenset({"vccv"}),
+    "japanese": frozenset({"cvc", "vccv"}),
+    "english": frozenset({"cv", "cvc", "cvvc", "vcv"}),
+}
+
+
+def format_choices_for(language_choice: str | None) -> tuple[str, ...]:
+    """Format menu entries for a language choice; automatic detection is always offered."""
+
+    hidden = HIDDEN_FORMATS.get(LANGUAGE_CHOICES.get(language_choice or "") or "", frozenset())
+    return tuple(key for key, value in FORMAT_CHOICES.items() if value is None or value not in hidden)
+
+
 ENCODING_CHOICES = ("preserve", "utf-8", "cp932", "shift_jis", "cp949", "euc-kr")
 VC_END_CHOICES: Mapping[str, str] = {
     "다음 자음 안에서 끝냄 (권장)": "consonant",
@@ -50,6 +69,10 @@ UNMAPPED_ROW_CHOICES: Mapping[str, str] = {
 }
 RELEASE_PRE_CHOICES: Mapping[str, str] = {
     "모음 끝 (권장)": "vowel_end",
+    "템플릿 기본값": "template",
+}
+STABLE_WINDOW_CHOICES: Mapping[str, str] = {
+    "안정된 부분만 (권장)": "stable",
     "템플릿 기본값": "template",
 }
 CONFIDENCE_LABELS = {"high": "높음", "medium": "보통", "low": "낮음", "none": "없음"}
@@ -86,6 +109,7 @@ STYLE_FIELDS = (
 RECOMMENDED_DEVELOPMENT_PROFILE = "cvvc_slot_rhythm_v19"
 RECOMMENDED_VC_END_POLICY = "consonant"
 RECOMMENDED_RELEASE_PRE_POLICY = "vowel_end"
+RECOMMENDED_STABLE_WINDOW_POLICY = "stable"
 # Rows the parser cannot bind to a recording are left out and listed instead
 # of stopping the whole bank; the log says so after every generation.
 PRODUCT_UNMAPPED_ALIAS_POLICY = "exclude_row"
@@ -163,6 +187,7 @@ def build_generation_options(
     development_alignment_profile: str | None = None,
     vc_end_policy: str = "template",
     release_pre_policy: str = "template",
+    stable_window_policy: str = "template",
     unmapped_alias_policy: str = "fail",
     unmapped_row_output: str = "exclude",
     diagnostic_files: Mapping[str, bool] | None = None,
@@ -170,6 +195,7 @@ def build_generation_options(
     oto_style: OtoStyle | None = None,
     bpm: float | None = None,
     estimate_bpm: bool = False,
+    style_profile: str | None = None,
     alias_suffix: str = "",
 ) -> GenerationOptions:
     """Convert UI values into the same options object used by the CLI.
@@ -213,6 +239,7 @@ def build_generation_options(
         development_alignment_profile=development_alignment_profile,
         vc_end_policy=vc_end_policy,
         release_pre_policy=release_pre_policy,
+        stable_window_policy=stable_window_policy,
         unmapped_alias_policy=unmapped_alias_policy,
         unmapped_row_output=unmapped_row_output,
         **_diagnostic_file_flags(diagnostic_files, default=True),
@@ -220,9 +247,23 @@ def build_generation_options(
         oto_style=oto_style,
         bpm=bpm,
         estimate_bpm=estimate_bpm,
+        style_profile=_style_profile_value(style_profile),
         alias_suffix=parse_alias_suffix(alias_suffix),
         alignment_workers=0,  # automatic: parallel alignment, identical rows
     )
+
+
+def _style_profile_value(value: str | None) -> Path | str | None:
+    """Blank = the language pack's default style, 'none' = templates only, else a fit-style file."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.casefold() == NO_STYLE:
+        return NO_STYLE
+    path = Path(text).expanduser()
+    if not path.is_file():
+        raise ValueError(t("스타일 프로필 파일이 없습니다: {path}", path=path))
+    return path
 
 
 def _diagnostic_file_flags(choices: Mapping[str, bool] | None, *, default: bool) -> dict[str, bool]:
@@ -251,8 +292,10 @@ def build_product_generation_options(
     oto_style: OtoStyle | None = None,
     vc_end_choice: str | None = None,
     release_pre_choice: str | None = None,
+    style_profile: str | None = None,
     alias_suffix: str = "",
     unmapped_row_choice: str | None = None,
+    stable_window_choice: str | None = None,
 ) -> GenerationOptions:
     """Build the safe production options exposed by the product UI.
 
@@ -269,6 +312,8 @@ def build_product_generation_options(
     vc_end_policy = VC_END_CHOICES[vc_end_choice] if vc_end_choice else RECOMMENDED_VC_END_POLICY
     release_pre_policy = (RELEASE_PRE_CHOICES[release_pre_choice] if release_pre_choice
                           else RECOMMENDED_RELEASE_PRE_POLICY)
+    stable_window_policy = (STABLE_WINDOW_CHOICES[stable_window_choice] if stable_window_choice
+                            else RECOMMENDED_STABLE_WINDOW_POLICY)
     has_base_oto = base_oto is not None and bool(str(base_oto).strip())
     if output_encoding not in ENCODING_CHOICES:
         raise ValueError(t("지원하지 않는 출력 인코딩입니다: {encoding}", encoding=output_encoding))
@@ -286,9 +331,10 @@ def build_product_generation_options(
         format_hint=format_hint,
         language_hint=LANGUAGE_CHOICES[language_choice],
         backend="routed_hsmm",
-        development_alignment_profile=RECOMMENDED_DEVELOPMENT_PROFILE,
+        development_alignment_profile=recommended_alignment_profile(LANGUAGE_CHOICES[language_choice], format_hint),
         vc_end_policy=vc_end_policy,
         release_pre_policy=release_pre_policy,
+        stable_window_policy=stable_window_policy,
         unmapped_alias_policy=PRODUCT_UNMAPPED_ALIAS_POLICY,
         unmapped_row_output=UNMAPPED_ROW_CHOICES[unmapped_row_choice or next(iter(UNMAPPED_ROW_CHOICES))],
         diagnostic_files=_diagnostic_file_flags(diagnostic_files, default=False),
@@ -296,8 +342,16 @@ def build_product_generation_options(
         oto_style=None if oto_style is None or oto_style.is_default else oto_style,
         bpm=parse_bpm(bpm),
         estimate_bpm=bool(estimate_bpm),
+        style_profile=style_profile,
         alias_suffix=alias_suffix,
     )
+
+
+def recommended_alignment_profile(language_hint: str | None, format_hint: str | None) -> str:
+    """The language pack's profile for pack formats (English VCCV stays on v16), else the GUI's."""
+
+    pack = find_language_pack(language_hint, format_hint) if language_hint and format_hint else None
+    return pack.alignment_profile if pack is not None and pack.alignment_profile else RECOMMENDED_DEVELOPMENT_PROFILE
 
 
 def parse_bpm(value: str | float | None) -> float | None:
@@ -504,9 +558,11 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
         "review_notice": t("review 행은 자동 검수 보류이며 오류 확정이 아닙니다."),
         "generation_settings": {
             key: (report.get("provenance") or {}).get(key)
-            for key in ("development_alignment_profile", "vc_end_policy", "release_pre_policy")
+            for key in ("development_alignment_profile", "vc_end_policy", "release_pre_policy",
+                        "stable_window_policy")
         },
         "usage_review": dict(report.get("usage_review", {}) or {}),
+        "style_sample": report.get("style_sample"),
         "excluded_alias_rows": int(report.get("excluded_alias_rows", 0) or 0),
         "kept_base_rows": int(report.get("kept_base_rows", 0) or 0),
         "excluded_alias_rows_csv": report.get("excluded_alias_rows_csv"),
@@ -605,6 +661,11 @@ def format_result_text(title: str, payload: Mapping[str, object]) -> str:
             lines.extend(("", t("먼저 확인: {count}행", count=counts.get("inspect_first", 0)),
                 t("연결 확인: {count}행", count=counts.get("connection_check", 0)),
                 t("표본 확인: {count}행", count=counts.get("spot_check", 0)), t("검수 순서: {path}", path=usage["csv"])))
+        sample = payload.get("style_sample")
+        if isinstance(sample, Mapping) and sample.get("rows"):
+            lines.extend(("", t("스타일 샘플: {count}행 ({path})", count=sample["rows"], path=sample.get("path")),
+                          t("이 행들만 oto.ini에서 확인·수정한 뒤 고급 설정의 '샘플로 학습'을 누르고 다시 생성하면"
+                            " 내 타이밍 습관이 반영됩니다.")))
         if isinstance(reasons, Mapping) and reasons:
             lines.extend(("", t("주요 검수 사유")))
             for reason, count in sorted(reasons.items(), key=lambda item: (-int(item[1]), str(item[0])))[:8]:
@@ -669,10 +730,12 @@ def launch_oto_generator_ui(
             self.batch_var = tk.BooleanVar(value=False)
             self.folder_oto_var = tk.BooleanVar(value=True)
             self.bpm_var = tk.StringVar()
+            self.style_profile_var = tk.StringVar()
             self.estimate_bpm_var = tk.BooleanVar(value=False)
             self.alias_suffix_var = tk.StringVar()
             self.vc_end_var = tk.StringVar(value=next(iter(VC_END_CHOICES)))
             self.release_pre_var = tk.StringVar(value=next(iter(RELEASE_PRE_CHOICES)))
+            self.stable_window_var = tk.StringVar(value=next(iter(STABLE_WINDOW_CHOICES)))
             self.unmapped_row_var = tk.StringVar(value=next(iter(UNMAPPED_ROW_CHOICES)))
             self.style_vars = {name: tk.StringVar() for name, _, _ in STYLE_FIELDS}
             self.detection_var = tk.StringVar(value=t("형식 감지: 보이스뱅크 폴더를 고르면 표시됩니다."))
@@ -804,8 +867,10 @@ def launch_oto_generator_ui(
                 ctk_module, profile_row, "언어", self.language_var, tuple(LANGUAGE_CHOICES), translated=True
             )
             self.format_menu = self._option_menu(
-                ctk_module, profile_row, "포맷", self.format_var, tuple(FORMAT_CHOICES), translated=True
+                ctk_module, profile_row, "포맷", self.format_var, format_choices_for(self.language_var.get()),
+                translated=True
             )
+            self.language_var.trace_add("write", lambda *_: self._sync_format_choices())
             ctk_module.CTkLabel(profile, textvariable=self.detection_var, text_color=HINT, anchor="w").pack(
                 fill="x", padx=12, pady=(2, 8)
             )
@@ -876,6 +941,10 @@ def launch_oto_generator_ui(
                 translated=True,
             )
             self._option_menu(
+                ctk_module, option_row, "고정·늘림 구간", self.stable_window_var, tuple(STABLE_WINDOW_CHOICES),
+                translated=True,
+            )
+            self._option_menu(
                 ctk_module, option_row, "생성하지 못한 기존 oto 행", self.unmapped_row_var, tuple(UNMAPPED_ROW_CHOICES),
                 translated=True,
             )
@@ -902,6 +971,23 @@ def launch_oto_generator_ui(
                     preset_row, text=t(label), width=120, command=command,
                     fg_color=PRIMARY, hover_color=PRIMARY_HOVER,
                 ).pack(side="left", padx=(0, 8))
+            labeler_row = ctk_module.CTkFrame(self.advanced_frame, fg_color="transparent")
+            labeler_row.pack(fill="x", padx=12, pady=(4, 2))
+            ctk_module.CTkLabel(labeler_row, text=t("라벨러 스타일 (영어 등 언어팩)"), anchor="w").pack(side="left")
+            ctk_module.CTkEntry(labeler_row, textvariable=self.style_profile_var, width=260,
+                                placeholder_text=t("비우면 언어팩 기본")).pack(side="left", padx=(10, 8))
+            for label, command in ((t("파일 선택"), self._choose_style_profile),
+                                   (t("내 OTO로 학습"), self._fit_style_profile),
+                                   (t("샘플로 학습"), self._fit_style_sample)):
+                ctk_module.CTkButton(labeler_row, text=label, width=110, command=command,
+                                     fg_color=PRIMARY, hover_color=PRIMARY_HOVER).pack(side="left", padx=(0, 8))
+            ctk_module.CTkLabel(
+                self.advanced_frame,
+                text=t("내가 손으로 맞춘 oto.ini가 있는 폴더(하위 폴더 포함)에서 내 타이밍 습관을 배워 새 음원에 적용합니다.\n"
+                       "샘플로 학습: 생성 후 출력 폴더의 style_sample.csv에 적힌 행(모양마다 5행)만 oto.ini에서 고치고 누르세요.\n"
+                       "'none'을 넣으면 스타일 없이 템플릿만 씁니다."),
+                text_color=HINT, anchor="w", justify="left",
+            ).pack(fill="x", padx=12, pady=(0, 10))
             ctk_module.CTkLabel(
                 self.advanced_frame,
                 text=t("진단 파일 저장 (기본 꺼짐, 켜도 oto.ini 결과는 같습니다)"),
@@ -1067,7 +1153,23 @@ def launch_oto_generator_ui(
                 if command is not None:
                     command(variable.get())
 
-            return ctk_module.CTkOptionMenu(parent, variable=shown, values=list(by_label), command=chosen, **kwargs)
+            menu = ctk_module.CTkOptionMenu(parent, variable=shown, values=list(by_label), command=chosen, **kwargs)
+
+            def set_keys(new_keys) -> None:
+                by_label.clear()
+                by_label.update({t(key): key for key in new_keys})
+                menu.configure(values=list(by_label))
+
+            menu.set_choice_keys = set_keys
+            return menu
+
+        def _sync_format_choices(self) -> None:
+            """Show only the formats of the chosen language; a hidden choice falls back to detection."""
+
+            keys = format_choices_for(self.language_var.get())
+            self.format_menu.set_choice_keys(keys)
+            if self.format_var.get() not in keys:
+                self.format_var.set(AUTO_FORMAT_CHOICE)
 
         def _set_ui_language(self, choice: str) -> None:
             language = next(code for code, name in LANGUAGE_NAMES.items() if name == choice)
@@ -1216,12 +1318,99 @@ def launch_oto_generator_ui(
                 save_oto_style(Path(selected), style)
                 self._append_log(t("[고급 설정] 프리셋을 저장했습니다: {path}", path=selected))
 
+        def _choose_style_profile(self) -> None:
+            selected = filedialog.askopenfilename(
+                title=t("스타일 프로필 선택"), filetypes=(("YAML", "*.yaml *.yml"), ("All files", "*.*"))
+            )
+            if selected:
+                self.style_profile_var.set(selected)
+
+        def _fit_style_profile(self) -> None:
+            root = Path(self.bank_var.get().strip()).expanduser()
+            language = LANGUAGE_CHOICES.get(self.language_var.get())
+            format_hint = FORMAT_CHOICES.get(self.format_var.get()) or self._detected_format_for_generation()
+            if not root.is_dir() or not format_hint:
+                messagebox.showerror(t("입력 오류"), t("보이스뱅크 폴더와 포맷을 먼저 정하세요."), parent=self)
+                return
+            banks = [folder for folder in [root, *sorted(p for p in root.rglob("*") if p.is_dir())]
+                     if (folder / "oto.ini").is_file() and (folder / "oto.ini").stat().st_size and any(folder.glob("*.wav"))]
+            if not banks:
+                messagebox.showerror(t("입력 오류"), t("손으로 맞춘 oto.ini와 WAV가 같이 있는 폴더가 없습니다."), parent=self)
+                return
+            from .style_fitting import template_like_reference
+
+            template = template_like_reference(banks)
+            if template is not None and not messagebox.askokcancel(
+                t("템플릿 OTO 확인"),
+                t("oto.ini {rows}행의 offset이 {count}가지뿐입니다 (예: {examples} ms).\n\n"
+                  "음원에 맞추지 않은 템플릿 OTO라면 잘못된 스타일을 배웁니다."
+                  " 직접 맞춘 OTO가 맞는지 확인하세요.\n\n그래도 학습할까요?",
+                  rows=template["rows"], count=template["distinct_offsets"],
+                  examples=", ".join(f"{value:g}" for value in template["most_common_offsets"])),
+                icon="warning", parent=self):
+                return
+            target = filedialog.asksaveasfilename(
+                title=t("스타일 프로필 저장"), defaultextension=".yaml", filetypes=(("YAML", "*.yaml"),)
+            )
+            if not target:
+                return
+
+            def operation() -> Mapping[str, object]:
+                from .style_fitting import fit_style_from_banks
+
+                return fit_style_from_banks(banks, output=Path(target), format_hint=format_hint,
+                                            language_hint=language or "")
+
+            # The next generation uses the profile; until the fit finishes the file does not exist yet.
+            self.style_profile_var.set(target)
+            self._append_log(t("[스타일 학습] oto.ini가 있는 폴더 {count}개 -> {path}", count=len(banks), path=target))
+            self._run(t("스타일 학습"), operation)
+
+        def _fit_style_sample(self) -> None:
+            from .style_sample import find_style_samples, fit_style_from_sample
+
+            output = Path(self.output_var.get().strip()).expanduser()
+            samples = find_style_samples(output) if output.is_dir() else []
+            if not samples:
+                messagebox.showerror(
+                    t("입력 오류"), t("출력 폴더에 style_sample.csv가 없습니다. 언어팩 형식(영어 VCCV)으로 먼저 생성하세요."),
+                    parent=self)
+                return
+            in_place = messagebox.askyesnocancel(
+                t("샘플로 학습"),
+                t("style_sample.csv {count}개에 적힌 행을 확인·수정했나요?\n\n"
+                  "예: 출력 폴더의 oto.ini를 직접 고쳤습니다.\n"
+                  "아니오: 결과를 보이스뱅크 폴더로 옮겨 거기서 고쳤습니다(폴더를 고릅니다).", count=len(samples)),
+                parent=self)
+            if in_place is None:
+                return
+            edited: Path | None = None
+            if not in_place:
+                chosen = filedialog.askdirectory(title=t("고친 oto.ini가 있는 보이스뱅크 폴더"))
+                if not chosen:
+                    return
+                edited = Path(chosen)
+            target = filedialog.asksaveasfilename(
+                title=t("스타일 프로필 저장"), defaultextension=".yaml", filetypes=(("YAML", "*.yaml"),))
+            if not target:
+                return
+
+            def operation() -> Mapping[str, object]:
+                return fit_style_from_sample(samples, Path(target), edited=edited, root=output)
+
+            self.style_profile_var.set(target)
+            self._append_log(t("[샘플 스타일 학습] 샘플 {count}개, 수정본 {edited} -> {path} (학습 후 다시 생성하세요)",
+                               count=len(samples), edited=edited or output, path=target))
+            self._run(t("샘플 스타일 학습"), operation)
+
         def _reset_advanced(self) -> None:
             for var in self.style_vars.values():
                 var.set("")
             self.encoding_var.set("preserve")
             self.vc_end_var.set(next(iter(VC_END_CHOICES)))
             self.release_pre_var.set(next(iter(RELEASE_PRE_CHOICES)))
+            self.stable_window_var.set(next(iter(STABLE_WINDOW_CHOICES)))
+            self.style_profile_var.set("")
             self.unmapped_row_var.set(next(iter(UNMAPPED_ROW_CHOICES)))
 
         def _refresh_detection(self) -> FormatDetection | None:
@@ -1293,8 +1482,10 @@ def launch_oto_generator_ui(
                 oto_style=self._style(),
                 vc_end_choice=self.vc_end_var.get(),
                 release_pre_choice=self.release_pre_var.get(),
+                style_profile=self.style_profile_var.get(),
                 alias_suffix=self.alias_suffix_var.get(),
                 unmapped_row_choice=self.unmapped_row_var.get(),
+                stable_window_choice=self.stable_window_var.get(),
             )
 
         def _read_options(self, *, force: bool = False, detected_format: str | None = None) -> GenerationOptions | None:
