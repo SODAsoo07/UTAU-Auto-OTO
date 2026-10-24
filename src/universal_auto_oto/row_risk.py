@@ -9,7 +9,10 @@ hand-made OTOs (7 VCV, 5 CVC; 2026-10-11). Its threshold keeps the clean rows' e
 the training banks; leave-one-bank-out: 79% clean, 2.1% errors among them, 67% of the errors routed
 to review. It reads the onset from romaji aliases only (onset rule "v1"); the later profiles also read
 kana and Hangul aliases (onset rule "v2") and list their own roles. A format without a profile stays
-all-review.
+all-review; CV banks are not split at all (one oto.ini).
+
+Japanese CVVC/VCV (2026-10-24): binned gradient-boosted trees (as the language packs) on the same
+features, recalibrated per oto.ini to an estimated folder error level (folder_level) before the cut.
 """
 
 from __future__ import annotations
@@ -31,9 +34,7 @@ PROFILE_RESOURCE = "profiles/korean_row_risk_v1.json"
 PROFILE_RESOURCES: Mapping[tuple[str, str], str] = {
     ("korean", "vcv"): PROFILE_RESOURCE,
     ("korean", "cvc"): PROFILE_RESOURCE,
-    ("korean", "cv"): "profiles/row_risk_korean_cv_v1.json",
     ("korean", "cvvc"): "profiles/row_risk_korean_cvvc_v1.json",
-    ("japanese", "cv"): "profiles/row_risk_japanese_cv_v1.json",
     ("japanese", "cvvc"): "profiles/row_risk_japanese_cvvc_v1.json",
     ("japanese", "vcv"): "profiles/row_risk_japanese_vcv_v1.json",
 }
@@ -183,6 +184,9 @@ def row_risks(rows: Sequence[Mapping[str, object]], wav_path: Path, onsets: np.n
     features = row_features(rows, voicing_onsets_ms(wav_path) if onsets is None else onsets,
                             onset_rule=str(profile.get("onset_rule", "v1")), roles=tuple(profile.get("roles", ROLES)),
                             extended=bool(profile.get("extended_features")))
+    if profile.get("kind") == "gbm":
+        from .pack_row_risk import predict  # the same binned depth-2 trees as the language packs
+        return predict(profile, features).tolist()
     role_models = profile.get("role_models")
     if not role_models:
         return _logistic(profile, features).tolist()
@@ -196,11 +200,85 @@ def row_risks(rows: Sequence[Mapping[str, object]], wav_path: Path, onsets: np.n
 
 
 def risk_threshold(profile: Mapping[str, object] | None = None, format_hint: str | None = None) -> float:
-    """The profile's clean threshold; a profile shared by formats may hold one per format."""
+    """The profile's clean threshold; a profile shared by formats may hold one per format.
+
+    A folder-level profile (folder_level) has none here: every row stays review until folder_clean
+    has seen the whole oto.ini.
+    """
     profile = profile if profile is not None else load_profile()
+    if folder_level(profile) is not None:
+        return float("-inf")
     per_format = profile.get("thresholds") or {}
     return float(per_format.get((format_hint or "").casefold(), profile["threshold"]))
 
 
-__all__ = ["load_profile", "right_onset_phone", "row_features", "row_risks", "risk_threshold", "voicing_onsets_ms",
-           "voiceless_right_onset"]
+def folder_level(profile: Mapping[str, object] | None) -> Mapping[str, object] | None:
+    """The folder error-level model of a profile, or None for a per-row threshold profile.
+
+    Japanese CVVC/VCV: one bank errs on 1% of its rows, another on 30%, and the row features alone do
+    not tell them apart, so one threshold on the row risk does not transfer. The mean row risk of a
+    whole oto.ini and how irregular its syllable spacing is do tell (Spearman 0.6-0.8 over 69 folders):
+    they estimate the folder's error level, the row risks are shifted to that level, then cut.
+    """
+    return (profile or {}).get("folder_level")
+
+
+SYLLABLE_ROLES = frozenset({"cv", "cv_head", "vcv", "vv", "v"})
+
+
+def tempo_irregularity(rows: Sequence[Mapping[str, object]]) -> float:
+    """Median over takes of the spread of syllable-to-syllable spacing (MAD / median).
+
+    Reclists are sung to a beat; a take decoded with a swallowed or split syllable has uneven spacing.
+    rows: role, wav and pre_abs of every row of one oto.ini.
+    """
+    by_wav: dict[str, list[float]] = {}
+    for row in rows:
+        if str(row["role"]) in SYLLABLE_ROLES:
+            by_wav.setdefault(str(row["wav"]), []).append(float(row["pre_abs"]))
+    spreads = []
+    for pres in by_wav.values():
+        pres = np.unique(np.round(np.asarray(pres), 0))
+        if len(pres) >= 4:
+            gaps = np.diff(pres)
+            median = float(np.median(gaps))
+            if median > 0:
+                spreads.append(float(np.median(np.abs(gaps - median))) / median)
+    return float(np.median(spreads)) if spreads else 0.0
+
+
+def _logit(p: np.ndarray | float) -> np.ndarray:
+    p = np.clip(np.asarray(p, dtype=np.float64), 1e-4, 1 - 1e-4)
+    return np.log(p / (1 - p))
+
+
+def calibrated_risks(risks: Sequence[float], rows: Sequence[Mapping[str, object]],
+                     profile: Mapping[str, object]) -> np.ndarray:
+    """Row risks shifted (in log-odds) so their mean is the folder's estimated error level."""
+    model = folder_level(profile)
+    risks = np.asarray(risks, dtype=np.float64)
+    if model is None or not len(risks):
+        return risks
+    values = {"risk": float(_logit(risks.mean())), "tempo": tempo_irregularity(rows)}
+    weights = np.asarray(model["weights"], dtype=np.float64)
+    level = 1.0 / (1.0 + np.exp(-(weights[0] + sum(w * values[name] for w, name in zip(weights[1:], model["features"])))))
+    z = _logit(risks)
+    target = float(np.clip(level, 1e-4, 1 - 1e-4))
+    low, high = -20.0, 20.0  # bisection: the mean of sigmoid(z + shift) rises with shift
+    for _ in range(60):
+        shift = 0.5 * (low + high)
+        if np.mean(1.0 / (1.0 + np.exp(-(z + shift)))) < target:
+            low = shift
+        else:
+            high = shift
+    return 1.0 / (1.0 + np.exp(-(z + 0.5 * (low + high))))
+
+
+def folder_clean(risks: Sequence[float], rows: Sequence[Mapping[str, object]],
+                 profile: Mapping[str, object]) -> list[bool]:
+    """Clean rows of one oto.ini under a folder-level profile: calibrated risk <= the profile threshold."""
+    return [bool(p <= float(profile["threshold"])) for p in calibrated_risks(risks, rows, profile)]
+
+
+__all__ = ["calibrated_risks", "folder_clean", "folder_level", "load_profile", "right_onset_phone", "row_features",
+           "row_risks", "risk_threshold", "tempo_irregularity", "voicing_onsets_ms", "voiceless_right_onset"]

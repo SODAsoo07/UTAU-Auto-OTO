@@ -117,6 +117,8 @@ _EN: dict[str, str] = {
     "다음 자음 안에서 끝냄 (권장)": "End inside the next consonant (recommended)",
     "템플릿 기본값": "Template default",
     "모음 끝 (권장)": "Vowel end (recommended)",
+    "이 형식은 clean/review를 나누지 않고 oto.ini 하나만 만듭니다.":
+        "This format is not split into clean/review; only oto.ini is written.",
     "안정된 부분만 (권장)": "Steady part only (recommended)",
     "높음": "high",
     "보통": "medium",
@@ -270,6 +272,11 @@ _EN: dict[str, str] = {
         "[Note] {count} rows could not be generated: their aliases in the source OTO could not be matched to a "
         "recording file name, or the recording could not be analyzed, so their existing oto.ini values were kept "
         "unchanged (also in oto.review.ini)."),
+    "[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+    "기존 oto.ini 값을 그대로 넣었습니다.": (
+        "[Note] {count} rows could not be generated: their aliases in the source OTO could not be matched to a "
+        "recording file name, or the recording could not be analyzed, so their existing oto.ini values were kept "
+        "unchanged."),
     "[주의] 파일 이름이나 별칭을 {requested}로 저장할 수 없어 oto.ini를 UTF-8로 저장했습니다.": (
         "[Note] File names or aliases could not be saved as {requested}, so oto.ini was saved as UTF-8."),
     "▶ 고급 설정": "▶ Advanced settings",
@@ -498,6 +505,8 @@ _JA: dict[str, str] = {
     "다음 자음 안에서 끝냄 (권장)": "次の子音の中で終える (推奨)",
     "템플릿 기본값": "テンプレートの既定値",
     "모음 끝 (권장)": "母音の終わり (推奨)",
+    "이 형식은 clean/review를 나누지 않고 oto.ini 하나만 만듭니다.":
+        "この形式はclean/reviewに分けず、oto.iniだけを作ります。",
     "안정된 부분만 (권장)": "安定した部分のみ (推奨)",
     "높음": "高",
     "보통": "中",
@@ -645,6 +654,10 @@ _JA: dict[str, str] = {
     "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).": (
         "[注意] 生成できなかった行 {count}個: 元のOTOのエイリアスを録音ファイル名と対応付けられなかったか、録音を解析できなかったため、"
         "既存のoto.iniの値をそのまま入れました (oto.review.iniにも含みます)。"),
+    "[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+    "기존 oto.ini 값을 그대로 넣었습니다.": (
+        "[注意] 生成できなかった行 {count}個: 元のOTOのエイリアスを録音ファイル名と対応付けられなかったか、録音を解析できなかったため、"
+        "既存のoto.iniの値をそのまま入れました。"),
     "[주의] 파일 이름이나 별칭을 {requested}로 저장할 수 없어 oto.ini를 UTF-8로 저장했습니다.": (
         "[注意] ファイル名やエイリアスを{requested}で保存できないため、oto.iniをUTF-8で保存しました。"),
     "▶ 고급 설정": "▶ 詳細設定",

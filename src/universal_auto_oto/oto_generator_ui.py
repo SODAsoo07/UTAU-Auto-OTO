@@ -536,7 +536,9 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
 
     oto_path = output / "oto.ini"
     written = dict(report.get("diagnostic_files", {}) or {})
+    split = bool(report.get("split_review", True))
     summary: dict[str, object] = {
+        "split_review": split,
         "oto": str(oto_path.resolve()),
         "oto_exists": oto_path.is_file(),
         "wav_count": report.get("wav_count", 0),
@@ -553,9 +555,10 @@ def summarize_generation_result(report: Mapping[str, object], *, output: Path) -
                         if written.get("generation_report", True) else None),
         "row_report_path": (str((output / "row_report.jsonl").resolve())
                             if written.get("row_report", True) else None),
-        "clean_path": str((output / "oto.clean.ini").resolve()),
-        "review_path": str((output / "oto.review.ini").resolve()),
-        "review_notice": t("review 행은 자동 검수 보류이며 오류 확정이 아닙니다."),
+        "clean_path": str((output / "oto.clean.ini").resolve()) if split else None,
+        "review_path": str((output / "oto.review.ini").resolve()) if split else None,
+        "review_notice": (t("review 행은 자동 검수 보류이며 오류 확정이 아닙니다.") if split
+                          else t("이 형식은 clean/review를 나누지 않고 oto.ini 하나만 만듭니다.")),
         "generation_settings": {
             key: (report.get("provenance") or {}).get(key)
             for key in ("development_alignment_profile", "vc_end_policy", "release_pre_policy",
@@ -619,9 +622,12 @@ def excluded_rows_log_lines(payload: Mapping[str, object]) -> list[str]:
         return []
     failed = list(payload.get("failed_recordings") or [])
     kept = int(payload.get("kept_base_rows", 0) or 0)
+    split = payload.get("split_review", True)
     lines = [
         t("[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
-          "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).", count=count) if kept
+          "기존 oto.ini 값을 그대로 넣었습니다 (oto.review.ini에도 포함).", count=count) if kept and split
+        else t("[주의] 생성하지 못한 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 녹음을 분석하지 못해 "
+               "기존 oto.ini 값을 그대로 넣었습니다.", count=count) if kept
         else t("[주의] 생성되지 않은 행 {count}개: 원본 OTO의 별칭을 녹음 파일 이름과 연결하지 못했거나 "
                "녹음을 분석하지 못해 oto.ini에서 뺐습니다.", count=count),
         *([t("  분석하지 못한 녹음 {count}개(무음·잘린 녹음일 수 있음): {names}", count=len(failed),
@@ -646,8 +652,9 @@ def format_result_text(title: str, payload: Mapping[str, object]) -> str:
             [
                 f"WAV: {payload.get('wav_count', 0)}",
                 t("생성 행: {count}", count=payload.get("generated_rows", 0)),
-                t("자동 clean: {count}", count=payload.get("clean_rows", 0)),
-                t("검수 보류: {count}", count=payload.get("review_rows", 0)),
+                *((t("자동 clean: {count}", count=payload.get("clean_rows", 0)),
+                   t("검수 보류: {count}", count=payload.get("review_rows", 0)))
+                  if payload.get("split_review", True) else ()),
                 str(payload.get("review_notice", "")),
             ]
         )

@@ -643,7 +643,8 @@ def build_routed_voicebank_project(
         backup_existing=True,
         write_debug_timeline=True,
         write_textgrid=False,
-        split_review=True,
+        # CV banks get one oto.ini: no risk model separates their rows (2026-10-24).
+        split_review=format_type != "cv",
     )
     calibration = CalibrationConfig(enabled=False, profile=None)
     inventory_sha256 = _semantic_sha256(_inventory_semantics(inventory))

@@ -20,7 +20,7 @@ from .oto_io import resolve_output_encoding, with_alias_suffix, write_lines_atom
 from .oto_style import OtoStyle, apply_korean_cvc_window, apply_korean_vcv_window, apply_oto_style
 from .stable_window import apply_stable_window
 from . import analysis_cache
-from .row_risk import load_profile, risk_threshold, row_risks, voicing_onsets_ms
+from .row_risk import folder_clean, folder_level, load_profile, risk_threshold, row_risks, voicing_onsets_ms
 from .audio import file_sha256
 from .domain import LandmarkTimeline, RecordingSpec, landmark_timeline_from_dict
 from .project import ProjectSpec
@@ -289,6 +289,31 @@ def _with_row_risk(row, risk: float, threshold: float):
     marker = "row_risk_low" if clean else "row_risk_high"
     return replace(row, split="clean" if clean else "review", confidence=float(1.0 - risk),
                    reasons=(*reasons, marker))
+
+
+def _apply_folder_row_risk(row_reports, rows_by_output, deferred: Mapping[int, tuple[float, dict, Mapping]]) -> None:
+    """Folder-level profiles (row_risk.folder_level): each oto.ini's row risks are shifted to its
+    estimated error level, then cut at the profile threshold.
+
+    ``deferred`` maps a row report position to (risk, {role, wav, pre_abs}, profile); those rows were
+    written review.
+    """
+    by_output: dict[str, list[int]] = defaultdict(list)
+    for position in deferred:
+        by_output[str(row_reports[position]["output_oto"])].append(position)
+    for positions in by_output.values():
+        picks = folder_clean([deferred[p][0] for p in positions], [deferred[p][1] for p in positions],
+                             deferred[positions[0]][2])
+        for position, picked in zip(positions, picks):
+            report = row_reports[position]
+            target = Path(report["output_oto"])
+            row = rows_by_output[target][int(report["oto_line"]) - 1]
+            if not picked or "template_constraint_repaired" in row.reasons:
+                continue
+            reasons = tuple("row_risk_low" if reason == "row_risk_high" else reason for reason in row.reasons)
+            row = replace(row, split="clean", reasons=reasons)
+            rows_by_output[target][int(report["oto_line"]) - 1] = row
+            report.update(split="clean", reasons=list(reasons))
 
 
 def _apply_pack_row_risk(row_reports, rows_by_output, pack_recordings, style_sample_info=None) -> list[dict]:
@@ -710,6 +735,7 @@ def generate_project(
         aligner.close()
     failed_recordings: list[dict[str, str]] = []
     pack_recordings: dict[int, tuple[dict[str, object], Path]] = {}
+    deferred_rows: dict[int, tuple[float, dict, Mapping]] = {}  # rows split once their oto.ini is complete
     for recording_index, recording in enumerate(recordings):
         if progress is not None:
             progress("render", recording_index, len(recordings))
@@ -804,9 +830,15 @@ def generate_project(
                   "fallback_count": trace.fallback_count, "missing_landmarks": len(trace.missing_landmarks)}
                  for _plan, row, trace in rendered],
                 project.wav_path(recording), onsets=aligner.onsets.get(recording.wav), profile=risk_profile)
+        per_folder = risks is not None and folder_level(risk_profile) is not None
         for alias_index, (plan, row, trace) in enumerate(rendered):
             if risks is not None:
                 row = _with_row_risk(row, risks[alias_index], risk_threshold(risk_profile, format_hint))
+                if per_folder:
+                    deferred_rows[len(row_reports)] = (
+                        float(risks[alias_index]),
+                        {"role": row.role, "wav": recording.wav, "pre_abs": trace.final_anchors["pre_abs"]},
+                        risk_profile)
             if korean and format_hint == "vcv":
                 row = apply_korean_vcv_window(row)
             elif korean and format_hint == "cvc":
@@ -878,6 +910,8 @@ def generate_project(
             }
         )
 
+    if deferred_rows:
+        _apply_folder_row_risk(row_reports, rows_by_output, deferred_rows)
     style_sample_rows: list[dict] = []
     if pack_recordings:
         style_sample_rows = _apply_pack_row_risk(row_reports, rows_by_output, pack_recordings, pack_style_info)
@@ -949,8 +983,8 @@ def generate_project(
         style_sample_path = report_dir / style_sample.SAMPLE_FILE
         style_sample.write_style_sample(style_sample_path, style_sample_rows)
     split_counts = Counter(str(row["split"]) for row in row_reports)
-    usage_review_report = write_review_priority(row_reports, report_dir,
-        backup_existing=project.generation.backup_existing)
+    usage_review_report = (write_review_priority(row_reports, report_dir,
+        backup_existing=project.generation.backup_existing) if project.generation.split_review else None)
     reason_counts = Counter(reason for row in row_reports for reason in row["reasons"])
     alias_type_counts = Counter(
         (
@@ -1024,6 +1058,7 @@ def generate_project(
         **({"failed_recordings": failed_recordings} if failed_recordings else {}),
         "recording_count": len(recordings),
         "generated_rows": len(row_reports),
+        "split_review": project.generation.split_review,
         "clean_rows": split_counts.get("clean", 0),
         "review_rows": split_counts.get("review", 0),
         "usage_review": usage_review_report,
