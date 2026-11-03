@@ -279,3 +279,20 @@ def test_korean_cvc_glued_codas_liquid_spelling_breath_and_held_vowels():
     assert bind("eunR_eumR.wav", ["m R"], language="korean", format_type="cvc")[0].phone_indices == (4, 5)
     assert parse_filename_phone_slots("aLong.wav", format_hint="cvc", language_hint="korean") == (("a",), ("a",))
     assert bind("aLong.wav", ["a a"], language="korean", format_type="cvc")[0].phone_indices == (0, 1)
+
+
+def test_korean_cvc_doubled_syllables_and_h_breath():
+    # zetty CVC reclist: baba_bibi... records each CV twice; aH/nH glue the closing breath with H.
+    assert parse_filename_phone_slots("baba_bibi.wav", format_hint="cvc", language_hint="korean") == (
+        ("b", "a"), ("b", "a"), ("b", "i"), ("b", "i"))
+    plans = {p.alias: p.phone_indices for p in bind("baba_bibi.wav", ["ba", "a b", "- bi", "i b"],
+                                                  language="korean", format_type="cvc")}
+    assert plans == {"ba": (0, 1), "a b": (1, 2), "- bi": (4, 5), "i b": (5, 6)}
+    assert parse_filename_phone_slots("nH_ngH.wav", format_hint="cvc", language_hint="korean") == (
+        ("n", "exh"), ("ng", "exh"))
+    assert bind("nH_ngH.wav", ["ng R"], language="korean", format_type="cvc")[0].phone_indices == (2, 3)
+    assert parse_filename_phone_slots("aH_euH.wav", format_hint="cvc", language_hint="korean") == (
+        ("a", "exh"), ("eu", "exh"))
+    # A coda that only looks doubled stays one syllable.
+    assert parse_filename_phone_slots("gang_ging.wav", format_hint="cvc", language_hint="korean") == (
+        ("g", "a", "ng"), ("g", "i", "ng"))

@@ -238,8 +238,8 @@ def parse_filename_phone_slots(
             if len(held) == 1 and _is_vowel_id(held[0]):
                 slots.extend((held, held))
                 continue
-        if korean_cvc and len(surface) > 1 and surface.endswith("R"):
-            # Korean CVC lists glue the closing breath to each syllable (aR_eR, eunR_eumR).
+        if korean_cvc and len(surface) > 1 and surface.endswith(("R", "H")):
+            # Korean CVC lists glue the closing breath to each syllable (aR_eR, eunR_eumR, aH_nH).
             before = _parse_roman_slot(surface[:-1].casefold(), format_type=format_type, language_hint=language_hint)
             if before:
                 slots.append((*before, "exh"))
@@ -345,7 +345,7 @@ def _parse_korean_cvvc_compact_duplicate_slots(
     format_type: str,
     language_hint: str | None,
 ) -> tuple[tuple[str, ...], ...]:
-    """Expand a documented Korean CVVC ``CVCV`` compact token safely.
+    """Expand a documented Korean CVVC/CVC ``CVCV`` compact token safely.
 
     A token such as ``ddadda`` is two occurrences of ``dda``. Treating its
     second half as a coda (``dd | a | dda``) silently invents a phone that
@@ -358,7 +358,7 @@ def _parse_korean_cvvc_compact_duplicate_slots(
     manifest/reclist when ambiguous.
     """
 
-    if format_type != "cvvc" or (language_hint or "").casefold() not in {"ko", "kr", "korean"}:
+    if format_type not in {"cvvc", "cvc"} or (language_hint or "").casefold() not in {"ko", "kr", "korean"}:
         return ()
     if len(token) < 2 or len(token) % 2:
         return ()
