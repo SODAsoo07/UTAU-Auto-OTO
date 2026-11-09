@@ -11,6 +11,7 @@ at t-25, t and t+25 ms, the low/mid band balance, and the level relative to the 
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -23,7 +24,8 @@ WINDOW_S = 0.030
 BANDS = 20
 LOW_HZ, HIGH_HZ = 60.0, 6000.0
 CONTEXT_MS = 25.0
-PROFILE = Path(__file__).resolve().parent / "profiles" / "nasal_frame_v1.json"
+PROFILE = Path(os.environ.get("UNIVERSAL_AUTO_OTO_NASAL_PROFILE")
+               or Path(__file__).resolve().parent / "profiles" / "nasal_frame_v2.json")
 
 
 def _mel(hz):
@@ -57,22 +59,32 @@ def _shape(power: np.ndarray, freqs: np.ndarray) -> np.ndarray:
     return bands - bands.mean(axis=1, keepdims=True)
 
 
-def frame_features(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
+def frame_features(wav_path: Path, times_ms: np.ndarray, warp: float = 1.0) -> np.ndarray:
     samples, rate = sf.read(str(wav_path), dtype="float64", always_2d=True)
-    mono = samples.mean(axis=1)
+    return frame_features_from_samples(samples.mean(axis=1), rate, times_ms, (warp,))[0]
+
+
+def frame_features_from_samples(mono: np.ndarray, rate: int, times_ms: np.ndarray,
+                                warps=(1.0,)) -> list[np.ndarray]:
+    """Features per frequency warp. A warp w reads the spectrum as if every frequency were w times
+    higher (a formant shift by w), which is how the training data is augmented."""
     times = np.asarray(times_ms, dtype=np.float64)
     power, freqs = _spectra(mono, rate, times)
+    before_power = _spectra(mono, rate, times - CONTEXT_MS)[0]
+    after_power = _spectra(mono, rate, times + CONTEXT_MS)[0]
     total = power.sum(axis=1) + 1e-12
-    balance = (power[:, freqs < 400.0].sum(axis=1) - power[:, (freqs >= 800.0) & (freqs < 3000.0)].sum(axis=1)) / total
     level = 10.0 * np.log10(total)
     grid = np.arange(0.0, len(mono) / rate * 1000.0, 10.0)
     grid_power, _ = _spectra(mono, rate, grid)
     reference = np.percentile(10.0 * np.log10(grid_power.sum(axis=1) + 1e-12), 95) if len(grid) else 0.0
-    shape = _shape(power, freqs)
-    before = _shape(_spectra(mono, rate, times - CONTEXT_MS)[0], freqs)
-    after = _shape(_spectra(mono, rate, times + CONTEXT_MS)[0], freqs)
     relative = np.clip(level - reference, -60.0, 10.0) / 20.0
-    return np.column_stack((shape, before, after, balance, relative))
+    out = []
+    for warp in warps:
+        f = freqs * float(warp)
+        balance = (power[:, f < 400.0].sum(axis=1) - power[:, (f >= 800.0) & (f < 3000.0)].sum(axis=1)) / total
+        out.append(np.column_stack((_shape(power, f), _shape(before_power, f), _shape(after_power, f),
+                                    balance, relative)))
+    return out
 
 
 @lru_cache(maxsize=1)
@@ -88,7 +100,7 @@ def model_available() -> bool:
 
 def nasal_probability(wav_path: Path, times_ms: np.ndarray) -> np.ndarray:
     times = np.asarray(times_ms, dtype=np.float64)
-    return analysis_cache.cached("nasal_frame_v1", wav_path, (times.tobytes(),),
+    return analysis_cache.cached(PROFILE.stem, wav_path, (times.tobytes(),),
                                  lambda: _nasal_probability_uncached(wav_path, times))
 
 

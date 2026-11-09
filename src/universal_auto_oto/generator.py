@@ -183,7 +183,7 @@ DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v18"] = {
 }
 
 
-# v19: v18 + fitted nasal-frame probability in the emissions (profiles/nasal_frame_v1.json): nasal
+# v19: v18 + fitted nasal-frame probability in the emissions (profiles/nasal_frame_v2.json; v1 before 2026-11-09): nasal
 # states gain where murmur is likely and lose on vowels, vowel states lose on murmur. A vowel no longer
 # runs through the next m and pushes the rest of the list a syllable late. Off for VCV lists.
 DEVELOPMENT_ALIGNMENT_PROFILES["cvvc_slot_rhythm_v19"] = {

@@ -2024,7 +2024,7 @@ def _apply_nasal_murmur_emission(recording: RecordingSpec, evidence: AcousticEvi
     """scope "all": murmur cue on vowels and onset nasals plus the open-vowel cost on every nasal;
     "syllabic": only the open-vowel cost, only on nasals not followed by a vowel (a held ん);
     "hybrid": the murmur cue as in "all", the open-vowel cost only on the held nasals;
-    "model": the fitted nasal-frame probability p (nasal_frame_v1): every nasal state gets
+    "model": the fitted nasal-frame probability p (nasal_frame_v2, formant-warp augmented): every nasal state gets
     strength * (2p - 1), vowel states lose strength * max(0, 2p - 1)."""
     phones = [str(phone).casefold() for phone in recording.phones]
     onset_nasals = {i for i, phone in enumerate(phones)
